@@ -20,11 +20,14 @@ use crate::common::{assert_ok, commit_all, gat, init_repo_spawned, stdout};
 use crate::support::remote_url;
 
 #[test]
-fn release_artifact_version_flag_reports_a_version_and_exits_zero() {
+fn release_artifact_version_flag_reports_package_version_and_exits_zero() {
     let tmp = tempfile::tempdir().unwrap();
     let out = gat(tmp.path(), &["--version"]);
     assert_ok(&out, "gat --version");
-    assert!(stdout(&out).contains("gat"));
+    assert_eq!(
+        stdout(&out),
+        concat!("gat ", env!("CARGO_PKG_VERSION"), "\n")
+    );
 }
 
 #[test]

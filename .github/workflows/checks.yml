@@ -68,7 +68,9 @@ jobs:
           esac
       - name: Lint Unix installers
         if: runner.os == 'Linux'
-        run: shellcheck docs/install.sh tools/test-installers.sh
+        run: shellcheck docs/install.sh tools/test-installers.sh tools/check-linux-release.sh tools/test-linux-release.sh
+      - name: Linux release ABI check fixtures
+        run: bash tools/check-linux-release.sh --self-test
       - name: Unix installer fixtures
         run: bash tools/test-installers.sh "$INSTALLER_SHELL"
       # Enable once the v0.1.0 release and its assets are publicly downloadable.

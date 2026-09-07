@@ -17,7 +17,8 @@ SHA-256 checksum before installation. Use Git alongside Gat to commit metadata.
         ```
 
         Supports Apple silicon and Intel Macs, and ARM64 and x86_64 Linux
-        with glibc. For Alpine Linux, use a source build below.
+        including Alpine. On Linux, the installer selects the GNU build for
+        glibc 2.28 or newer and the static musl build otherwise.
       </Tab>
 
       <Tab title="Windows PowerShell">
@@ -69,11 +70,14 @@ Choose an option for a pinned version, custom location, or source build.
   <Accordion title="Installer requirements and recovery">
     On macOS/Linux, the installer needs POSIX `sh`, Bash 3.2+, `curl`, `tar`,
     `awk`, `grep`, `uname`, `mktemp`, `mkdir`, `rm`, `install`, `mv`, `cat`,
-    `sleep`, and `sha256sum` or `shasum`. Linux also requires `getconf`.
+    `sleep`, and `sha256sum` or `shasum`. Linux uses `getconf` when available
+    to detect glibc; missing or unrecognized detection selects static musl.
+    On Alpine, install the prerequisites with `apk add bash curl` if needed.
 
     Downloads need HTTPS access to GitHub and a working certificate store.
     The installer verifies and runs the new binary before replacing an existing
     installation. A failed download or compatibility check leaves it in place.
+    If the new binary cannot start, the installer also prints its startup error.
 
     The destination must be a regular file or absent, not a directory or symlink.
     On Windows, close running Gat processes if the executable is locked.
@@ -105,6 +109,39 @@ Choose an option for a pinned version, custom location, or source build.
   </Accordion>
 
   <Accordion
+    title="Choose a Linux libc build"
+    description="Use automatic selection or explicitly choose GNU or static musl."
+  >
+    `--libc auto` is the default. The installer prints its selection:
+
+    | Linux environment | Selected build |
+    | --- | --- |
+    | glibc 2.28 or newer | GNU |
+    | glibc older than 2.28 | Static musl |
+    | musl (including Alpine), or libc cannot be detected | Static musl |
+
+    GNU is the default on supported glibc systems. The musl executable includes
+    its C runtime and does not require a system glibc or musl installation.
+    Git, SSH when used, and CA certificates are still provided by your system.
+
+    To explicitly choose musl:
+
+    ```bash
+    curl -fsSL https://getgat.dev/install.sh | sh -s -- --libc musl
+    ```
+
+    `--libc gnu` explicitly selects GNU. Overrides still undergo the startup
+    check; selecting GNU does not make an incompatible binary runnable.
+    `--libc gnu` and `--libc musl` are Linux-only. Combine either with
+    `--version` to pin the release.
+
+    Older releases may lack musl assets or require a newer glibc. If the chosen
+    release has no asset for your target, the installer reports that and preserves
+    your installation. Choose a release that provides it or build from source;
+    the installer never silently substitutes another release or libc build.
+  </Accordion>
+
+  <Accordion
     title="Change the install directory"
     description="Install gat somewhere other than the default user-local bin directory."
   >
@@ -133,13 +170,15 @@ Choose an option for a pinned version, custom location, or source build.
     title="Download a release manually"
     description="Choose an archive yourself and verify it before installing."
   >
-    Every public release contains prebuilt archives for the complete supported
-    platform matrix:
+    The release workflow builds the following platform matrix. Check the assets
+    of a pinned release: older releases may not include every variant.
 
     | Platform | Architecture | Release target |
     | --- | --- | --- |
-    | Linux | x86_64 | `x86_64-unknown-linux-gnu` |
-    | Linux | ARM64 | `aarch64-unknown-linux-gnu` |
+    | Linux, glibc 2.28+ | x86_64 | `x86_64-unknown-linux-gnu` |
+    | Linux, glibc 2.28+ | ARM64 | `aarch64-unknown-linux-gnu` |
+    | Linux, static musl | x86_64 | `x86_64-unknown-linux-musl` |
+    | Linux, static musl | ARM64 | `aarch64-unknown-linux-musl` |
     | macOS | Intel | `x86_64-apple-darwin` |
     | macOS | Apple silicon | `aarch64-apple-darwin` |
     | Windows | AMD64 | `x86_64-pc-windows-msvc` |
@@ -153,7 +192,9 @@ Choose an option for a pinned version, custom location, or source build.
 
     <Tabs>
       <Tab title="macOS / Linux">
-        The example below shows Linux x86_64. Change `target` for your platform.
+        The example below shows Linux x86_64 with glibc 2.28+. For Alpine or
+        older glibc, use `x86_64-unknown-linux-musl`. Change the architecture
+        and platform as needed.
 
         ```bash
         tag=$(curl -fsSL https://api.github.com/repos/getgat-dev/gat/releases/latest \

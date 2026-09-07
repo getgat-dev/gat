@@ -141,6 +141,38 @@ not restate code. Rustdoc should document contracts and meaningful errors,
 panics, safety requirements, ownership, or side effects. Keep TODOs actionable
 and record historical rationale in an ADR rather than in code comments.
 
+## Linux release compatibility
+
+The release workflow pins Rust to the MSRV, cargo-zigbuild, and Zig. Linux GNU
+builds explicitly target glibc 2.28 on modern runners; Linux musl builds are
+static. Both variants are built for x86_64 and ARM64 and tested on native
+runners. macOS and Windows use the ordinary Cargo build.
+
+`tools/check-linux-release.sh` rejects GNU binaries requiring glibc symbols
+newer than 2.28 and musl binaries with an ELF interpreter or shared-library
+dependencies. It also checks the ELF class, byte order, and architecture.
+Its fixture tests run with `task test:install`.
+
+After packaging, the workflow runs the `release_artifact_` acceptance tests
+against the extracted executable on the runner and through
+`tools/test-linux-release.sh` in a baseline runtime container: Rocky Linux 8
+(glibc 2.28) for GNU, Alpine for musl. The existing Rust harness stays on the
+host; every Gat process runs inside the container against shared fixture paths.
+The runtime helper checks the candidate ABI before starting Docker. Only the
+temporary candidate/fixture directory is mounted into the container.
+To reproduce the container check locally (Docker and the Rust toolchain required):
+
+```sh
+bash tools/check-linux-release.sh /path/to/gat x86_64-unknown-linux-gnu 2.28
+bash tools/test-linux-release.sh /path/to/gat x86_64-unknown-linux-gnu 2.28
+```
+
+When changing the GNU baseline, update `GLIBC_VERSION` in the workflow,
+`MIN_GLIBC` in `docs/install.sh`, the GNU runtime image in
+`tools/release-runtime.Dockerfile`, and the installation documentation together.
+Release preparation checks that the installer and build baselines agree; runtime
+acceptance checks that the container provides that same glibc version.
+
 ## Issues
 
 Use the repository's
