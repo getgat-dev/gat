@@ -1,6 +1,6 @@
 [package]
 name = "gat"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 rust-version = "1.91"
 description = "Simple, fast, versioned large-file storage for git."
