@@ -141,7 +141,119 @@ not restate code. Rustdoc should document contracts and meaningful errors,
 panics, safety requirements, ownership, or side effects. Keep TODOs actionable
 and record historical rationale in an ADR rather than in code comments.
 
-## Linux release compatibility
+## Releases
+
+[The release workflow](.github/workflows/release.yml) builds and publishes
+GitHub Release archives. `task release` only builds an optimized local binary;
+it does not package, tag, or publish a release. The workflow does not publish
+crates to crates.io.
+
+### Prepare and validate
+
+1. Choose the next version and update the root package version in `Cargo.toml`.
+   Refresh `Cargo.lock` with Cargo (for example, `cargo check`) and commit both
+   files. The release tag must be exactly `v` followed by that package version.
+2. Run `task check` and `task docs:validate`. Run `task docs:generate` first if
+   CLI or configuration documentation changed. Merge the release preparation
+   through a PR and wait for the checks on the intended `main` commit.
+3. Review the draft release notes. [Release Drafter](.github/release-drafter.yml)
+   updates them on pushes to `main`, using PR labels to group changes and suggest
+   a version. Ensure the draft's tag and title match the chosen package version;
+   its suggested version does not update Cargo automatically. Leave the draft
+   unpublished so the release workflow can attach validated assets.
+4. Run the **Release** workflow manually on the intended commit's branch for a
+   complete build and packaging rehearsal. Manual runs and matching PR runs
+   validate artifacts but never publish. PR runs are triggered only by changes
+   to the paths listed in the release workflow; a version-only PR therefore
+   needs a manual rehearsal to exercise the release matrix.
+
+All builds use the pinned `RELEASE_RUST_VERSION`, which preparation checks
+against the root package's MSRV. Cargo builds use `--locked`. Keep the release
+Rust pin aligned whenever changing the MSRV.
+
+### Platforms and artifacts
+
+| Platform | Targets | Build and execution |
+| --- | --- | --- |
+| Linux GNU | `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` | Zig build targeting glibc 2.28; native runners and Rocky Linux 8 acceptance tests |
+| Linux musl | `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` | Static Zig build; native runners and Alpine acceptance tests |
+| macOS | `x86_64-apple-darwin`, `aarch64-apple-darwin` | Cargo build on ARM64 macOS; Intel executable tested through Rosetta 2 |
+| Windows | `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc` | Cargo build and acceptance tests on native x86_64 and ARM64 runners |
+
+Archives are named `gat-v<VERSION>-<TARGET>.tar.gz` on Linux/macOS and
+`gat-v<VERSION>-<TARGET>.zip` on Windows. Each contains a matching top-level
+folder with `gat` (or `gat.exe`), `README.md`, and `LICENSE`. The public release
+includes all eight archives and a combined `SHA256SUMS` file. Per-archive
+`.sha256` files are intermediate workflow artifacts.
+
+Every target extracts its candidate archive and runs the shared
+`release_artifact_` tests against that executable through `GAT_TEST_BIN`.
+These check the exact package version, help output, repository initialization
+and hooks, a file-remote push/pull round trip, and configuration isolation.
+Linux also undergoes the ABI and baseline-runtime checks described below.
+
+After every build succeeds, the workflow verifies the complete expected asset
+inventory and checksums. It then creates and verifies GitHub provenance
+attestations for every archive, checking the source commit and signing workflow.
+Fork PRs skip attestation because their tokens lack permission to write it;
+tag releases require the attestation job to succeed before publishing.
+
+To rerun acceptance locally, extract the candidate archive and use an absolute
+path to its executable. On Linux/macOS:
+
+```sh
+GAT_TEST_BIN=/absolute/path/to/gat cargo test --locked --test cli_integration release_artifact_
+```
+
+On Windows, in PowerShell:
+
+```powershell
+$env:GAT_TEST_BIN = 'C:\absolute\path\to\gat.exe'
+try {
+    cargo test --locked --test cli_integration release_artifact_
+} finally {
+    Remove-Item Env:GAT_TEST_BIN
+}
+```
+
+### Tag and publish
+
+After validation, tag the reviewed release commit and push that specific tag.
+For example, for a package version of `0.1.0`, from the intended commit:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The tag push starts a new release run. Preparation rejects a tag/package-version
+mismatch. Publication requires all builds, inventory verification, and
+attestations to succeed. The final job uploads the archives and `SHA256SUMS`
+and publishes the matching draft (or creates a release if no draft exists).
+Do not publish the draft manually to trigger builds: the trigger is the tag
+push, and the workflow refuses to modify an already public release.
+
+After completion, confirm the GitHub Release has every expected archive and
+`SHA256SUMS`, then smoke-test the pinned release with the Unix and PowerShell
+installers on the supported platforms. See [installation documentation](docs/installation.mdx)
+for pinned installation, manual checksum verification, and Linux libc selection.
+Installer fixture tests use local assets; they do not replace this check of the
+published downloads.
+
+### Recover from a failed release
+
+Inspect the first failed job before retrying. A transient runner, network, or
+upload failure can be retried on the same tag while its release remains
+unpublished. Workflow artifacts expire after seven days; rerun the builds if
+needed to recreate them. A manual workflow run remains a rehearsal and cannot
+complete publication for a failed tag push.
+
+If source or workflow changes are required, fix them through a PR and prepare
+a new version/tag. Keep existing release tags fixed. If a release is already
+public, ship corrections as a new version; the publishing guard prevents a
+rerun from replacing its assets.
+
+### Linux release compatibility
 
 The release workflow pins Rust to the MSRV, cargo-zigbuild, and Zig. Linux GNU
 builds explicitly target glibc 2.28 on modern runners; Linux musl builds are
