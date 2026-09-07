@@ -328,6 +328,8 @@ pub fn persist_finalized_with_proof(
         path: path.to_path_buf(),
         source: e.error,
     })?;
+    #[cfg(test)]
+    tests::after_publish(path);
     Ok(PublishedFile { proof })
 }
 
@@ -599,39 +601,52 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "same content");
     }
 
-    /// A deterministic publication race proves
-    /// `write_atomic_with_proof`'s returned [`PublishedFile::proof`] can
-    /// never be substituted by a concurrent writer's later replacement of
-    /// the destination. The proof is minted from the temp file itself
-    /// before the rename, so it is fixed at the moment this call captured
-    /// its own content -- not re-derived from whatever the destination
-    /// path happens to contain by the time this function returns. Many
-    /// concurrent publishers race to replace the same path throughout;
-    /// every single successful `write_atomic_with_proof` call must report
-    /// a proof whose size matches its own content's length, never another
-    /// racing writer's.
+    type AfterPublish = Box<dyn FnOnce(&Path)>;
+
+    thread_local! {
+        // Each test owns its callback; taking it before invocation also allows
+        // the replacement writer to use the same publication helper.
+        static AFTER_PUBLISH: std::cell::RefCell<Option<AfterPublish>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn after_publish(path: &Path) {
+        let callback = AFTER_PUBLISH.with(|slot| slot.borrow_mut().take());
+        if let Some(callback) = callback {
+            callback(path);
+        }
+    }
+
+    /// Force a replacement after the original rename but before its proof
+    /// returns. This tests the metadata race without saturating Windows rename
+    /// retries with unrelated publication contention.
     #[test]
     fn write_atomic_with_proof_never_reports_a_racing_writers_metadata() {
+        struct ClearHook;
+        impl Drop for ClearHook {
+            fn drop(&mut self) {
+                AFTER_PUBLISH.with(|slot| slot.borrow_mut().take());
+            }
+        }
+
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("f.txt");
-        let candidates: Vec<String> = (0..12).map(|i| "x".repeat(100 + i)).collect();
-
-        std::thread::scope(|s| {
-            for content in &candidates {
-                let path = &path;
-                s.spawn(move || {
-                    for _ in 0..20 {
-                        let published = write_atomic_with_proof(path, content).unwrap();
-                        assert_eq!(
-                            published.proof.size,
-                            content.len() as u64,
-                            "a proof must always describe the exact bytes this call \
-                             itself published, never a concurrently racing writer's"
-                        );
-                    }
-                });
-            }
+        let original = "original";
+        let replacement = "a different writer's longer replacement";
+        let _clear_hook = ClearHook;
+        AFTER_PUBLISH.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |path| {
+                write_atomic_with_proof(path, replacement).unwrap();
+            }));
         });
+
+        let published = write_atomic_with_proof(&path, original).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), replacement);
+        let current = crate::file_state::observe_regular_file_no_follow(&path).unwrap();
+        assert_eq!(current.size, replacement.len() as u64);
+        assert_eq!(published.proof.size, original.len() as u64);
+        assert_ne!(published.proof, current);
     }
 
     #[test]
