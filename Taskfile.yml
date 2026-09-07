@@ -90,6 +90,7 @@ tasks:
   test:install:
     desc: Test Unix installer checksums and failure recovery with local release fixtures
     cmds:
+      - bash tools/check-linux-release.sh --self-test
       - bash tools/test-installers.sh
 
   test:doc:

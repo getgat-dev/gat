@@ -141,6 +141,11 @@ not restate code. Rustdoc should document contracts and meaningful errors,
 panics, safety requirements, ownership, or side effects. Keep TODOs actionable
 and record historical rationale in an ADR rather than in code comments.
 
+## Releases
+
+See the [developer release guide](docs-dev/RELEASES.md) for preparation,
+validation, publishing, and recovery.
+
 ## Issues
 
 Use the repository's

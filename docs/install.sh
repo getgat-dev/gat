@@ -12,6 +12,9 @@ set -eu
 REPO="getgat-dev/gat"
 VERSION="${GAT_VERSION:-}"
 INSTALL_DIR="${GAT_INSTALL_DIR:-}"
+LIBC=auto
+# Keep aligned with the GNU release build and artifact checks.
+MIN_GLIBC=2.28
 
 # Official SemVer 2.0.0 grammar (https://semver.org), ERE form, without the
 # leading "v" (which is stripped and re-added separately).
@@ -42,12 +45,14 @@ assert_destination() {
 }
 
 usage() {
-  printf '%s\n' 'usage: install.sh [--version|-v <version>]
+  printf '%s\n' 'usage: install.sh [--version|-v <version>] [--libc auto|gnu|musl]
 
   --version, -v <version>   Install this exact gat release (e.g. 0.1.0 or
                              v0.1.0) instead of the latest release. Can also
                              be supplied via the GAT_VERSION environment
-                             variable.' >&2
+                             variable.
+  --libc auto|gnu|musl      Linux binary variant (default: auto). Auto uses
+                             GNU on glibc '"$MIN_GLIBC"'+, static musl otherwise.' >&2
   exit "${1:-1}"
 }
 
@@ -64,6 +69,15 @@ while [ $# -gt 0 ]; do
       [ -n "$VERSION" ] || err "invalid version: --version requires a non-empty argument"
       shift
       ;;
+    --libc)
+      [ $# -ge 2 ] || err "--libc requires auto, gnu, or musl"
+      LIBC="$2"
+      shift 2
+      ;;
+    --libc=*)
+      LIBC="${1#*=}"
+      shift
+      ;;
     -h | --help)
       usage 0
       ;;
@@ -73,6 +87,10 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+case "$LIBC" in
+  auto|gnu|musl) ;;
+  *) err "invalid --libc: expected auto, gnu, or musl" ;;
+esac
 
 if [ -z "$INSTALL_DIR" ]; then
   [ -n "${HOME:-}" ] || err "set HOME or GAT_INSTALL_DIR to choose an install directory"
@@ -97,15 +115,36 @@ arch="$(uname -m)"
 
 case "$os" in
   Linux)
-    need_cmd getconf || err "'getconf' is required to check Linux glibc compatibility"
-    libc="$(getconf GNU_LIBC_VERSION 2>/dev/null)" || libc=""
-    case "$libc" in
-      glibc\ *) ;;
-      *) err "Linux prebuilt releases require glibc; build from source on other libc implementations" ;;
-    esac
-    platform="unknown-linux-gnu"
+    if [ "$LIBC" = auto ]; then
+      libc="$(getconf GNU_LIBC_VERSION 2>/dev/null)" || libc=""
+      # Treat absent, failed, or unrecognized detection as unknown. Never
+      # compare versions lexically (2.9 is older than 2.28).
+      glibc_version="$(printf '%s\n' "$libc" | awk '
+        NR == 1 && /^glibc [0-9]+\.[0-9]+$/ { version = $2; valid = 1; next }
+        { valid = 0 }
+        END { if (valid) print version }
+      ')"
+      LIBC=musl
+      if [ -n "$glibc_version" ]; then
+        if awk -v actual="$glibc_version" -v minimum="$MIN_GLIBC" 'BEGIN {
+          split(actual, a, "."); split(minimum, m, ".")
+          exit !(a[1] > m[1] || (a[1] == m[1] && a[2] >= m[2]))
+        }'; then
+          LIBC=gnu
+        fi
+        echo "Detected glibc $glibc_version; selecting $LIBC build."
+      else
+        echo "Could not detect glibc; selecting static musl build."
+      fi
+    else
+      echo "Selecting $LIBC build (--libc override)."
+    fi
+    platform="unknown-linux-$LIBC"
     ;;
-  Darwin) platform="apple-darwin" ;;
+  Darwin)
+    [ "$LIBC" = auto ] || err "--libc gnu/musl is only supported on Linux"
+    platform="apple-darwin"
+    ;;
   *) err "unsupported operating system: $os (see https://getgat.dev/installation for other options)" ;;
 esac
 
@@ -163,9 +202,8 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-echo "Downloading gat $tag for $target..."
-fetch "$base_url/$archive" -o "$workdir/$archive" \
-  || err "failed to download $archive from release $tag (is $target a supported target, and does $tag exist?)"
+# Inspect the release's own asset inventory first. Older pinned releases may
+# not offer musl; do not substitute a different version or an incompatible GNU asset.
 fetch "$base_url/SHA256SUMS" -o "$workdir/SHA256SUMS" \
   || err "failed to download checksum for $archive"
 
@@ -179,9 +217,17 @@ awk -v archive="$archive" '
     if (length(hash) != 64 || hash ~ /[^0-9a-fA-F]/) invalid = 1
     print
   }
-  END { if (count != 1 || invalid) exit 1 }
+  END { if (count > 1 || invalid) exit 1 }
 ' "$workdir/SHA256SUMS" > "$workdir/$archive.sha256" \
-  || err "expected exactly one valid checksum for $archive in SHA256SUMS"
+  || err "failed to read exactly one valid checksum for $archive from SHA256SUMS"
+# An empty successful selection means an absent asset. Keep parser/I/O errors
+# separate: awk exit codes are not an asset-availability protocol.
+[ -s "$workdir/$archive.sha256" ] \
+  || err "release $tag does not provide $target; choose a release with this build or build from source (https://getgat.dev/installation); existing installation preserved"
+
+echo "Downloading gat $tag for $target..."
+fetch "$base_url/$archive" -o "$workdir/$archive" \
+  || err "failed to download $archive from release $tag"
 
 (
   cd "$workdir" || exit 1
@@ -236,7 +282,10 @@ probe_status=0
 wait "$probe_pid" || probe_status=$?
 probe_pid=""
 [ "$probe_timed_out" = false ] || err "gat startup timed out; existing installation preserved"
-[ "$probe_status" -eq 0 ] || err "downloaded gat cannot run on this system; existing installation preserved"
+if [ "$probe_status" -ne 0 ]; then
+  cat "$stagedir/stderr" >&2
+  err "downloaded gat cannot run on this system; existing installation preserved"
+fi
 [ "$(cat "$stagedir/version")" = "gat $core" ] \
   || err "downloaded gat reported an unexpected version; existing installation preserved"
 assert_destination

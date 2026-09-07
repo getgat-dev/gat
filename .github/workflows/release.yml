@@ -15,6 +15,10 @@ on:
   pull_request:
     paths:
       - .github/workflows/release.yml
+      - tools/check-linux-release.sh
+      - tools/test-linux-release.sh
+      - tools/release-runtime.Dockerfile
+      - tests/cli_integration/release_artifact.rs
   workflow_dispatch:
 
 concurrency:
@@ -29,7 +33,11 @@ env:
   # `rust-version` in Cargo.toml so a release build never silently drifts
   # onto a different compiler than a moving `stable` channel would give.
   RELEASE_RUST_VERSION: "1.91.0"
-  TARGETS: "x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-msvc aarch64-pc-windows-msvc"
+  # Keep the GNU baseline aligned with docs/install.sh and the runtime image.
+  GLIBC_VERSION: "2.28"
+  CARGO_ZIGBUILD_VERSION: "0.23.4"
+  ZIG_VERSION: "0.14.1"
+  TARGETS: "x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-msvc aarch64-pc-windows-msvc"
 
 jobs:
   prepare:
@@ -62,6 +70,11 @@ jobs:
             echo "::error::release toolchain $RELEASE_RUST_VERSION does not match MSRV $msrv"
             exit 1
           fi
+          installer_glibc="$(sed -n 's/^MIN_GLIBC=//p' docs/install.sh)"
+          if [ "$GLIBC_VERSION" != "$installer_glibc" ]; then
+            echo "::error::release glibc baseline $GLIBC_VERSION differs from installer baseline $installer_glibc"
+            exit 1
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
@@ -74,6 +87,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Zig targets the pinned libc independently of the runner's libc.
+          # Native runners also execute every packaged artifact on real hardware.
           # Linux x86_64 → x86_64-unknown-linux-gnu
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
@@ -81,6 +96,10 @@ jobs:
           # the packaged binary can also be smoke-tested on real hardware)
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
           # Darwin x86_64 → x86_64-apple-darwin (cross-built from the arm64
           # runner; Rosetta 2 is preinstalled so the smoke test still runs)
           - os: macos-latest
@@ -107,9 +126,35 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          key: release-${{ matrix.target }}
+          # Native dependencies must be rebuilt when Zig or the libc baseline changes.
+          key: release-${{ matrix.target }}-${{ env.CARGO_ZIGBUILD_VERSION }}-${{ env.ZIG_VERSION }}-${{ env.GLIBC_VERSION }}
 
-      - run: cargo build --release --locked --target ${{ matrix.target }} --bin gat
+      - name: Install pinned Linux build tools
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/zigbuild"
+          "$RUNNER_TEMP/zigbuild/bin/python" -m pip install \
+            "cargo-zigbuild==$CARGO_ZIGBUILD_VERSION" "ziglang==$ZIG_VERSION"
+          echo "$RUNNER_TEMP/zigbuild/bin" >> "$GITHUB_PATH"
+
+      - name: Build Linux with a fixed libc baseline
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          build_target="$TARGET"
+          case "$TARGET" in
+            *-gnu) build_target="$TARGET.$GLIBC_VERSION" ;;
+          esac
+          cargo zigbuild --release --locked --target "$build_target" --bin gat
+
+      - name: Build macOS and Windows
+        if: runner.os != 'Linux'
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin gat
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
@@ -148,13 +193,22 @@ jobs:
         # this behavior in Bash.
         if: runner.os != 'Windows'
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
           workdir="$(mktemp -d)"
+          trap 'rm -rf "$workdir"' EXIT
           tar xzf "$ASSET" -C "$workdir"
           bin="$workdir/$STAGING/gat"
           chmod +x "$bin"
+          if [ "$RUNNER_OS" = Linux ]; then
+            bash tools/check-linux-release.sh "$bin" "$TARGET" "$GLIBC_VERSION"
+          fi
           GAT_TEST_BIN="$bin" cargo test --locked --test cli_integration release_artifact_
+          if [ "$RUNNER_OS" = Linux ]; then
+            bash tools/test-linux-release.sh "$bin" "$TARGET" "$GLIBC_VERSION"
+          fi
 
       - name: Release-acceptance test packaged binary (Windows)
         if: runner.os == 'Windows'
@@ -194,7 +248,9 @@ jobs:
           set -euo pipefail
           tag="${{ needs.prepare.outputs.tag }}"
           missing=0
+          expected_files=0
           for target in $TARGETS; do
+            expected_files=$((expected_files + 2))
             case "$target" in
               *windows*) ext=zip ;;
               *) ext=tar.gz ;;
@@ -206,10 +262,20 @@ jobs:
               missing=1
               continue
             fi
-            (cd dist && sha256sum -c "$(basename "$checksum")")
+            # Bind each checksum to this archive, rejecting extra or redirected records.
+            expected="$(cd dist && sha256sum "$(basename "$archive")")"
+            if [ "$(cat "$checksum")" != "$expected" ]; then
+              echo "::error::invalid checksum record for target $target"
+              exit 1
+            fi
           done
           if [ "$missing" -ne 0 ]; then
             echo "::error::release target matrix is incomplete; refusing to publish"
+            exit 1
+          fi
+          actual_files="$(find dist -mindepth 1 -maxdepth 1 | wc -l)"
+          if [ "$actual_files" -ne "$expected_files" ]; then
+            echo "::error::unexpected files in release artifacts; refusing to publish"
             exit 1
           fi
 

@@ -17,7 +17,10 @@ if [ "$FIXTURE_SCENARIO" = descendant ]; then
   "$REAL_SLEEP" 60 >/dev/null 2>&1 &
   printf '%s\n' "$!" > "$FIXTURE_DIR/child-pid"
 fi
-[ "$FIXTURE_SCENARIO" != incompatible ] || exit 1
+if [ "$FIXTURE_SCENARIO" = incompatible ]; then
+  printf 'loader: GLIBC_2.39 not found\n' >&2
+  exit 1
+fi
 if [ "$FIXTURE_SCENARIO" = interrupted_probe ]; then
   printf '%s\n' "$$" > "$FIXTURE_DIR/probe-pid"
   kill -TERM "$(ps -o ppid= -p "$PPID" | tr -d " ")"
@@ -58,7 +61,7 @@ done
 [ "$retry_budget" = 360 ]
 [ -n "$url" ]
 [ -n "$output" ]
-printf 'request\n' >> "$FIXTURE_DIR/requests"
+printf '%s\n' "$url" >> "$FIXTURE_DIR/requests"
 if [ "$url" = https://github.com/getgat-dev/gat/releases/latest ]; then
   [ "$output" = /dev/null ]
   [ "$write_format" = '%{url_effective}' ]
@@ -73,8 +76,15 @@ fi
 case "$url" in
   */SHA256SUMS)
     [ "$FIXTURE_SCENARIO" != checksum_download_failure ] || exit 22
-    cp "$FIXTURE_DIR/SHA256SUMS" "$output" ;;
+    if [ "$FIXTURE_SCENARIO" = checksum_read_failure ]; then
+      # Simulate losing the downloaded file before awk opens it (exit status 2).
+      cp "$FIXTURE_DIR/SHA256SUMS" "$output"
+      rm "$output"
+    else
+      cp "$FIXTURE_DIR/SHA256SUMS" "$output"
+    fi ;;
   */gat-*.tar.gz)
+    [ "${url##*/}" = "$FIXTURE_ARCHIVE" ] || { echo "wrong target requested" >&2; exit 1; }
     if [ "$FIXTURE_SCENARIO" = download_failure ]; then
       printf 'partial download' > "$output"
       exit 18
@@ -103,8 +113,17 @@ esac
 MOCK
 cat > "$fixture/bin/getconf" <<'MOCK'
 #!/bin/sh
-[ "$FIXTURE_SCENARIO" != non_glibc ] || exit 1
-echo 'glibc 2.39'
+case "$FIXTURE_SCENARIO" in
+  non_glibc|musl_arm64|old_release_musl) exit 1 ;;
+  glibc_minimum) echo 'glibc 2.28' ;;
+  glibc_old|override_gnu_old) echo 'glibc 2.27' ;;
+  glibc_single_digit) echo 'glibc 2.9' ;;
+  glibc_future_minor) echo 'glibc 2.100' ;;
+  glibc_future_major) echo 'glibc 3.0' ;;
+  glibc_malformed) echo 'glibc unknown' ;;
+  glibc_multiline) printf 'glibc 2.39\nglibc 2.39\n' ;;
+  *) echo 'glibc 2.39' ;;
+esac
 MOCK
 REAL_INSTALL="$(command -v install)"
 REAL_MV="$(command -v mv)"
@@ -150,9 +169,11 @@ for checker in sha256sum shasum; do
   fi
   ln -s "$(command -v "$checker")" "$fixture/bin/$checker"
   for scenario in valid startup_env descendant hangup missing duplicate malformed short_hash malformed_duplicate mismatch similar_name crlf uppercase_hash \
-    upgrade latest latest_failure latest_bad_url latest_bad_tag download_failure checksum_download_failure \
+    upgrade latest latest_failure latest_bad_url latest_bad_tag download_failure checksum_download_failure checksum_read_failure \
     invalid_archive missing_payload incompatible hung_payload wrong_version copy_failure rename_failure interrupted interrupted_probe directory symlink dangling_symlink fifo non_glibc \
-    multiline_prefix multiline_suffix trailing_newline carriage_return double_prefix empty_version empty_version_equals env_version relative_path macos_arm64 macos_x86_64 linux_arm64 unsupported_os unsupported_arch; do
+    multiline_prefix multiline_suffix trailing_newline carriage_return double_prefix empty_version empty_version_equals env_version relative_path macos_arm64 macos_x86_64 linux_arm64 unsupported_os unsupported_arch \
+    glibc_minimum glibc_old glibc_single_digit glibc_future_minor glibc_future_major glibc_malformed glibc_multiline missing_getconf musl_arm64 \
+    override_musl override_gnu_old explicit_auto invalid_libc empty_libc empty_libc_equals missing_libc macos_libc old_release_musl; do
     export FIXTURE_SCENARIO="$scenario"
     : > "$fixture/requests"
     target='x86_64-unknown-linux-gnu'
@@ -160,9 +181,13 @@ for checker in sha256sum shasum; do
       macos_arm64) target='aarch64-apple-darwin' ;;
       macos_x86_64) target='x86_64-apple-darwin' ;;
       linux_arm64) target='aarch64-unknown-linux-gnu' ;;
+      musl_arm64) target='aarch64-unknown-linux-musl' ;;
+      non_glibc|glibc_old|glibc_single_digit|glibc_malformed|glibc_multiline|missing_getconf|override_musl|old_release_musl)
+        target='x86_64-unknown-linux-musl' ;;
     esac
     staging="gat-v0.1.0+build.1-$target"
     archive="$staging.tar.gz"
+    export FIXTURE_ARCHIVE="$archive"
     mkdir -p "$fixture/$staging"
     cp "$fixture/gat" "$fixture/$staging/gat"
     if [ "$scenario" = invalid_archive ]; then
@@ -181,6 +206,9 @@ for checker in sha256sum shasum; do
     printf '%s  unrelated.tar.gz\n' "$hash" > "$fixture/SHA256SUMS"
     case "$scenario" in
       missing) : ;;
+      old_release_musl)
+        # An older release offers GNU but no musl: selection must not fall back.
+        printf '%s  gat-v0.1.0+build.1-x86_64-unknown-linux-gnu.tar.gz\n' "$hash" ;;
       duplicate) printf '%s  %s\n%s  %s\n' "$hash" "$archive" "$hash" "$archive" ;;
       malformed) printf '%064d  %s\n' 0 "$archive" | sed 's/^0/z/' ;;
       short_hash) printf 'abc  %s\n' "$archive" ;;
@@ -204,12 +232,19 @@ for checker in sha256sum shasum; do
     esac
     expect_success=false
     case "$scenario" in
-      valid|startup_env|descendant|crlf|uppercase_hash|upgrade|latest|env_version|relative_path|macos_arm64|macos_x86_64|linux_arm64) expect_success=true ;;
+      valid|startup_env|descendant|crlf|uppercase_hash|upgrade|latest|env_version|relative_path|macos_arm64|macos_x86_64|linux_arm64|non_glibc|glibc_minimum|glibc_old|glibc_single_digit|glibc_future_minor|glibc_future_major|glibc_malformed|glibc_multiline|missing_getconf|musl_arm64|override_musl|override_gnu_old|explicit_auto) expect_success=true ;;
     esac
     set -- --version '0.1.0+build.1'
     export GAT_VERSION=''
     case "$scenario" in
       latest*) set -- ;;
+      override_musl|macos_libc) set -- "$@" --libc musl ;;
+      override_gnu_old) set -- "$@" --libc=gnu ;;
+      explicit_auto) set -- "$@" --libc auto ;;
+      invalid_libc) set -- "$@" --libc invalid ;;
+      empty_libc) set -- "$@" --libc '' ;;
+      empty_libc_equals) set -- "$@" --libc= ;;
+      missing_libc) set -- "$@" --libc ;;
       multiline_prefix) set -- --version $'bad\n0.1.0' ;;
       multiline_suffix) set -- --version $'0.1.0\n../../bad' ;;
       trailing_newline) set -- --version $'0.1.0\n' ;;
@@ -227,6 +262,9 @@ for checker in sha256sum shasum; do
     if [ "$scenario" = startup_env ]; then
       startup_file="$fixture/startup.sh"
       printf '%s\n' 'printf "startup hook\n"' > "$startup_file"
+    fi
+    if [ "$scenario" = missing_getconf ]; then
+      mv "$fixture/bin/getconf" "$fixture/getconf"
     fi
     if (cd "$fixture" && BASH_ENV="$startup_file" PATH="$fixture/bin" GAT_INSTALL_DIR="$install_override" "$installer_shell" \
       "$repo_dir/docs/install.sh" "$@") > "$fixture/output" 2>&1; then
@@ -251,6 +289,12 @@ for checker in sha256sum shasum; do
         *) test "$(cat "$destination/gat")" = 'old binary' ;;
       esac
     fi
+    if [ "$scenario" = missing_getconf ]; then
+      mv "$fixture/getconf" "$fixture/bin/getconf"
+    fi
+    if [ "$expect_success" = true ]; then
+      grep -Fq "Downloading gat v0.1.0+build.1 for $target" "$fixture/output"
+    fi
     case "$scenario" in
       multiline_*|trailing_newline|carriage_return|double_prefix|empty_version|empty_version_equals)
         grep -q 'invalid version' "$fixture/output"
@@ -258,17 +302,34 @@ for checker in sha256sum shasum; do
       directory|symlink|dangling_symlink|fifo)
         grep -q 'destination must be a regular file or absent' "$fixture/output"
         test ! -s "$fixture/requests" ;;
-      non_glibc) grep -q 'require glibc' "$fixture/output"; test ! -s "$fixture/requests" ;;
-      missing|duplicate|malformed|short_hash|malformed_duplicate|mismatch|similar_name)
-        grep -Eq 'expected exactly one valid checksum|checksum verification failed' "$fixture/output" ;;
+      invalid_libc|empty_libc|empty_libc_equals|missing_libc)
+        grep -q -- '--libc' "$fixture/output"; test ! -s "$fixture/requests" ;;
+      macos_libc)
+        grep -q 'only supported on Linux' "$fixture/output"; test ! -s "$fixture/requests" ;;
+      missing|similar_name|old_release_musl)
+        grep -q "does not provide $target" "$fixture/output"
+        grep -q 'build from source' "$fixture/output"
+        test "$(wc -l < "$fixture/requests" | tr -d ' ')" = 1 ;;
+      duplicate|malformed|short_hash|malformed_duplicate|mismatch)
+        grep -Eq 'failed to read exactly one valid checksum|checksum verification failed' "$fixture/output" ;;
       latest_failure|latest_bad_url) grep -q 'could not resolve' "$fixture/output" ;;
       download_failure|checksum_download_failure) grep -q 'failed to download' "$fixture/output" ;;
+      checksum_read_failure)
+        grep -q 'failed to read exactly one valid checksum' "$fixture/output"
+        if grep -q 'does not provide' "$fixture/output"; then
+          echo 'FAIL: checksum read error was reported as a missing asset'
+          exit 1
+        fi
+        test "$(wc -l < "$fixture/requests" | tr -d ' ')" = 1 ;;
       latest_bad_tag) grep -q 'invalid version' "$fixture/output" ;;
       invalid_archive) grep -q 'failed to extract' "$fixture/output" ;;
       missing_payload) grep -q 'archive does not contain a regular gat executable' "$fixture/output" ;;
       hung_payload) grep -q 'gat startup timed out' "$fixture/output" ;;
       wrong_version) grep -q 'reported an unexpected version' "$fixture/output" ;;
-      incompatible) grep -q 'downloaded gat cannot run' "$fixture/output" ;;
+      incompatible)
+        grep -q 'downloaded gat cannot run' "$fixture/output"
+        grep -q 'loader: GLIBC_2.39 not found' "$fixture/output"
+        test "$(wc -l < "$fixture/requests" | tr -d ' ')" = 2 ;;
       copy_failure) grep -q 'failed to stage gat' "$fixture/output" ;;
       rename_failure) grep -q 'failed to replace gat' "$fixture/output" ;;
       hangup) test "$installer_status" -eq 129 ;;
