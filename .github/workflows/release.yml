@@ -5,9 +5,9 @@ name: Release
 # only after validation and asset uploads succeed.
 # The tag is *not* published as a public GitHub Release until every
 # supported target has built, been packaged, checksummed, and passed the
-# `release_artifact_` acceptance subset (ADR 0020, ADR 0037) against the
-# exact packaged bytes. Only the final `publish` job is granted
-# `contents: write`; every other job is read-only.
+# `release_artifact_` acceptance subset against the exact packaged bytes.
+# Only the final `publish` job is granted `contents: write`; every
+# other job is read-only.
 on:
   push:
     tags: ["v*.*.*"]
@@ -142,7 +142,7 @@ jobs:
 
       - name: Release-acceptance test packaged binary (Unix)
         # Runs the `release_artifact_`-prefixed subset of
-        # `tests/cli_integration.rs` (ADR 0020, ADR 0037) against the exact
+        # `tests/cli_integration.rs` against the exact
         # executable extracted from this target's candidate archive, by
         # pointing `GAT_TEST_BIN` at it -- not a hand-written duplicate of
         # this behavior in Bash.

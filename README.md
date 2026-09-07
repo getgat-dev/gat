@@ -13,9 +13,13 @@ merge/pull, and rebase/amend.
 
 ## Install
 
+**Linux / macOS**
+
 ```bash
 curl -fsSL https://getgat.dev/install.sh | sh
 ```
+
+**Windows (PowerShell)**
 
 ```powershell
 & ([scriptblock]::Create((irm https://getgat.dev/install.ps1)))
@@ -48,6 +52,8 @@ gat push
 ```
 
 ## Docs
+
+Open the documentation at **[getgat.dev](https://getgat.dev/)**.
 
 - [Quickstart](docs/quickstart.mdx) — track, push, and pull your first file
 - [Installation](docs/installation.mdx) — prerequisites and setup
