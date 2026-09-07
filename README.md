@@ -58,6 +58,7 @@ Open the documentation at **[getgat.dev](https://getgat.dev/)**.
 - [Quickstart](docs/quickstart.mdx) — track, push, and pull your first file
 - [Installation](docs/installation.mdx) — prerequisites and setup
 - [Set up a remote](docs/set-up-a-remote.mdx) — prerequisites and setup
+- [Gat MCP server](docs/guides/use-gat-mcp.mdx) — connect your AI tool to the docs
 - [Commands](docs/commands) — reference, one page per subcommand
 
 ## Contributing
