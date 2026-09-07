@@ -1,0 +1,170 @@
+---
+title: "Use Gat MCP in AI tools"
+description: "Connect your AI assistant to the gat documentation with MCP."
+---
+
+The gat documentation provides a Model Context Protocol (MCP) server. Connect
+your AI assistant to search the docs for help with commands, storage
+configuration, and workflows.
+
+## Connect your assistant
+
+Each tool connects to the same remote MCP server:
+
+```text MCP server URL
+https://getgat.dev/mcp
+```
+
+<Tabs sync={false}>
+  <Tab title="Claude">
+    <Steps>
+      <Step title="Add a custom connector">
+        Open **Customize → Connectors** in Claude, then choose **+ → Add
+        custom connector**. Enter `gat` as the name and
+        `https://getgat.dev/mcp` as the remote MCP server URL, then click **Add**.
+
+        For a managed workspace, an organization owner may need to add the
+        connector. See [Claude's custom connector setup](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)
+        for account requirements.
+      </Step>
+      <Step title="Enable it in a conversation">
+        In a chat, open **+ → Connectors** and enable `gat`. Ask Claude to
+        search the gat documentation using one of the prompts below.
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="Claude Code">
+    <Steps>
+      <Step title="Register the server">
+        Run this in your terminal to make the server available across projects:
+
+        ```bash
+        claude mcp add --transport http --scope user gat https://getgat.dev/mcp
+        ```
+      </Step>
+      <Step title="Check the connection">
+        Start Claude Code and run `/mcp` to view the server's status and tools.
+        Then ask it to search the gat docs.
+      </Step>
+    </Steps>
+
+    See [Claude Code's MCP documentation](https://code.claude.com/docs/en/mcp)
+    for configuration scopes and server management.
+  </Tab>
+  <Tab title="Codex">
+    <Steps>
+      <Step title="Register the server">
+        Run this in your terminal:
+
+        ```bash
+        codex mcp add gat --url https://getgat.dev/mcp
+        ```
+
+        <Accordion title="Configure it manually instead">
+          Add this entry to `~/.codex/config.toml`:
+
+          ```toml
+          [mcp_servers.gat]
+          url = "https://getgat.dev/mcp"
+          ```
+        </Accordion>
+      </Step>
+      <Step title="Check the connection">
+        Start a new Codex CLI session and run `/mcp` to see active servers.
+        Ask Codex to use `gat` to search the documentation.
+      </Step>
+    </Steps>
+
+    See [Codex's MCP documentation](https://developers.openai.com/codex/mcp)
+    for IDE setup and configuration options.
+  </Tab>
+  <Tab title="Cursor">
+    <Steps>
+      <Step title="Add the configuration">
+        Create or edit `.cursor/mcp.json` in your project. Add `gat` to the
+        `mcpServers` object, preserving any existing servers:
+
+        ```json .cursor/mcp.json
+        {
+          "mcpServers": {
+            "gat": {
+              "url": "https://getgat.dev/mcp"
+            }
+          }
+        }
+        ```
+
+        To use the server across projects, put the configuration in
+        `~/.cursor/mcp.json` instead.
+      </Step>
+      <Step title="Use it in Agent">
+        Open Cursor's MCP settings and check that `gat` is available. In an
+        Agent conversation, ask it to search the gat documentation and approve
+        the tool call when prompted.
+      </Step>
+    </Steps>
+
+    See [Cursor's MCP documentation](https://cursor.com/docs/mcp)
+    for configuration and tool controls.
+  </Tab>
+  <Tab title="VS Code / Copilot">
+    <Steps>
+      <Step title="Add the workspace server">
+        Create or edit `.vscode/mcp.json` in your project. Add `gat` to the
+        `servers` object, preserving any existing servers:
+
+        ```json .vscode/mcp.json
+        {
+          "servers": {
+            "gat": {
+              "type": "http",
+              "url": "https://getgat.dev/mcp"
+            }
+          }
+        }
+        ```
+      </Step>
+      <Step title="Start the server and use it in chat">
+        Run **MCP: List Servers** from the Command Palette, select `gat`, and
+        start it. Confirm trust if prompted. Open Copilot Chat in Agent mode
+        and ask it to search the gat documentation.
+      </Step>
+    </Steps>
+
+    See [VS Code's MCP documentation](https://code.visualstudio.com/docs/agent-customization/mcp-servers)
+    for server controls and troubleshooting.
+  </Tab>
+</Tabs>
+
+<Tip>
+  For another MCP client, add a remote HTTP server named `gat` with the URL
+  above. The settings format depends on the client.
+</Tip>
+
+## Ask about gat
+
+Try asking your assistant:
+
+- “How do I set up an S3 remote with gat?”
+- “How do I restore large files after switching branches?”
+- “How do I choose which files to push?”
+
+Ask it to use the gat documentation and link to the relevant pages so you can
+review the commands and options.
+
+## Explore the documentation
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Track, upload, and restore your first file.
+  </Card>
+  <Card title="Set up a remote" icon="cloud" href="/set-up-a-remote">
+    Connect object storage or a local directory.
+  </Card>
+  <Card title="Automatic sync" icon="arrows-rotate" href="/concepts/automatic-sync">
+    Restore working files after Git operations.
+  </Card>
+  <Card title="Path selection" icon="filter" href="/concepts/path-selection">
+    Choose which files to transfer and restore.
+  </Card>
+</CardGroup>

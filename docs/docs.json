@@ -53,10 +53,11 @@
         "group": "Guides",
         "icon": "graduation-cap",
         "pages": [
-          "guides/improving-performance",
+          "guides/use-gat-mcp",
           "guides/branching-and-merging",
-          "guides/using-multiple-remotes",
           "guides/consuming-gat-assets",
+          "guides/using-multiple-remotes",
+          "guides/improving-performance",
           "guides/migrating-from-git-lfs",
           "guides/migrating-from-dvc"
         ]
