@@ -1,0 +1,144 @@
+[package]
+name = "gat"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.91"
+description = "Simple, fast, versioned large-file storage for git."
+license = "Apache-2.0"
+homepage = "https://getgat.dev"
+repository = "https://github.com/getgat-dev/gat"
+keywords = ["git", "git-lfs", "large-files", "object-storage", "version-control"]
+categories = ["command-line-utilities", "development-tools", "filesystem"]
+
+[workspace]
+# Developer generators are workspace members so locked workspace checks cover
+# them, but they are omitted from default-members so ordinary builds compile
+# only the product and its test-support crates.
+members = ["test-support-git", "test-support-gat", "gat-core", "gat-io", "gat-engine", "gat-command", "tools"]
+default-members = [".", "test-support-git", "test-support-gat", "gat-core", "gat-io", "gat-engine", "gat-command"]
+
+[lib]
+name = "gat"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gat"
+path = "src/main.rs"
+
+# Compile-check the reusable benchmark fixtures without committing any
+# performance scenario to the repository.
+[[bench]]
+name = "benchmark_support"
+harness = false
+
+[dependencies]
+gat-core = { path = "gat-core" }
+gat-engine = { path = "gat-engine" }
+gat-command = { path = "gat-command" }
+clap = { version = "4.6", features = ["derive", "wrap_help"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time"] }
+rayon = "1.12"
+thiserror = "2.0"
+indicatif = "0.18"
+anstream = "1.0"
+anstyle = "1.0"
+terminal_size = "0.4"
+unicode-width = "0.2"
+# Serializes typed config-list outcomes at the root machine-output boundary;
+# physical gat.yaml persistence remains owned separately by gat-io.
+yaml_serde = "0.10"
+# Parses scp-like Git locations for root-owned fail-closed presentation
+# redaction without importing the physical gat-io Git implementation.
+gix-url = "0.38"
+# Parses and safely rewrites standard URI userinfo, queries, and fragments in
+# root-owned diagnostics and command output.
+url = "2.5"
+
+[dev-dependencies]
+# Cross-crate fixtures and feature-gated instrumentation used by root
+# integration tests. None of these edges are present in the shipped binary.
+test-support-git = { path = "test-support-git" }
+test-support-gat = { path = "test-support-gat" }
+gat-core = { path = "gat-core", features = ["test-support"] }
+gat-io = { path = "gat-io", features = ["test-support"] }
+gat-engine = { path = "gat-engine", features = ["test-support"] }
+gat-command = { path = "gat-command", features = ["test-support"] }
+
+# Supports temporary local Criterion targets composed from
+# benches/benchmark_support.rs. The repository commits no benchmark scenarios.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+tempfile = "3.27"
+
+# Direct dependencies of root tests and characterization cases.
+blake3 = "1.8"
+fs2 = "0.4"
+gix = { version = "0.87", default-features = false, features = ["index", "attributes", "excludes", "dirwalk", "revision", "sha1", "sha256", "blocking-network-client", "blocking-http-transport-reqwest-rust-tls", "worktree-mutation"] }
+opendal = { version = "0.58", features = ["services-s3", "services-azblob", "services-gcs", "services-oss", "services-fs", "blocking"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde_json = "1.0"
+
+# Only used in `src/output/progress.rs`'s tests, to measure terminal
+# display width the same way indicatif itself does (it already depends
+# on this crate internally for exactly that purpose).
+console = "0.16"
+# `src/output/progress.rs`'s resize regression tests back indicatif's
+# `ProgressDrawTarget::term_like_with_hz` with a `vt100`-driven fake
+# terminal (not indicatif's own fixed-width `InMemoryTerm`, so no
+# extra indicatif feature is needed beyond the main dependency above)
+# to actually resize a real VT100 terminal emulator mid-test.
+vt100 = "0.16"
+
+[lints]
+workspace = true
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+# Keep a coherent opening contract together instead of splitting it to meet a length limit.
+too_long_first_doc_paragraph = "allow"
+# Document meaningful failure contracts without repeating typed errors on every Result API.
+missing_errors_doc = "allow"
+# Keep cohesive workflows together; line count alone does not justify extracting helpers.
+too_many_lines = "allow"
+# Use if let or Option combinators according to which makes the control flow clearer.
+option_if_let_else = "allow"
+# Keep locally bounded numeric casts readable; range guarantees belong at conversion sites.
+cast_possible_wrap = "allow"
+# Separate identical arms when they express distinct domain cases or make coverage clearer.
+match_same_arms = "allow"
+# Feature names should describe their purpose consistently across crates, even with shared words.
+redundant_feature_names = "allow"
+# Independent configuration flags and outcome facts are clearer as named booleans.
+struct_excessive_bools = "allow"
+# Transitive dependencies may require different versions; resolve duplication where compatible.
+multiple_crate_versions = "allow"
+# Explicit crate visibility documents architectural boundaries even in private modules.
+redundant_pub_crate = "allow"
+# Owned arguments express consumption at API boundaries, even when an implementation
+# currently only borrows them; changing that contract for a lint is misleading.
+needless_pass_by_value = "allow"
+# Keep local helpers/imports next to the code that uses them.
+items_after_statements = "allow"
+# Domain pairs such as desired/current and shard/state are clearer than artificial renames.
+similar_names = "allow"
+# Type inference keeps defaults readable without repeating long implementation types.
+default_trait_access = "allow"
+# Borrowing a domain record is independent of its current size or Copy implementation.
+trivially_copy_pass_by_ref = "allow"
+# RAII guards follow explicit lexical scopes; moving their release can change synchronization.
+significant_drop_tightening = "allow"
+
+# Maximum performance for binaries we publish.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+
+# Fast local builds.
+[profile.incremental]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+incremental = true

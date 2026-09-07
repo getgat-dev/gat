@@ -1,0 +1,27 @@
+{
+  "coreAccent": {
+    "primary": "#0F766E",
+    "hover": "#115E59",
+    "softBackground": "#CCFBF1"
+  },
+  "neutrals": {
+    "appBackground": "#F8FAFC",
+    "surface": "#FFFFFF",
+    "border": "#E2E8F0",
+    "primaryText": "#0F172A",
+    "secondaryText": "#64748B",
+    "muted": "#94A3B8"
+  },
+  "semantic": {
+    "success": "#16A34A",
+    "warning": "#D97706",
+    "error": "#DC2626",
+    "info": "#2563EB"
+  },
+  "states": {
+    "selectedRow": "#F0FDFA",
+    "focusRing": "#0F766E",
+    "disabledBackground": "#F1F5F9",
+    "disabledText": "#94A3B8"
+  }
+}

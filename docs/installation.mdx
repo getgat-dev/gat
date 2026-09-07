@@ -1,0 +1,263 @@
+---
+title: "Installation"
+description: "Install gat on macOS, Linux, or Windows, or build it from source."
+---
+
+The installer detects your platform, downloads a release, and verifies its
+SHA-256 checksum before installation. Use Git alongside Gat to commit metadata.
+
+<Steps>
+  <Step title="Install gat">
+    <Tabs>
+      <Tab title="macOS / Linux">
+        Run the installer in your shell:
+
+        ```bash
+        curl -fsSL https://getgat.dev/install.sh | sh
+        ```
+
+        Supports Apple silicon and Intel Macs, and ARM64 and x86_64 Linux
+        with glibc. For Alpine Linux, use a source build below.
+      </Tab>
+
+      <Tab title="Windows PowerShell">
+        Run the installer in PowerShell:
+
+        ```powershell
+        & ([scriptblock]::Create((irm https://getgat.dev/install.ps1)))
+        ```
+
+        The installer supports 64-bit AMD/Intel and ARM64 Windows with Windows
+        PowerShell 5.1 or PowerShell 7.
+      </Tab>
+    </Tabs>
+
+    <Note>
+      By default, `gat` is installed to `~/.local/bin` on macOS/Linux and
+      `%USERPROFILE%\.local\bin` on Windows. The installer tells you if that
+      directory is not currently on your `PATH`.
+    </Note>
+  </Step>
+
+  <Step title="Verify the installation">
+    Open a new shell if needed, then run:
+
+    ```bash
+    gat --version
+    ```
+
+    <Check>
+      If this prints a version, `gat` is installed and ready to use.
+    </Check>
+  </Step>
+
+  <Step title="Continue with your first repository">
+    `gat` works inside Git repositories. Continue to the
+    [Quickstart](/quickstart) to initialize a repository, track a file, and
+    push it to storage.
+  </Step>
+</Steps>
+
+## Installation options
+
+Choose an option for a pinned version, custom location, or source build.
+
+<AccordionGroup>
+  <Accordion title="Installer requirements and recovery">
+    On macOS/Linux, the installer needs POSIX `sh`, Bash 3.2+, `curl`, `tar`,
+    `awk`, `grep`, `uname`, `mktemp`, `mkdir`, `rm`, `install`, `mv`, `cat`,
+    `sleep`, and `sha256sum` or `shasum`. Linux also requires `getconf`.
+
+    Downloads need HTTPS access to GitHub and a working certificate store.
+    The installer verifies and runs the new binary before replacing an existing
+    installation. A failed download or compatibility check leaves it in place.
+
+    The destination must be a regular file or absent, not a directory or symlink.
+    On Windows, close running Gat processes if the executable is locked.
+  </Accordion>
+
+  <Accordion
+    title="Install a specific version"
+    description="Pin gat for CI, reproducible environments, or controlled upgrades."
+  >
+    The installers use the latest release by default. Pin an exact release when
+    you need reproducible environments. Both `0.1.0` and `v0.1.0` are accepted.
+
+    <Tabs>
+      <Tab title="macOS / Linux">
+        ```bash
+        curl -fsSL https://getgat.dev/install.sh | sh -s -- --version 0.1.0
+        ```
+      </Tab>
+
+      <Tab title="Windows PowerShell">
+        ```powershell
+        & ([scriptblock]::Create((irm https://getgat.dev/install.ps1))) -Version 0.1.0
+        ```
+      </Tab>
+    </Tabs>
+
+    You can also set the `GAT_VERSION` environment variable before running the
+    installer.
+  </Accordion>
+
+  <Accordion
+    title="Change the install directory"
+    description="Install gat somewhere other than the default user-local bin directory."
+  >
+    Set `GAT_INSTALL_DIR` before running the installer.
+
+    <Tabs>
+      <Tab title="macOS / Linux">
+        ```bash
+        export GAT_INSTALL_DIR="$HOME/bin"
+        curl -fsSL https://getgat.dev/install.sh | sh
+        ```
+      </Tab>
+
+      <Tab title="Windows PowerShell">
+        ```powershell
+        $env:GAT_INSTALL_DIR = "$HOME\bin"
+        & ([scriptblock]::Create((irm https://getgat.dev/install.ps1)))
+        ```
+      </Tab>
+    </Tabs>
+
+    Make sure the chosen directory is on your `PATH`.
+  </Accordion>
+
+  <Accordion
+    title="Download a release manually"
+    description="Choose an archive yourself and verify it before installing."
+  >
+    Every public release contains prebuilt archives for the complete supported
+    platform matrix:
+
+    | Platform | Architecture | Release target |
+    | --- | --- | --- |
+    | Linux | x86_64 | `x86_64-unknown-linux-gnu` |
+    | Linux | ARM64 | `aarch64-unknown-linux-gnu` |
+    | macOS | Intel | `x86_64-apple-darwin` |
+    | macOS | Apple silicon | `aarch64-apple-darwin` |
+    | Windows | AMD64 | `x86_64-pc-windows-msvc` |
+    | Windows | ARM64 | `aarch64-pc-windows-msvc` |
+
+    Download the archive for your target from the
+    [latest GitHub release](https://github.com/getgat-dev/gat/releases/latest).
+
+    Releases include a single `SHA256SUMS` file containing the SHA-256 checksum
+    of every platform archive.
+
+    <Tabs>
+      <Tab title="macOS / Linux">
+        The example below shows Linux x86_64. Change `target` for your platform.
+
+        ```bash
+        tag=$(curl -fsSL https://api.github.com/repos/getgat-dev/gat/releases/latest \
+          | grep -m1 '"tag_name"' \
+          | cut -d'"' -f4)
+
+        target=x86_64-unknown-linux-gnu
+        archive="gat-$tag-$target.tar.gz"
+
+        curl -fsSLO "https://github.com/getgat-dev/gat/releases/download/$tag/$archive" || exit 1
+        curl -fsSLO "https://github.com/getgat-dev/gat/releases/download/$tag/SHA256SUMS" || exit 1
+
+        # Select only the downloaded archive, using an exact filename match.
+        awk -v archive="$archive" '
+          $2 == archive { count++; print }
+          END { if (count != 1) exit 1 }
+        ' SHA256SUMS > "$archive.sha256" || exit 1
+
+        if command -v sha256sum >/dev/null 2>&1; then
+          sha256sum -c "$archive.sha256"
+        else
+          shasum -a 256 -c "$archive.sha256"
+        fi || exit 1
+
+        tar -xzf "$archive"
+        mkdir -p "$HOME/.local/bin"
+        install -m 755 "gat-$tag-$target/gat" "$HOME/.local/bin/gat"
+        ```
+      </Tab>
+
+      <Tab title="Windows PowerShell">
+        Download the `.zip` archive and `SHA256SUMS`, then compare the hash below
+        with the entry for that exact archive filename in `SHA256SUMS`:
+
+        ```powershell
+        Get-FileHash .\gat-vX.Y.Z-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+        ```
+
+        Extract `gat.exe` and place it in a directory on your `PATH`.
+      </Tab>
+    </Tabs>
+
+    <Info>
+      A release is published only after all supported targets are built,
+      packaged, checksummed, and acceptance-tested from the packaged binaries.
+    </Info>
+  </Accordion>
+
+  <Accordion
+    title="Verify build provenance"
+    description="Confirm that a release archive was produced by gat's GitHub Actions release workflow."
+  >
+    Release archives are covered by GitHub artifact attestations. With the
+    GitHub CLI installed, verify a downloaded archive with:
+
+    ```bash
+    gh attestation verify "gat-vX.Y.Z-<target>.tar.gz" --repo getgat-dev/gat
+    ```
+
+    On Windows, pass the downloaded `.zip` archive instead.
+  </Accordion>
+
+  <Accordion
+    title="Build and install from source"
+    description="Use Cargo when a prebuilt binary is not suitable for your environment."
+  >
+    `gat` is not currently published to crates.io. Install it directly from
+    the Git repository:
+
+    ```bash
+    cargo install --locked --bin gat --git https://github.com/getgat-dev/gat gat
+    ```
+
+    Building from source requires **Rust 1.91 or newer**.
+  </Accordion>
+
+  <Accordion
+    title="Install from a local checkout"
+    description="Useful when developing gat itself."
+  >
+    ```bash
+    git clone https://github.com/getgat-dev/gat
+    cd gat
+    cargo install --locked --bin gat --path .
+    ```
+
+    This installs `gat` to Cargo's binary directory, usually
+    `~/.cargo/bin`.
+
+    <Tip>
+      Contributors can also run `task install`. Development-only helper
+      binaries are installed with `task install:dev-tools`.
+    </Tip>
+  </Accordion>
+</AccordionGroup>
+
+<Columns cols={2}>
+  <Card title="Start the Quickstart" icon="rocket" href="/quickstart">
+    Initialize a repository, track your first file, and move its bytes to
+    storage.
+  </Card>
+
+  <Card
+    title="Browse release downloads"
+    icon="download"
+    href="https://github.com/getgat-dev/gat/releases/latest"
+  >
+    Download platform archives, checksums, and release artifacts directly.
+  </Card>
+</Columns>

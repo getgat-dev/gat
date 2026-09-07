@@ -1,0 +1,63 @@
+---
+title: "Feature lifecycle"
+description: "What Stable, Experimental, and Deprecated mean for commands and settings."
+---
+
+Gat commands, config keys, and individual config values each carry one of
+three lifecycle states. The label tells you how much interface/behavior
+change to expect over time -- it never changes what safety, correctness,
+or data-integrity guarantees apply.
+
+## The three states
+
+<Columns cols={3}>
+  <Card title="Stable" icon="circle-check">
+    Normal supported behavior. The default for anything not explicitly
+    marked otherwise.
+  </Card>
+
+  <Card title="Experimental" icon="flask">
+    Available for use, but its interface or behavior may change or be
+    removed between releases.
+  </Card>
+
+  <Card title="Deprecated" icon="triangle-exclamation">
+    Still supported. Migrate to the documented replacement where one
+    exists, ahead of a possible removal.
+  </Card>
+</Columns>
+
+## Experimental means interface stability, not reduced safety
+
+<Info>
+Experimental features keep their documented safety and correctness guarantees.
+Their flags, output, configuration keys, or behavior may change or be removed.
+</Info>
+
+<Tooltip tip="Information saved for later commands or clones, such as tracked content IDs and cached bytes. It differs from an individual command’s flags or printed output." cta="Where Gat stores state" href="/concepts/how-gat-works#what-lives-where">Persistent state</Tooltip> written by Experimental features, including `gat.lock` and the
+cache, has the same readability and migration guarantees as Stable state.
+
+## Deprecation and replacements
+
+Deprecated commands and settings remain supported. Follow the replacement named
+in the notice, when one exists.
+
+Deprecation communicates an **earliest possible removal**, not a promised
+exact release: normal deprecations give users time to migrate, but a
+safety, security, or data-loss fix may still force a faster removal or
+disabling than originally planned.
+
+## Where lifecycle shows up
+
+- **`--help` text** states a command's lifecycle status directly, so it's
+  visible without ever visiting this site.
+- **CLI notices**: running an Experimental command, or reading/writing a
+  Deprecated config key/value, prints a one-line notice to stderr. These
+  notices never write to stdout and never change a successful exit code
+  -- scripts parsing gat's stdout output are unaffected.
+- **Generated command pages** carry an `Experimental`/`Deprecated` tag and
+  a callout at the top of the page. Deprecated or experimental command
+  options also carry a callout in the corresponding command page.
+- [Configuration](/references/configuration) marks individual config keys and enumerated values
+  with their lifecycle status, so e.g. one config key's several allowed
+  values can each have their own status.

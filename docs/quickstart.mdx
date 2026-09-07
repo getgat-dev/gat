@@ -1,0 +1,134 @@
+---
+title: "Quickstart"
+description: "Track, upload, and restore your first file in a few minutes."
+---
+
+Keep a file's version in Git and its bytes in Gat, then restore it in a fresh clone.
+
+Before you start, [install Gat](/installation) and open an existing Git repository.
+Replace `assets/model.bin` below with a file that **Git does not already track**.
+
+<Steps>
+  <Step title="Initialize Gat">
+    ```sh
+    gat init
+    ```
+
+    This prepares the local cache, Git hooks, and `gat.lock` merge driver.
+    Run it once in each clone.
+  </Step>
+
+  <Step title="Choose storage">
+    This example uses a local directory with no cloud account or credentials.
+    Choose the commands for your shell:
+
+    <Tabs>
+      <Tab title="macOS / Linux">
+        ```sh
+        mkdir -p "$HOME/gat-quickstart-storage"
+        gat remote add origin "file://$HOME/gat-quickstart-storage"
+        gat remote default origin
+        ```
+      </Tab>
+      <Tab title="Windows PowerShell">
+        ```powershell
+        $storage = Join-Path $HOME 'gat-quickstart-storage'
+        New-Item -ItemType Directory -Force $storage | Out-Null
+        $storageUrl = ([System.Uri]::new($storage)).AbsoluteUri
+        gat remote add origin $storageUrl
+        gat remote default origin
+        ```
+      </Tab>
+    </Tabs>
+
+    <Note>
+      A Gat remote stores file content; a Git remote stores commits. Adding a
+      Gat remote never selects a default, even when it is named `origin`.
+    </Note>
+
+    Keep this storage directory: the fresh clone will read from it. For shared
+    storage, follow [Set up a remote](/set-up-a-remote).
+  </Step>
+
+  <Step title="Track and commit a file">
+    ```sh
+    gat add assets/model.bin
+    git add gat.lock gat.yaml
+    git commit -m "Track model with Gat"
+    ```
+
+    The file stays in your working tree. Git commits its path and content ID in
+    `gat.lock`, plus the storage configuration in `gat.yaml`.
+
+    <Accordion title="How does Gat keep the file out of Git?">
+      Gat manages entries in `.git/info/exclude` so ordinary `git add` commands
+      skip Gat-managed files. The bytes live in `.gat/objects` by default.
+      See [How Gat works](/concepts/how-gat-works).
+    </Accordion>
+  </Step>
+
+  <Step title="Upload the bytes">
+    ```sh
+    gat push
+    ```
+
+    When sharing changes with teammates, run `gat push` before `git push` so
+    the objects are available before their commits are published.
+  </Step>
+
+  <Step title="Restore the file in a fresh clone">
+    From the original repository, clone into a sibling directory:
+
+    ```sh
+    git clone . ../gat-quickstart-clone
+    cd ../gat-quickstart-clone
+    gat init
+    gat pull
+    ```
+
+    Git supplies the metadata; `gat pull` downloads the bytes and restores files
+    for the current checkout. This local example works on the same machine.
+
+    <Check>
+      Open `assets/model.bin` in the new clone and confirm its contents.
+      `gat ls-files` lists the tracked paths.
+    </Check>
+  </Step>
+</Steps>
+
+## Everyday commands
+
+| Task | Command |
+| --- | --- |
+| Record new or edited file content | `gat add assets/model.bin` |
+| Compare current tracking metadata with staged metadata | `gat status` |
+| Upload required objects | `gat push` |
+| Download objects and restore working files | `gat pull` |
+| Download objects without changing working files | `gat fetch` |
+| Update working files from the local cache | `gat sync` |
+
+<Note>
+  `gat status` does not inspect file contents. Record edits with `gat add`;
+  use `gat sync --dry-run` to preview working-tree reconciliation.
+</Note>
+
+Git hooks run sync after checkout/switch, merge/pull, and rebase/amend.
+After `git reset --hard` or `git restore`, run `gat sync` yourself.
+Use `gat pull` if required objects are missing from the cache.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Set up shared storage" icon="cloud" href="/set-up-a-remote">
+    Connect cloud storage or a shared directory.
+  </Card>
+  <Card title="Work with your team" icon="code-branch" href="/guides/branching-and-merging">
+    Publish changes and resolve merge conflicts.
+  </Card>
+  <Card title="Choose a working set" icon="filter" href="/concepts/path-selection">
+    Pull only the paths you need or save a default selection.
+  </Card>
+  <Card title="Understand automatic sync" icon="arrows-rotate" href="/concepts/automatic-sync">
+    Control fetching and working-tree updates after Git operations.
+  </Card>
+</CardGroup>

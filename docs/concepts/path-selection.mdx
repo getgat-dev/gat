@@ -1,0 +1,263 @@
+---
+title: "Path selection"
+description: "Choose which files and directories Gat uses, and narrow the selection with glob patterns."
+---
+
+Use path filters with `status`, `ls-files`, `diff`, `push`, `fetch`, `pull`,
+and `sync`. Preview a selection against the current lock:
+
+```sh
+gat ls-files --path data --include '**/*.bin' --exclude 'scratch/**'
+```
+
+<Steps>
+  <Step title="Choose a path">
+    `--path data` selects the file or subtree relative to the repository root,
+    even when you run Gat in a subdirectory. Pass one literal path, not a glob.
+    It matches `data/a.bin`, not `database/a.bin`.
+  </Step>
+  <Step title="Include matching files">
+    <Tooltip tip="A filename-matching expression, not a regular expression. Here, * stays within one directory and ** can span directory levels." cta="Pattern examples" href="/concepts/path-selection#glob-pattern-reference">Glob patterns</Tooltip> are relative to the selected path. `*.bin` matches immediate files;
+    `**/*.bin` also matches nested files. Repeat `--include` for alternatives.
+    With no include patterns, all files under the selected path qualify.
+  </Step>
+  <Step title="Exclude unwanted files">
+    Repeat `--exclude` to remove matches. Exclusions always win, regardless of
+    argument order. `scratch/**` excludes that subtree; `**/scratch/**` excludes
+    directories named `scratch` at any depth.
+  </Step>
+</Steps>
+
+<Warning>
+  With no path-selection flags, repository commands use
+  [saved selections](#saved-selections). **Any explicit `--path`,
+  `--include`, or `--exclude` replaces the complete configured selection**, rather than
+  narrowing it. Repeat any exclusions you still need. Use `--path .` to
+  select the whole repository without configured path filters.
+</Warning>
+
+## Preview your selection
+
+`gat ls-files` lists matches in the current `gat.lock`, including files absent
+from disk. It does not preview historical snapshots or transfer actions.
+
+<Tip>
+  Quote glob patterns so your shell passes them unchanged: `--include '**/*.bin'`.
+</Tip>
+
+## Examples
+
+<Tabs sync={false}>
+  <Tab title="One file">
+    Use an exact path without a filename filter to select one tracked file.
+
+    ```bash
+    gat ls-files --path data/model.onnx
+    ```
+  </Tab>
+
+  <Tab title="File types">
+    Fetch model and binary files anywhere below `data`. Either include
+    pattern is enough to select a file.
+
+    ```bash
+    gat fetch --path data --include '**/*.onnx' --include '**/*.bin'
+    ```
+  </Tab>
+
+  <Tab title="Directories">
+    Repeat `--include`, not `--path`. With no `--path`, these patterns are
+    relative to the repository root.
+
+    ```bash
+    gat ls-files --include 'data/**' --include 'models/**'
+    ```
+  </Tab>
+
+  <Tab title="Exclusions">
+    Select everything under `data` except files in directories named
+    `scratch`. This excludes both `data/scratch/a.bin` and
+    `data/nested/scratch/b.bin`.
+
+    ```bash
+    gat ls-files --path data --exclude '**/scratch/**'
+    ```
+  </Tab>
+</Tabs>
+
+## Glob pattern reference
+
+These examples are relative to the directory selected by `--path`.
+
+| Pattern | What it matches |
+| --- | --- |
+| `model.onnx` | Exactly `model.onnx`, not `nested/model.onnx`. |
+| `model*.bin` | Zero or more characters within one path component: `model.bin` or `model-v2.bin`, not `nested/model.bin`. |
+| `**/*.bin` | `.bin` files at any depth, including `a.bin` and `nested/a.bin`. |
+| `part-?.bin` | Exactly one character: `part-a.bin` or `part-7.bin`, not `part-10.bin`. |
+| `part-[ab].bin` | One listed character: `part-a.bin` or `part-b.bin`. |
+| `part-[0-9].bin` | One character in a range: `part-0.bin` through `part-9.bin`, not `part-10.bin`. |
+| `part-[!0-9].bin` | One character outside the range: `part-a.bin`, not `part-7.bin`. Use `[!abc]` to negate a set. |
+
+Matching is **case-sensitive**: `*.bin` does not match `MODEL.BIN`. Wildcards
+also match dotfiles, so `*.bin` can match `.hidden.bin`.
+
+<AccordionGroup>
+  <Accordion title="How recursive patterns work">
+    `*`, `?`, and character classes never match `/`. The recursive wildcard
+    `**` spans zero or more directories and must occupy an entire path
+    component.
+
+    For example, `models/**/weights.bin` matches both `models/weights.bin`
+    and `models/v2/weights.bin`. Patterns such as `**.bin`, `model**`, and
+    `***` are invalid.
+  </Accordion>
+
+  <Accordion title="Match literal special characters">
+    Use `[?]`, `[*]`, `[[]`, and `[]]` to match literal `?`, `*`, `[`, and `]`
+    characters. For example, `model[[]v1[]].bin` matches `model[v1].bin`.
+
+    Inside a character class, put `-` first or last to match a literal hyphen,
+    as in `[ab-]`. Backslashes are path separators in Gat, **not** wildcard
+    escapes.
+  </Accordion>
+
+  <Accordion title="Syntax Gat does not support">
+    These patterns are not regular expressions or `.gitignore` rules. Gat
+    does not interpret brace alternatives such as `*.{bin,onnx}`, shell
+    extglobs such as `@(a|b)`, or POSIX named classes such as `[[:digit:]]`
+    as those features. Use repeated `--include` flags for alternatives and
+    `[0-9]` for a digit.
+
+    A leading `!` does not re-include an excluded path. Character-class
+    negation uses `[!...]`, not `[^...]`. Quoting prevents shell expansion;
+    it does not add syntax to Gat's matcher.
+  </Accordion>
+</AccordionGroup>
+
+## Saved selections
+
+Use the experimental [`gat selection`](/commands/selection) command to save
+<Tooltip tip="Named combinations of a root path, include patterns, and exclude patterns. Saving a definition makes it available to commands; choosing it as a default is a separate step." cta="Share selections and defaults" href="/concepts/config-inheritance#share-definitions-choose-your-default">reusable path selections</Tooltip>. Defining one does not activate it or change files
+in the working tree.
+
+```bash
+gat selection add runtime --project --path models \
+  --include '**/*.onnx' --include '**/*.bin' --exclude 'experimental/**'
+gat selection add training --project --path datasets --include '**/*.parquet'
+gat selection default runtime --local
+```
+
+The saved path is relative to the repository root and defaults to `.`.
+Patterns are relative to that path. Exclusions win.
+
+| Invocation | Selection used |
+| --- | --- |
+| `gat fetch --selection training` | The effective named training definition. |
+| `gat fetch --path models --include '**/*.onnx'` | A complete one-off inline selection. |
+| `gat fetch` | The effective default selection, if configured. |
+| `gat fetch` without a default | The whole repository. |
+| `gat fetch --path .` | The whole repository, overriding any default. |
+
+Only one selection is resolved per operation. A named selection cannot be
+combined with another name or inline `--path`, `--include`, or `--exclude`.
+Unknown names and dangling default references produce errors.
+
+Saved selections work with `status` (local and remote), `ls-files`, `diff`,
+`push`, `fetch`, `pull`, and `sync`. Automatic synchronization uses the
+default. Choosing a different selection for one command does not change
+persistent configuration.
+
+### Update or remove a definition
+
+`gat selection update` preserves omitted fields within the selected scope.
+Supplied lists replace the saved lists; `--clear-include` and
+`--clear-exclude` clear them. Changing the path keeps the saved filters,
+now relative to that new path.
+
+- Update or remove a definition in the scope that owns it. Gat rejects a
+  <Tooltip tip="A named entry hidden by another entry of the same name in a higher-priority layer. The higher entry replaces the whole definition; removing it can reveal the lower entry again." cta="Inheritance rules" href="/concepts/config-inheritance#what-inherits">shadowed definition</Tooltip>.
+- Use `add --local` with a complete definition to override a project selection.
+- Removing an override reports any lower-layer definition it reveals.
+- If removal would leave the default pointing to a missing name, change or
+  unset the default first.
+
+Management is configuration-only. It does not fetch, synchronize, evict,
+change tracking, or impose permanent access restrictions. `add`, `rm`,
+`mv`, garbage collection, integrity checks, and mount source filters retain
+their own policies.
+
+<Accordion title="Migrate the old selection configuration">
+  The old `selection:` section and `gat config selection.*` keys are removed.
+  Move the complete path and filters into `selections.NAME`, then activate it
+  with `gat selection default NAME`.
+</Accordion>
+
+## Mount selection
+
+Use the same flags with `gat mount add` and `gat mount update`. Selectors
+refer to the **source repository**: matching happens before files are placed
+under the destination target. Mount commands never use repository
+named selections or their default.
+
+`gat mount add` starts at the source root when `--path` is omitted.
+
+### Mount update
+
+`gat mount update` **keeps each setting you omit**: its saved source path,
+include list, and exclude list. Supplying `--include` replaces only the saved
+include list; the saved exclusions remain unless you also supply `--exclude`.
+
+See [gat mount](/commands/mount) for saved settings and update options.
+
+## Troubleshoot a selection
+
+<AccordionGroup>
+  <Accordion title="Why does a filename filter miss an exact-file selection?">
+    When `--path` names the file itself, the path left for glob matching is
+    empty. For example, `--path data/a.bin --include '*.bin'` does not match
+    `data/a.bin`.
+
+    Use `--path data/a.bin` alone, or select its parent and filter by filename:
+
+    ```bash
+    gat ls-files --path data --include 'a.bin'
+    ```
+
+    Either explicit selection also replaces configured exclusions for
+    repository commands.
+  </Accordion>
+
+  <Accordion title="Why does excluding a directory name leave its files selected?">
+    An exclude pattern matches file paths; it does not automatically exclude
+    a directory's contents. `--exclude 'scratch'` does not match `scratch/a.bin`.
+
+    Use `--exclude 'scratch/**'` for that subtree, or
+    `--exclude '**/scratch/**'` for directories with that name at any depth.
+    A trailing slash alone does not make a pattern recursive.
+  </Accordion>
+
+  <Accordion title="Which path spellings are accepted?">
+    Use relative paths and patterns. Leading `/` and `..` path components
+    are rejected. `./data/` normalizes to `data`, and backslashes normalize
+    to `/`. Tabs and line breaks are valid path characters; Gat escapes them
+    in lock files and terminal output. Filesystem restrictions still apply.
+
+    Git ignore rules cannot represent exact filenames containing LF. Such files
+    remain visible to Git unless a broader configured pattern covers them.
+
+    Invalid glob syntax, such as an unclosed `[` or a misplaced `**`,
+    produces an error. To match literal wildcards or brackets, use the
+    bracket forms in the [pattern reference](#glob-pattern-reference).
+  </Accordion>
+</AccordionGroup>
+
+## Related selection options
+
+Path filters choose **which files**, not **which snapshots**. Where a command
+supports history flags, filters narrow the paths within those snapshots.
+See [History selection](/concepts/history-selection).
+
+[`gat add`](/commands/add) and [`gat rm`](/commands/rm) accept files,
+directories, and glob patterns as **positional arguments**, rather than this
+shared set of filter flags. Their command references describe those rules.

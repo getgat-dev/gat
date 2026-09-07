@@ -1,0 +1,111 @@
+---
+title: "gat diff"
+description: "Compare files across revisions or against the working tree."
+---
+
+Compare tracked paths and content IDs across <Tooltip tip="Git commit identifiers such as a branch, tag, commit hash, or HEAD~2. Gat reads the lock at each selected commit to compare file versions." cta="Resolve ambiguous names" href="/concepts/history-selection#when-a-branch-and-tag-share-a-name">revisions</Tooltip>, independent of the lock's
+text layout. Mount-owned entries show their mount name.
+
+| Revisions supplied | Comparison |
+| --- | --- |
+| None | `HEAD` against the current lock. |
+| One | That revision against the current lock. |
+| Two | The two committed snapshots. |
+
+To compare the working lock with Git’s staged lock, use [gat status](/commands/status). For the commit and upload sequence,
+see [Branching and merging](/guides/branching-and-merging#typical-workflows).
+
+Without path flags, use the default named selection, or all paths if none is set.
+Explicit filters replace that selection; `--path .` selects the whole repository.
+
+<Accordion title="Path selection rules">
+  | Selector | Selection used |
+  | --- | --- |
+  | `--selection NAME` | One saved definition, without changing the default. |
+  | `--path`, `--include`, or `--exclude` | <Tooltip tip="Path, include, and exclude flags supplied directly to this command. These replace the saved selection as a whole, so repeat any exclusions you still need." cta="Selection precedence" href="/concepts/path-selection">A complete inline selection</Tooltip>. |
+
+  Named and inline selectors cannot be combined. Paths are relative to the
+  repository root; patterns are relative to the selected path.
+  See [Path selection](/concepts/path-selection) and [gat selection](/commands/selection).
+</Accordion>
+
+## Usage
+
+```text
+Usage: gat diff [OPTIONS] [REV1] [REV2]
+```
+
+<Accordion title="All options" id="gat-diff-options">
+
+```text
+Usage: gat diff [OPTIONS] [REV1] [REV2]
+
+Arguments:
+  [REV1]
+          First revision to compare. Defaults to `HEAD`. When only this is
+          given, compares it against the current working tree
+
+  [REV2]
+          Second revision to compare `rev1` against. Defaults to the current
+          (unstaged) working tree when omitted
+
+Options:
+      --selection <NAME>
+          Use this saved selection for this operation without changing the
+          default
+
+      --path <PATH>
+          Select this file or subtree. Any explicit --path, --include, or
+          --exclude replaces the complete configured selection. Use --path . for
+          the whole repository. For mount add, omission selects the source root;
+          repository selection defaults never apply to mounts
+
+      --include <INCLUDE>
+          Glob pattern (matched relative to `--path`) selecting which paths to
+          include. Repeatable. Component-aware: `*.bin` matches only immediate
+          children, while `**/*.bin` matches recursively. Empty means everything
+          under `--path`
+
+      --exclude <EXCLUDE>
+          Glob pattern (matched relative to `--path`) excluded from `--include`
+          (or from everything under `--path`, if `--include` is empty).
+          Repeatable. Component-aware like `--include`; exclude always wins over
+          include
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+## Examples
+
+<Tabs sync={false}>
+<Tab title="Against HEAD">
+
+Compare the working desired state with `HEAD`.
+
+```sh
+gat diff
+```
+
+</Tab>
+<Tab title="One revision">
+
+Compare a revision with the working desired state.
+
+```sh
+gat diff HEAD~1
+```
+
+</Tab>
+<Tab title="Two revisions">
+
+Restrict a revision-to-revision comparison to a subtree.
+
+```sh
+gat diff v1.0 v2.0 --path data/
+```
+
+</Tab>
+</Tabs>

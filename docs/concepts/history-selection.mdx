@@ -1,0 +1,134 @@
+---
+title: "History selection"
+description: "Choose which Git snapshots Gat uses, and how far back to look."
+---
+
+History selection tells Gat which committed `gat.lock` <Tooltip tip="The complete path-to-content map recorded at one Git commit. Reading a snapshot discovers the content IDs it references; it does not change your checkout." cta="How versions are restored" href="/concepts/how-gat-works#fetch-sync-and-pull">snapshots</Tooltip> to read. Use
+these flags with `gat push`, `gat fetch`, `gat pull`, `gat status --remote`, or `gat gc`.
+
+<Note>
+  `gat pull` can prefetch historical objects, but always restores the current
+  checkout. To restore an older version, check it out with Git first.
+</Note>
+
+**Choose your starting commits, then decide how far back to look.**
+
+Combine history with [path selection](/concepts/path-selection) to choose files
+within those snapshots. Before deleting stored content, review
+[garbage-collection protection rules](/commands/gc).
+
+<Steps>
+  <Step title="Choose where to start">
+    | Option | Starting commits |
+    | --- | --- |
+    | `--rev REV` | One revision: a branch, tag, commit hash, or expression such as `HEAD~2`. |
+    | `--branches` | Every local and <Tooltip tip="The latest commit recorded locally for a remote branch, such as origin/main. Gat reads this local Git reference; fetch Git updates first if you need the latest remote history.">remote-tracking branch tip</Tooltip>. |
+    | `--tags` | The commits referenced by all tags. |
+    | `--all-history` | Every ref that resolves to a commit, including custom refs, **plus its ancestry**. |
+
+    Repeat `--rev` or combine it with `--branches` and `--tags` to include more
+    starting points. Overlapping commits are counted once.
+    `--all-history` cannot be combined with those three options.
+  </Step>
+
+  <Step title="Choose how far back to look">
+    `--rev`, `--branches`, and `--tags` select **only the starting commits** by
+    default, not their earlier history.
+
+    Add `--ancestors` to include all <Tooltip tip="Earlier commits reachable by following parent links. Merge commits can have multiple parents, so ancestry can include commits from merged branches.">ancestors</Tooltip>, or `--depth N` to visit at most
+    **N commits per starting point**, including the starting commit. These two
+    options cannot be combined. `--all-history` already includes ancestry, but
+    you can still limit it with `--depth`.
+
+    <Note>
+      With no starting-point option, traversal starts at `HEAD` only.
+      For example, `--depth 5` visits `HEAD` and up to four closest ancestors,
+      not five commits from every branch. Traversal is closest-first, not
+      ordered by commit timestamp.
+    </Note>
+  </Step>
+
+  <Step title="Refine the selection">
+    | Option | Effect |
+    | --- | --- |
+    | `--since DATE` / `--until DATE` | Include commits on or after / on or before the given committer date. Accepts dates such as `2026-01-01` or `"2 weeks ago"`. |
+    | `--first-parent` | At merges, follow only the <Tooltip tip="The branch history a merge was made onto. Following this parent skips walking down the merged-in branch, but the merge snapshot can still reference assets introduced by that branch.">first parent</Tooltip> rather than exploring merged-in history. |
+    | `--exclude-rev REV` | Exclude this revision and its ancestors. Repeatable. |
+
+    Each of these options enables ancestry traversal, even without
+    `--ancestors`. Without a starting-point option, they start at `HEAD`.
+
+    <Tip>
+      **Depth limits work, not matches.** `--depth 5 --since "2 weeks ago"`
+      inspects at most five commits per starting point, then applies the date
+      filter. It may select fewer than five commits—or none.
+    </Tip>
+  </Step>
+</Steps>
+
+## When a branch and tag share a name
+
+<Warning>
+  If both are named `release`, `--rev release` selects **the tag**, not the
+  branch or both. The collision does not cause an ambiguity error.
+  Use full ref names to make your choice explicit.
+</Warning>
+
+```bash
+# Select the branch
+gat push --rev refs/heads/release
+
+# Select the tag
+gat push --rev refs/tags/release
+```
+
+To select both, pass both full names with separate `--rev` arguments.
+
+## Examples
+
+<Tabs>
+  <Tab title="One snapshot">
+    Upload objects needed by the latest commit on the local `main` branch.
+
+    ```bash
+    gat push --rev refs/heads/main
+    ```
+  </Tab>
+
+  <Tab title="Recent history">
+    Inspect up to five commits per branch and fetch objects from snapshots
+    committed within the last two weeks.
+
+    ```bash
+    gat fetch --branches --depth 5 --since "2 weeks ago"
+    ```
+  </Tab>
+
+  <Tab title="Preview cleanup">
+    For garbage collection, selected history determines what to **keep**, not
+    what to delete. Preview cleanup with all referenced history protected.
+
+    ```bash
+    gat gc --all-history --dry-run
+    ```
+  </Tab>
+</Tabs>
+
+<AccordionGroup>
+  <Accordion title="What happens without history flags?">
+    Each command keeps its own default. For example, `gat push` uses the current
+    desired state, while `gat gc` uses a conservative all-ref history selection.
+    Explicit history selection makes `push` use committed snapshots instead
+    of the current desired state.
+  </Accordion>
+
+  <Accordion title="Invalid revisions and incomplete history">
+    An explicit `--rev` must resolve to a commit; a missing revision or a tag
+    pointing to a blob or tree fails. Aggregate selectors skip valid non-commit
+    refs, but broken or unreadable refs cause an error.
+
+    Only locally available Git history can be selected. A <Tooltip tip="A Git clone with truncated commit history, often created with git clone --depth. Gat can only read lock snapshots whose commits exist locally.">shallow clone</Tooltip> cannot
+    provide commits beyond its shallow boundary. Fetch more Git history before
+    asking Gat to select those snapshots.
+  </Accordion>
+</AccordionGroup>

@@ -1,0 +1,13 @@
+[package]
+name = "test-support-git"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+description = "Dependency-free hermetic Git subprocess fixtures for gat workspace tests."
+
+[lib]
+name = "test_support_git"
+path = "src/lib.rs"
+
+[lints]
+workspace = true

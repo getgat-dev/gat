@@ -1,0 +1,34 @@
+# Explicit nextest configuration for gat's test suite.
+#
+# `[profile.default]` applies to plain `cargo nextest run` (local
+# development); `[profile.ci]` is selected explicitly via
+# `cargo nextest run --profile ci` and is what CI runs, so local and CI
+# behavior don't silently diverge based on nextest's own built-in
+# defaults changing across versions.
+
+[profile.default]
+# No automatic retries for the ordinary test suite: a nondeterministic
+# test must fail visibly and get fixed, not get papered over as an
+# intermittently green test.
+retries = 0
+
+[profile.default.slow-timeout]
+# Report (but do not kill) a test that runs longer than this. The
+# threshold is deliberately generous so normal cross-platform variance
+# (slower CI runners, a cold filesystem cache, etc.) is never mistaken
+# for a hang; it exists purely to surface abnormally slow tests for
+# investigation.
+period = "60s"
+
+[profile.ci]
+retries = 0
+# One failure must never hide other, independent failures: CI always
+# finishes the whole run and reports everything that failed.
+fail-fast = false
+
+[profile.ci.slow-timeout]
+period = "60s"
+# A test still running after 5 periods (5 minutes total) is treated as
+# genuinely hung, not just slow, and is terminated and reported as a
+# failure -- this is real hang detection, not just a slow-test report.
+terminate-after = 5

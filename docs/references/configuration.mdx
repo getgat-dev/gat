@@ -1,0 +1,546 @@
+---
+title: "Configuration"
+description: "Settings, defaults, and examples for gat.yaml."
+---
+
+## How configuration works
+
+Unset keys are normally omitted from `gat.yaml`. Reads use the <Tooltip tip="The values Gat uses after built-in defaults and all configuration layers are resolved.">effective configuration</Tooltip>; mutating commands write only the selected layer, with Project as the default.
+
+## Configuration locations
+
+<Columns cols={3}>
+  <Card title="Global" icon="user">
+    `~/.gat/gat.yaml`
+
+    User-wide defaults shared by every repository.
+
+    **Committed:** No
+  </Card>
+  <Card title="Project (default)" icon="folder">
+    `<repo>/gat.yaml`
+
+    Repository configuration shared with clones.
+
+    **Committed:** Yes
+  </Card>
+  <Card title="Local" icon="laptop">
+    `<repo>/.gat/gat.yaml`
+
+    Machine-specific repository overrides.
+
+    **Committed:** No
+  </Card>
+</Columns>
+
+<Note>
+Configuration precedence is **Global → Project → Local**. Named selections, mounts, routes, and remotes replace whole definitions on a same-name collision; different names coexist. Optional default pointers for selections and remotes inherit independently. Adding a resource never chooses a default. Other settings inherit field by field.
+</Note>
+
+Use `gat config` for general settings and `gat remote`, `gat mount`, `gat route`, or `gat selection` for named resources. See [Config inheritance](/concepts/config-inheritance) for overrides and defaults.
+
+## Configuration examples
+
+<CodeGroup>
+```yaml Typical
+version: 1
+remotes:
+  default: origin
+  origin:
+    url: s3://example-bucket/project?region=eu-west-1
+cache:
+  materialization_strategy:
+  - reflink
+  - copy
+sync:
+  auto_fetch: true
+selections:
+  default: runtime
+  runtime:
+    exclude:
+    - tmp/**
+```
+
+```yaml Complete
+version: 1
+remotes:
+  default: origin
+  backup:
+    url: file:///mnt/backup/prefix
+  origin:
+    url: s3://bucket/prefix?region=eu-west-1
+cache:
+  location: /var/cache/gat
+  materialization_strategy:
+  - hardlink
+  - copy
+  ingest_strategy: hybrid
+sync:
+  trust_state: true
+  auto_fetch: true
+  auto_repair: true
+selections:
+  default: runtime
+  runtime:
+    path: data
+    include:
+    - '**'
+    exclude:
+    - tmp/**
+lock:
+  shard_levels: 2
+mounts:
+  resnet50:
+    url: ../models
+    target: releases/resnet50
+    path: exports/resnet50
+    rev: main
+    rev_lock: 6c73875a1b2c3d4e5f60718293a4b5c6d7e8f901
+    include:
+    - '**/*.onnx'
+    exclude:
+    - tests/**
+routes:
+  datasets:
+    path: datasets
+    remote: backup
+  resnet50:
+    path: releases/resnet50
+    remote: origin
+git:
+  ignore_patterns:
+  - '*.safetensors'
+  - /artifacts/**/*.bin
+```
+</CodeGroup>
+
+## Configuration reference
+
+### Remotes
+
+Each named remote has a `url`. `remotes.default` chooses the fallback by name;
+[gat remote add](/commands/remote#gat-remote-add) never selects it automatically.
+
+```yaml
+remotes:
+  default: origin
+  origin:
+    url: file:///mnt/storage/project
+```
+
+<Accordion title="Remote URL examples">
+  Choose a provider and replace its storage names. For authentication and
+  supported URL options, see [Remote providers](/references/remote-providers).
+
+  <Tabs sync={false}>
+    <Tab title="S3">
+      ```sh
+      gat remote add origin 's3://example-bucket/project?region=eu-west-1'
+      ```
+
+      S3-compatible services also need an <Tooltip tip="The service’s HTTP(S) address, separate from the bucket name. This tells Gat where to send storage requests for an S3-compatible service." cta="S3-compatible setup" href="/references/remote-providers#s3-s3">endpoint</Tooltip>:
+
+      ```sh
+      gat remote add minio 's3://example-bucket/project?region=us-east-1&endpoint=http://localhost:9000'
+      ```
+    </Tab>
+    <Tab title="Azure">
+      ```sh
+      gat remote add origin 'azblob://example-container/project?endpoint=https://myaccount.blob.core.windows.net'
+      ```
+    </Tab>
+    <Tab title="GCS">
+      ```sh
+      gat remote add origin 'gcs://example-bucket/project'
+      ```
+    </Tab>
+    <Tab title="OSS">
+      ```sh
+      gat remote add origin 'oss://example-bucket/project?endpoint=https://oss-cn-hangzhou.aliyuncs.com'
+      ```
+    </Tab>
+    <Tab title="Local">
+      <CodeGroup>
+        ```sh macOS / Linux
+        gat remote add origin 'file:///mnt/backup/project'
+        ```
+
+        ```powershell Windows PowerShell
+        gat remote add origin 'file:///C:/gat-storage/project'
+        ```
+      </CodeGroup>
+    </Tab>
+  </Tabs>
+</Accordion>
+
+Use [gat remote default](/commands/remote#gat-remote-default) to select a default and [gat remote update](/commands/remote#gat-remote-update)
+to change an existing URL. Explicit `--remote` overrides routes, which override
+the default. See [routing precedence](/guides/using-multiple-remotes#remote-selection-at-a-glance)
+for path-based storage, or [Set up a remote](/set-up-a-remote) for the full workflow.
+
+<Note>
+  Keep literal credentials out of committed URLs. Use provider credentials or
+  single-quoted `${NAME}` references. Set referenced variables before validating
+  or using the URL. See [URL templates](/references/remote-providers#use-environment-variables-in-a-url).
+</Note>
+
+```yaml
+remotes:
+  default: <value>
+  <name>:
+    url: <value>
+```
+
+<ResponseField name="remotes.default" type="string">
+  Name of the remote used when no explicit remote or more-specific route applies.
+
+  **Set with:** [`gat remote default`](/commands/remote#gat-remote-default)
+
+  <Accordion title="Configuration details" id="remotes-default">
+    - **Persisted default:** unset
+    - **Example:** `origin`
+  </Accordion>
+</ResponseField>
+
+<ResponseField name="remotes.<name>.url" type="remote URL">
+  Object-storage URL for one named remote.
+
+  **Set with:** [`gat remote add`](/commands/remote#gat-remote-add)
+
+  <Accordion title="Configuration details" id="remotes-name-url">
+    - **Persisted default:** unset
+    - **Example:** `s3://example-bucket/project`
+  </Accordion>
+</ResponseField>
+
+### Cache
+
+<ResponseField name="cache.location" type="path">
+  Absolute cache path or a path relative to the repository root.
+
+  **Default:** `<repo>/.gat/objects`
+
+  **Set with:** [`gat config cache.location <value>`](/commands/config)
+
+  <Accordion title="Configuration details" id="cache-location">
+    - **Persisted default:** unset
+    - **Environment override:** `GAT_CACHE_DIR` (not persisted to `gat.yaml`)
+    - **Example:** `/mnt/gat-cache`
+  </Accordion>
+</ResponseField>
+
+<ResponseField name="cache.materialization_strategy" type="list">
+  Ordered fallback modes used to materialize cached objects into the working tree.
+
+  **Default:** [`copy`]
+
+  **Set with:** [`gat config cache.materialization_strategy <value>...`](/commands/config)
+
+  <Accordion title="Configuration details" id="cache-materialization-strategy">
+    - **Elements:** materialization mode
+    - **Values:** `reflink` | `hardlink` | `symlink` | `copy`
+    - **Empty list:** not allowed
+    - Order is significant.
+    - Duplicate values are not allowed.
+    - **Persisted default:** unset
+    - **Example:** [`reflink`, `copy`]
+  </Accordion>
+</ResponseField>
+
+<ResponseField name="cache.ingest_strategy" type="enum">
+  Copy-and-hash strategy used when publishing local files into the content-addressed cache.
+
+  **Values:**
+
+  - `safe` <Badge color="green" size="sm">Stable</Badge>
+  - `hybrid` <Badge color="yellow" size="sm">Experimental</Badge>
+  - `mmap` <Badge color="orange" size="sm">Deprecated</Badge>
+
+  See [Feature lifecycle](/references/feature-lifecycle) for the guarantees attached to each status.
+
+  **Default:** `safe`
+
+  **Set with:** [`gat config cache.ingest_strategy <value>`](/commands/config)
+
+  <Accordion title="Configuration details" id="cache-ingest-strategy">
+    - **Persisted default:** unset
+    - **Example:** `safe`
+  </Accordion>
+</ResponseField>
+
+### Sync
+
+<ResponseField name="sync.trust_state" type="boolean">
+  Trust recorded materialized state without inspecting the working tree.
+
+  **Default:** `false`
+
+  **Set with:** [`gat config sync.trust_state <value>`](/commands/config)
+
+  <Accordion title="Configuration details" id="sync-trust-state">
+    - **Values:** `true` | `false`
+    - **Persisted default:** unset
+    - **Example:** `true`
+  </Accordion>
+</ResponseField>
+
+<ResponseField name="sync.auto_fetch" type="boolean">
+  Fetch missing objects before normal sync reconciliation.
+
+  **Default:** `false`
+
+  **Set with:** [`gat config sync.auto_fetch <value>`](/commands/config)
+
+  <Accordion title="Configuration details" id="sync-auto-fetch">
+    - **Values:** `true` | `false`
+    - **Persisted default:** unset
+    - **Example:** `true`
+  </Accordion>
+</ResponseField>
+
+<ResponseField name="sync.auto_repair" type="boolean">
+  Re-fetch and rematerialize cache objects found corrupted during sync.
+
+  **Default:** `false`
+
+  **Set with:** [`gat config sync.auto_repair <value>`](/commands/config)
+
+  <Accordion title="Configuration details" id="sync-auto-repair">
+    - **Values:** `true` | `false`
+    - **Persisted default:** unset
+    - **Example:** `true`
+  </Accordion>
+</ResponseField>
+
+### Selections
+
+<ResponseField name="selections.default" type="string">
+  Optional default selection name. Inherits independently of named definitions. Without a default, operations select the whole repository. Adding a selection never chooses a default.
+
+  **Set with:** [`gat selection default`](/commands/selection#gat-selection-default)
+
+  <Accordion title="Configuration details" id="selections-default">
+    - **Persisted default:** unset
+    - **Example:** `runtime`
+  </Accordion>
+</ResponseField>
+
+<ResponseField name="selections.<name>.path" type="path">
+  Literal file or directory relative to the repository root. Same-name definitions replace as a whole across layers. An empty definition selects everything.
+
+  **Default:** `.`
+
+  **Set with:** [`gat selection add`](/commands/selection#gat-selection-add)
+
+  <Accordion title="Configuration details" id="selections-name-path">
+    - **Persisted default:** unset
+    - **Example:** `models`
+  </Accordion>
+</ResponseField>
+
+<ResponseField name="selections.<name>.include" type="list">
+  Include patterns relative to the selected path for sync, pull, fetch, ls-files, status, diff, and push. Any explicit --path, --include, or --exclude replaces the complete configured selection.
+
+  **Default:** `all tracked paths under the selected path`
+
+  **Set with:** [`gat selection add`](/commands/selection#gat-selection-add)
+
+  <Accordion title="Configuration details" id="selections-name-include">
+    - **Elements:** glob
+    - **Empty list:** selects everything
+    - Order is significant.
+    - **Persisted default:** unset
+    - **Example:** [`data/**`, `models/**`]
+  </Accordion>
+</ResponseField>
+
+<ResponseField name="selections.<name>.exclude" type="list">
+  Exclude patterns relative to the selected path. Exclusions win. Explicit CLI selection replaces the complete configured selection.
+
+  **Default:** []
+
+  **Set with:** [`gat selection add`](/commands/selection#gat-selection-add)
+
+  <Accordion title="Configuration details" id="selections-name-exclude">
+    - **Elements:** glob
+    - **Empty list:** allowed
+    - Order is significant.
+    - **Persisted default:** unset
+    - **Example:** [`tmp/**`]
+  </Accordion>
+</ResponseField>
+
+### Lock
+
+<ResponseField name="lock.shard_levels" type="integer">
+<Warning>
+`lock.shard_levels` is **Experimental**: its interface or behavior may change or be removed between releases. See [Feature lifecycle](/references/feature-lifecycle).
+</Warning>
+
+  Number of hash fan-out directory levels used by the persisted lock.
+
+  **Default:** `0`
+
+  **Set with:** [`gat config lock.shard_levels <value>`](/commands/config)
+
+  <Accordion title="Configuration details" id="lock-shard-levels">
+    - **Range:** `0`-`2`
+    - **Persisted default:** unset
+    - **Example:** `2`
+  </Accordion>
+</ResponseField>
+
+### Mounts
+
+```yaml
+mounts:
+  <name>:
+    url: <value>
+    target: <value>
+    path: <value>
+    rev: <value>
+    rev_lock: <value>
+    include: <value>
+    exclude: <value>
+```
+
+<ResponseField name="mounts.<name>.url" type="Git location">
+  Git repository from which this mount imports tracked rows.
+
+  **Set with:** [`gat mount add`](/commands/mount#gat-mount-add)
+
+  <Accordion title="Configuration details" id="mounts-name-url">
+    - **Persisted default:** unset
+    - **Example:** `../models`
+  </Accordion>
+</ResponseField>
+
+<ResponseField name="mounts.<name>.target" type="path">
+  Destination subtree owned by the mount.
+
+  **Default:** `repository name from the mount URL`
+
+  **Set with:** [`gat mount add`](/commands/mount#gat-mount-add)
+
+  <Accordion title="Configuration details" id="mounts-name-target">
+    - **Persisted default:** unset
+    - **Example:** `releases/resnet`
+  </Accordion>
+</ResponseField>
+
+<ResponseField name="mounts.<name>.path" type="path">
+  Subtree inside the source repository from which rows are selected.
+
+  **Set with:** [`gat mount add`](/commands/mount#gat-mount-add)
+
+  <Accordion title="Configuration details" id="mounts-name-path">
+    - **Persisted default:** `.`
+    - **Example:** `exports`
+  </Accordion>
+</ResponseField>
+
+<ResponseField name="mounts.<name>.rev" type="string">
+  Git revision the mount tracks.
+
+  **Default:** `source repository default branch`
+
+  **Set with:** [`gat mount add`](/commands/mount#gat-mount-add)
+
+  <Accordion title="Configuration details" id="mounts-name-rev">
+    - **Persisted default:** unset
+    - **Example:** `main`
+  </Accordion>
+</ResponseField>
+
+<ResponseField name="mounts.<name>.rev_lock" type="string">
+  Exact commit resolved from the requested mount revision.
+
+  **Set with:** resolved automatically by [gat mount add](/commands/mount#gat-mount-add) and [gat mount update](/commands/mount#gat-mount-update)
+
+  <Accordion title="Configuration details" id="mounts-name-rev-lock">
+    - **Persisted default:** unset
+  </Accordion>
+</ResponseField>
+
+<ResponseField name="mounts.<name>.include" type="list">
+  Glob patterns selecting source rows relative to the mount path.
+
+  **Default:** `all tracked paths under the selected path`
+
+  **Set with:** [`gat mount add`](/commands/mount#gat-mount-add)
+
+  <Accordion title="Configuration details" id="mounts-name-include">
+    - **Elements:** glob
+    - **Empty list:** selects everything
+    - Order is significant.
+    - **Persisted default:** unset
+    - **Example:** [`**/*.onnx`]
+  </Accordion>
+</ResponseField>
+
+<ResponseField name="mounts.<name>.exclude" type="list">
+  Glob patterns excluded from the mount selection.
+
+  **Default:** []
+
+  **Set with:** [`gat mount add`](/commands/mount#gat-mount-add)
+
+  <Accordion title="Configuration details" id="mounts-name-exclude">
+    - **Elements:** glob
+    - **Empty list:** allowed
+    - Order is significant.
+    - **Persisted default:** unset
+    - **Example:** [`tests/**`]
+  </Accordion>
+</ResponseField>
+
+### Routes
+
+```yaml
+routes:
+  <name>:
+    path: <value>
+    remote: <value>
+```
+
+<ResponseField name="routes.<name>.path" type="path">
+  Root-relative tracked-path prefix served by the route.
+
+  **Set with:** [`gat route add`](/commands/route#gat-route-add)
+
+  <Accordion title="Configuration details" id="routes-name-path">
+    - **Persisted default:** unset
+    - **Example:** `data/datasets`
+  </Accordion>
+</ResponseField>
+
+<ResponseField name="routes.<name>.remote" type="string">
+  Named remote that serves the route's path.
+
+  **Set with:** [`gat route add`](/commands/route#gat-route-add)
+
+  <Accordion title="Configuration details" id="routes-name-remote">
+    - **Persisted default:** unset
+    - **Example:** `backup`
+  </Accordion>
+</ResponseField>
+
+### Git integration
+
+<ResponseField name="git.ignore_patterns" type="list">
+  Single-line, non-negated Git-ignore patterns used to derive Gat's managed `.git/info/exclude` block.
+
+  **Default:** []
+
+  **Set with:** [`gat config git.ignore_patterns <value>...`](/commands/config)
+
+  `git.exclude_patterns` <Badge color="orange" size="sm">Deprecated</Badge> — this remains supported for compatibility. Use `git.ignore_patterns` instead. See [Feature lifecycle](/references/feature-lifecycle).
+
+  <Accordion title="Configuration details" id="git-ignore-patterns">
+    - **Elements:** Git-ignore pattern
+    - **Empty list:** allowed
+    - Order is significant.
+    - **Persisted default:** unset
+    - **Example:** [`*.safetensors`, `/artifacts/**/*.bin`]
+  </Accordion>
+</ResponseField>

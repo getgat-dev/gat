@@ -1,0 +1,181 @@
+---
+title: "Set up a remote"
+description: "Connect Gat to object storage or a local directory."
+---
+
+A Gat <Tooltip tip="A named storage location for objects, configured with a provider URL. The name is local configuration; it does not have to match a Git remote name." cta="Manage named remotes" href="/commands/remote">remote</Tooltip> stores large-file bytes. It is separate from the Git remote that
+stores your commits and `gat.lock`.
+
+Run these commands inside a repository initialized with [gat init](/commands/init).
+For the relationship between commits, storage, and working files, see
+[How Gat works](/concepts/how-gat-works).
+
+<Steps>
+  <Step title="Add a storage location">
+    Choose one example and replace its bucket, container, region, or path.
+    Create cloud storage and configure [provider credentials](/references/remote-providers)
+    before transferring files. Local storage needs no cloud credentials.
+
+    <Tabs>
+      <Tab title="Local directory">
+        Use an absolute path with three slashes. The directory must be accessible
+        to each machine that will use this remote.
+
+        <CodeGroup>
+          ```sh macOS / Linux
+          gat remote add origin 'file:///mnt/shared/gat-storage'
+          ```
+
+          ```powershell Windows PowerShell
+          gat remote add origin 'file:///C:/gat-storage'
+          ```
+        </CodeGroup>
+      </Tab>
+      <Tab title="S3">
+        Set a signing region explicitly. For S3-compatible services, also supply
+        the service's `endpoint`.
+
+        ```sh
+        gat remote add origin 's3://my-bucket/gat?region=eu-west-1'
+        ```
+      </Tab>
+      <Tab title="Azure Blob">
+        The host names the **container**. The required endpoint identifies
+        the storage account.
+
+        ```sh
+        gat remote add origin 'azblob://assets/gat?endpoint=https://myaccount.blob.core.windows.net'
+        ```
+      </Tab>
+      <Tab title="Google Cloud">
+        Configure <Tooltip tip="Google Cloud’s credential discovery mechanism. Set up a supported local or workload identity before Gat accesses the bucket." cta="Configure Google Cloud credentials" href="/references/remote-providers#google-cloud-storage-gcs">Application Default Credentials</Tooltip>, then add the bucket:
+
+        ```sh
+        gat remote add origin 'gcs://my-bucket/gat'
+        ```
+      </Tab>
+      <Tab title="Alibaba OSS">
+        Set the endpoint for your bucket's region:
+
+        ```sh
+        gat remote add origin 'oss://my-bucket/gat?endpoint=https://oss-cn-hangzhou.aliyuncs.com'
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Select the default">
+    ```sh
+    gat remote default origin
+    gat remote show origin
+    ```
+
+    Adding a remote never selects a default. Transfers use this default unless
+    a [route](/guides/using-multiple-remotes) or `--remote NAME` selects another.
+
+    <Note>
+      `add` validates configuration, and `show` displays it with secrets redacted.
+      Neither proves connectivity or storage permissions.
+    </Note>
+  </Step>
+
+  <Step title="Upload a tracked file">
+    Replace this path with a file Git does not already track:
+
+    ```sh
+    gat add assets/model.bin
+    gat push
+    gat status --remote
+    ```
+
+    This uploads the object and checks remote presence. An empty selection or
+    already-cached download is not an access test.
+
+    <Note>
+      Network remotes require permission to list the configured storage root
+      during the [connection check](/references/remote-providers#readiness-on-first-use),
+      plus permission for the transfers you run.
+    </Note>
+  </Step>
+
+  <Step title="Share the configuration">
+    ```sh
+    git add gat.yaml gat.lock
+    git commit -m "Configure Gat storage"
+    git push
+    ```
+
+    Remote changes use project configuration by default. Credentials belong in
+    each user's environment or provider credential store.
+  </Step>
+
+  <Step title="Verify from a fresh clone">
+    In a fresh clone of the published repository:
+
+    ```sh
+    gat init
+    gat pull
+    ```
+
+    <Check>
+      Open the restored file to confirm download access and its contents.
+      A local `file://` remote must be accessible at its configured path.
+    </Check>
+  </Step>
+</Steps>
+
+## Keep credentials out of Git
+
+Prefer your provider's credential environment or identity authentication.
+For a secret URL option, save a `${NAME}` reference and **single-quote the URL**
+so your shell preserves it.
+
+```sh
+# Set SAS_TOKEN in your environment before running this command.
+gat remote update origin --url 'azblob://assets/gat?endpoint=https://myaccount.blob.core.windows.net&sas_token=${SAS_TOKEN}'
+```
+
+This Azure example replaces the existing remote URL. Supply the original token
+without extra URL encoding. Variables must be set when adding, changing, or using
+the URL. Read-only commands display redacted templates without expanding them.
+
+<Warning>
+  Redacted output does not remove literal secrets from `gat.yaml`.
+  See [URL templates](/references/remote-providers#use-environment-variables-in-a-url)
+  for syntax and credential examples.
+</Warning>
+
+## Manage storage
+
+<AccordionGroup>
+  <Accordion title="Change or remove a remote">
+    | Task | Command |
+    | --- | --- |
+    | List remotes | `gat remote list` |
+    | Inspect a remote | `gat remote show origin` |
+    | Change its URL | `gat remote update origin --url '<new-url>'` |
+    | Restore an inherited default | `gat remote default --unset` |
+    | Remove a remote | `gat remote remove origin` |
+
+    Change or unset references to a remote before removing it. Use the scope
+    that defines it; an update does not create a local override.
+  </Accordion>
+  <Accordion title="Keep a remote on this machine only">
+    ```sh
+    gat remote add backup 'file:///mnt/backup/gat' --local
+    gat push --remote backup
+    ```
+
+    `--local` writes `.gat/gat.yaml`, which is not committed. `--global` writes
+    user-wide settings. See [Config inheritance](/concepts/config-inheritance).
+  </Accordion>
+</AccordionGroup>
+
+<CardGroup cols={2}>
+  <Card title="Provider credentials" icon="key" href="/references/remote-providers">
+    Authentication, endpoints, and connection troubleshooting.
+  </Card>
+  <Card title="Use multiple remotes" icon="route" href="/guides/using-multiple-remotes">
+    Route paths to different stores or copy objects to a backup.
+  </Card>
+</CardGroup>

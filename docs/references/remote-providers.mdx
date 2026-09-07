@@ -1,0 +1,371 @@
+---
+title: "Remote providers"
+description: "Connect S3, Azure Blob, Google Cloud, Alibaba OSS, or a local directory."
+---
+
+Choose your provider below. For cloud storage, create the bucket or container first.
+Run the commands inside your Gat repository; replace the example storage names with yours.
+
+<Warning>
+Keep credentials in environment variables or use identity-based authentication—not
+in remote URLs. Gat saves URLs as entered, even with `--local`. Redacted output
+does not protect secrets stored in configuration.
+</Warning>
+
+## Choose a provider
+
+In cloud URLs, `/gat` is an optional <Tooltip tip="A shared beginning for object names inside a bucket or container. It keeps Gat objects under one storage namespace; it does not select a directory in your repository.">prefix</Tooltip> for your objects, not a local directory.
+
+<Tabs>
+  <Tab title="S3" id="s3-s3">
+    Amazon S3 and S3-compatible services use `s3://`.
+
+    <Steps>
+      <Step title="Set credentials">
+        Set `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. For temporary
+        credentials, also set `AWS_SESSION_TOKEN`.
+
+        AWS profiles and configured ECS, EC2, or web-identity credentials also work.
+      </Step>
+      <Step title="Add the remote">
+        ```sh
+        gat remote add origin 's3://my-bucket/gat?region=eu-west-1'
+        ```
+
+        **A signing region is required.** Gat checks `region`, then `AWS_REGION`,
+        then `AWS_DEFAULT_REGION`. It does not read the region from a profile or
+        detect it from the bucket.
+      </Step>
+    </Steps>
+
+    <AccordionGroup>
+      <Accordion title="S3-compatible storage">
+        Set your service's <Tooltip tip="The service URL Gat sends storage requests to. An S3-compatible service can require its own URL instead of the standard AWS endpoint.">endpoint</Tooltip> and signing region. Use its credentials in the
+        same AWS environment variables. For local MinIO:
+
+        ```sh
+        gat remote add minio 's3://my-bucket/gat?region=us-east-1&endpoint=http://localhost:9000'
+        ```
+
+        Use HTTPS for non-local endpoints.
+      </Accordion>
+      <Accordion title="Named profiles and SSO">
+        ```sh
+        gat remote add origin 's3://my-bucket/gat?region=eu-west-1&profile=prod'
+        ```
+
+        Without `profile`, Gat uses `AWS_PROFILE` or `default`. Static environment
+        credentials take precedence over profiles.
+
+        Modern `sso_session` profiles and `credential_process` are not loaded
+        directly. For SSO, export credentials from the AWS CLI:
+
+        ```sh
+        aws sso login --profile prod
+        eval "$(aws configure export-credentials --profile prod --format env)"
+        ```
+
+        The export command also works with `credential_process` profiles. Repeat
+        the export when credentials expire; Gat does not refresh exported tokens.
+      </Accordion>
+      <Accordion title="Public buckets">
+        Use `skip_signature=true` for unsigned requests. A region is still required.
+
+        ```sh
+        gat remote add public 's3://my-bucket/public?region=eu-west-1&skip_signature=true'
+        ```
+
+        This does not grant permissions. Public buckets usually allow reads, not uploads.
+      </Accordion>
+    </AccordionGroup>
+  </Tab>
+
+  <Tab title="Azure" id="azure-blob-azblob">
+    Azure Blob Storage uses `azblob://`.
+
+    <Steps>
+      <Step title="Choose credentials">
+        | Method | Environment variables |
+        | --- | --- |
+        | Shared key | `AZURE_STORAGE_ACCOUNT_NAME` + `AZURE_STORAGE_ACCOUNT_KEY` |
+        | SAS token | `AZURE_STORAGE_SAS_TOKEN` |
+        | Bearer token | `AZURE_STORAGE_BEARER_TOKEN` |
+
+        Configured managed identity, workload identity, and service-principal
+        credentials also work.
+      </Step>
+      <Step title="Add the remote">
+        ```sh
+        gat remote add origin 'azblob://my-container/gat?endpoint=https://myaccount.blob.core.windows.net'
+        ```
+
+        **Set the storage account endpoint explicitly.** The container name and
+        credential variables do not supply it.
+      </Step>
+    </Steps>
+
+    <Accordion title="Use an Azure CLI login">
+      Gat does not use `az login` automatically. Export a storage token from your
+      existing CLI session:
+
+      ```sh
+      export AZURE_STORAGE_BEARER_TOKEN="$(
+        az account get-access-token \
+          --resource https://storage.azure.com/ \
+          --query accessToken -o tsv
+      )"
+      ```
+
+      Repeat when the token expires. Existing shared-key or SAS credentials take
+      precedence over the bearer token.
+    </Accordion>
+  </Tab>
+
+  <Tab title="GCS" id="google-cloud-storage-gcs">
+    Google Cloud Storage uses `gcs://`.
+
+    <Steps>
+      <Step title="Set up Application Default Credentials">
+        For local development:
+
+        ```sh
+        gcloud auth application-default login
+        ```
+
+        Use this command, not `gcloud auth login`. Alternatively, set
+        `GOOGLE_APPLICATION_CREDENTIALS` to a credential file. On Google Cloud,
+        an attached service account or configured GKE workload identity can supply credentials.
+      </Step>
+      <Step title="Add the remote">
+        ```sh
+        gat remote add origin 'gcs://my-bucket/gat'
+        ```
+      </Step>
+    </Steps>
+
+    <Accordion title="Set an explicit credential file">
+      Keep machine-specific paths in local configuration:
+
+      ```sh
+      gat remote add --local origin 'gcs://my-bucket/gat?credential_path=/path/to/service-account.json'
+      ```
+
+      `credential_path` reads JSON from a file. The separate `credential` option
+      expects base64-encoded JSON, not a filename. Prefer a file: base64 is not
+      encryption. If you use `credential=${GCS_CREDENTIAL}`, supply the original
+      base64 value without additional URL encoding.
+    </Accordion>
+  </Tab>
+
+  <Tab title="OSS" id="alibaba-cloud-oss-oss">
+    Alibaba Cloud Object Storage Service uses `oss://`.
+
+    <Steps>
+      <Step title="Set credentials">
+        Set `ALIBABA_CLOUD_ACCESS_KEY_ID` and `ALIBABA_CLOUD_ACCESS_KEY_SECRET`.
+        For temporary credentials, also set `ALIBABA_CLOUD_SECURITY_TOKEN`.
+
+        Configured ECS RAM roles and OIDC federation also work.
+      </Step>
+      <Step title="Add the remote">
+        ```sh
+        gat remote add origin 'oss://my-bucket/gat?endpoint=https://oss-cn-hangzhou.aliyuncs.com'
+        ```
+
+        **Set the endpoint for your bucket's region.**
+      </Step>
+    </Steps>
+  </Tab>
+
+  <Tab title="Local" id="local-directory-file">
+    Local directories and mounted filesystems use `file://`. No cloud credentials are needed.
+
+    <Steps>
+      <Step title="Check filesystem access">
+        You need filesystem permissions for the operations you run. Hard-link support
+        is not required.
+        Mount network storage locally rather than using `file://host/...`.
+      </Step>
+      <Step title="Add the remote">
+        <CodeGroup>
+          ```sh macOS / Linux
+          gat remote add --local origin 'file:///mnt/backup/gat'
+          ```
+
+          ```powershell Windows PowerShell
+          gat remote add --local origin 'file:///C:/Users/alice/gat-cache'
+          ```
+        </CodeGroup>
+
+        Use **three slashes** and an absolute path. On Windows, use forward slashes.
+        `file://path` is not valid.
+      </Step>
+    </Steps>
+
+    <Accordion title="Path overrides and filesystem behavior">
+      The only supported query option is `root`, which overrides the URL path:
+
+      <CodeGroup>
+        ```text macOS / Linux
+        file:///?root=/mnt/backup/gat
+        ```
+
+        ```text Windows
+        file:///?root=C:/Users/alice/gat-cache
+        ```
+      </CodeGroup>
+
+      On Windows, use this form instead of appending query options to a
+      drive-letter URL. `atomic_write_dir` and other options are rejected.
+
+      Gat stages writes beside the destination and publishes by atomic rename,
+      which may replace an existing object at the same key. Presence checks do not verify or repair existing content. Windows
+      directory-entry durability after power loss depends on the platform.
+    </Accordion>
+  </Tab>
+</Tabs>
+
+## Manage a remote
+
+These examples use `origin`. Substitute your remote name as needed:
+
+```sh
+gat remote list
+gat remote show origin
+```
+
+<Note>
+`add` and URL-changing `update` check configuration and backend capabilities—not
+connectivity or account permissions. `list` and `show` only inspect configuration.
+</Note>
+
+<AccordionGroup>
+  <Accordion title="Choose where settings are saved">
+    | Scope | File | Use for |
+    | --- | --- | --- |
+    | `--project` (default) | `gat.yaml` | Shared repository settings |
+    | `--local` | `.gat/gat.yaml` | This repository on this machine; not committed |
+    | `--global` | `~/.gat/gat.yaml` | User-wide defaults |
+
+    Local settings override project settings; project settings override global settings.
+    See [Config inheritance](/concepts/config-inheritance) for how complete named
+    definitions override one another.
+  </Accordion>
+  <Accordion title="Update a remote URL">
+    ```sh
+    gat remote update origin --url 's3://my-bucket/gat?region=eu-west-1'
+    ```
+
+    Use the same scope flag as the original definition, such as `--local`.
+    Changing the URL does not copy stored objects. Follow the
+    [storage migration workflow](/guides/using-multiple-remotes#routes-do-not-copy-existing-objects)
+    when moving content to a new store.
+  </Accordion>
+  <Accordion title="Use environment variables in a URL">
+    ```sh
+    export GAT_BUCKET=my-bucket
+    gat remote add origin 's3://${GAT_BUCKET}/gat?region=eu-west-1'
+    ```
+
+    Single quotes preserve the <Tooltip tip="A variable reference saved in the URL instead of its current value. Gat resolves it from the environment when needed, so each machine can supply its own value without changing shared configuration." cta="Configure and share a remote" href="/set-up-a-remote">placeholder</Tooltip>. Set the variable before adding or
+    updating the URL, and whenever a command uses the remote. Examples using
+    `export` require a POSIX shell; use your shell's equivalent on Windows.
+
+    | Syntax | Result |
+    | --- | --- |
+    | `${NAME}` | Environment value; missing variables cause an error |
+    | `$NAME` | Literal text; braces are required |
+    | `$$` | Literal `$` |
+    | `$${NAME}` | Literal `${NAME}` |
+
+    Names must match `[A-Za-z_][A-Za-z0-9_]*`. Expansion happens once; shell commands
+    and `${NAME:-default}` are not supported.
+  </Accordion>
+</AccordionGroup>
+
+## Troubleshooting and advanced options
+
+<AccordionGroup>
+  <Accordion title="Special characters in URL values">
+    Use an environment reference when an option contains special characters:
+
+    ```sh
+    gat remote add origin 'azblob://assets/gat?endpoint=https://myaccount.blob.core.windows.net&sas_token=${SAS_TOKEN}'
+    ```
+
+    Set `SAS_TOKEN` to the token exactly as Azure supplies it. Gat preserves
+    characters such as `&`, `+`, `#`, and `%` in query-value substitutions.
+    Do not add URL encoding. If you previously pre-encoded a variable for Gat,
+    remove that extra encoding layer.
+
+    You can also set `AZURE_STORAGE_SAS_TOKEN` and omit `sas_token` from the URL.
+    Literal URLs and whole-URL references retain normal URL semantics; use
+    references for individual values rather than embedding raw tokens in them.
+  </Accordion>
+  <Accordion title="Redacted output and untrusted remotes">
+    `list` and `show` redact sensitive URL values without expanding templates or
+    opening a backend. The saved URL is unchanged.
+
+    Review URLs and endpoints from untrusted repositories before using your
+    credentials with them.
+  </Accordion>
+  <Accordion title="Private certificates and unsupported options">
+    Private certificate authorities must be trusted by the build's TLS transport.
+    There is no generic remote query option; `SSL_CERT_FILE` and `SSL_CERT_DIR`
+    are not portable overrides.
+
+    Only the five schemes above are supported. Cloud options must be supported by
+    Gat's OpenDAL version (0.58.2), not merely by the provider's SDK. In cloud URLs,
+    the host and non-empty path override `bucket`/`container` and `root` query fields.
+  </Accordion>
+</AccordionGroup>
+
+## Readiness on first use
+
+Before the first network transfer, Gat checks that it can list the configured
+storage root. Credentials must allow **root listing**, plus the read, write, or
+delete operations you intend to use. This check has a **5-second deadline**.
+
+If connection setup needs longer, set a positive whole number of seconds:
+
+<CodeGroup>
+  ```sh macOS / Linux
+  export GAT_CONNECT_TIMEOUT=15
+  gat push
+  ```
+
+  ```powershell Windows PowerShell
+  $env:GAT_CONNECT_TIMEOUT = '15'
+  gat push
+  ```
+</CodeGroup>
+
+Unset the variable to restore the default. This changes connection readiness
+only, not transfer timeouts.
+
+<AccordionGroup>
+  <Accordion title="Connection times out or listing is denied">
+    For a timeout, check network access and the configured credential provider.
+    A timeout does not prove credentials are missing. If listing is denied,
+    check permission to list the configured bucket or container prefix.
+
+    After fixing the problem, rerun the command. A successful connection check
+    does not prove read, write, or delete access; test an actual transfer.
+  </Accordion>
+  <Accordion title="When the check runs">
+    The check includes credential discovery, requests, and retries. Its result
+    is reused within the command. Unused remotes, cache-only work, configuration
+    inspection, and `file://` remotes do not run it.
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+<Columns cols={2}>
+  <Card title="Transfer files" icon="arrows-rotate" href="/set-up-a-remote">
+    Push, fetch, or pull objects with your remote.
+  </Card>
+  <Card title="Remote commands" icon="terminal" href="/commands/remote">
+    Choose a default remote and manage existing remotes.
+  </Card>
+</Columns>

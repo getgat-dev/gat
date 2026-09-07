@@ -1,0 +1,446 @@
+---
+title: "gat mount"
+description: "Import files from another Git repository by path."
+tag: "Experimental"
+---
+
+<Warning>
+`gat mount` is **Experimental**: its interface or behavior may change or be removed between releases. See [Feature lifecycle](/references/feature-lifecycle).
+</Warning>
+
+A mount imports tracked files from another Git repository and owns every
+Gat-managed path below its target. Its stable name identifies the source
+independently of where the files are placed.
+
+| Storage choice | Behavior on add or update |
+| --- | --- |
+| Automatic setup (default) | Preserve an existing route at the exact target; otherwise reuse or import the source default remote and create a route. |
+| `--remote NAME` | Resolve the name in the destination first, then the source, and set up the target route. |
+| `--no-setup` | Skip remote and route setup for this invocation. A later update can set them up. |
+
+`--remote` and `--no-setup` cannot be combined. Setup never changes the
+destination's default remote.
+
+<Accordion title="How automatic setup chooses a remote">
+  Gat reuses a destination remote with the same URL template as the source
+  default remote. Otherwise, it imports that remote under an available name.
+
+  If the source has no default remote, the mount succeeds without automatic
+  storage setup. Configure storage with `gat remote` and `gat route`.
+</Accordion>
+
+<Note>
+Routes and remotes are independent configuration. Moving or removing a mount
+does not move or remove them.
+</Note>
+
+## Usage
+
+```text
+Usage: gat mount <COMMAND>
+```
+
+<Accordion title="All options" id="gat-mount-options">
+
+```text
+Usage: gat mount <COMMAND>
+
+Commands:
+  list    List all configured mounts
+  add     Add a mount: imports `gat.lock` rows from another Git repository under
+          `TARGET`, which this mount then owns. `NAME` is the mount's stable
+          identity (its `mounts:` config key). `URL` is the upstream Git
+          repository: a local path, or a remote URL (`http://`, `https://`,
+          `ssh://`, `git://`, `file://`, or scp-like `[user@]host:path`) --
+          remote URLs are cloned into a temporary directory for the duration of
+          the command. `TARGET` is the destination target this mount owns in
+          this repository; if omitted, Gat derives it from `URL`'s parsed source
+          repository path -- its repository name, with a terminal `.git`
+          stripped where applicable. It must not be `.`, must not overlap any
+          other mount's target, and must not already contain root-owned
+          `gat.lock` rows. `--path` selects a subtree inside the source
+          repository (default `.`), and `--include`/`--exclude` filter within it
+          (relative to `--path`), before the selected rows are reparented under
+          `TARGET`. Resolves `--rev`'s `rev_lock` (via `gix`, from the other
+          repository's local git history). Automatically reuse or import the
+          source default remote and create a target route unless one already
+          exists. Use --no-setup to skip storage setup. The destination default
+          remote is unchanged
+  remove  Remove a mount by name. Removes its `mounts:` entry in `gat.yaml` and
+          deletes the `gat.lock` rows it owns (every row under its target, since
+          mount targets never overlap). Pass `--detach-only` to keep those rows
+          instead: they become root-owned. Never removes a `routes:` entry at
+          the mount target -- routes are independent policy, and nested routes
+          inside a mount target remain valid and resolve independently of mount
+          ownership
+  update  Update an existing mount in place, preserving its stable `NAME`.
+          Recomputes the upstream snapshot (re-resolving `rev_lock` and
+          re-importing rows), preserving omitted source and selection fields.
+          Storage setup runs on each invocation unless --no-setup is supplied.
+          Replaces the mount's owned `gat.lock` rows with the freshly imported
+          set. Changing `--target` moves the mount's placement/ownership but
+          never moves a generic `routes:` entry -- routes stay where they are
+          configured
+  show    Show everything about one configured mount: its upstream URL
+          (sanitized), source `--path`, tracked target, `--rev`/`rev_lock`,
+          `--include`/`--exclude`, the count of `gat.lock` rows it owns, the
+          effective route serving its target -- reported by stable name, matched
+          path, and remote (or the repository default remote if no route
+          matches) -- and which config layer defines it. Reads the effective
+          config merged across every scope
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+## Subcommands
+
+<CardGroup cols={2}>
+  <Card title="gat mount list" href="#gat-mount-list" />
+  <Card title="gat mount add" href="#gat-mount-add" />
+  <Card title="gat mount remove" href="#gat-mount-remove" />
+  <Card title="gat mount update" href="#gat-mount-update" />
+  <Card title="gat mount show" href="#gat-mount-show" />
+</CardGroup>
+
+## gat mount add
+
+Import a committed source snapshot under a target directory. Storage setup is automatic unless `--no-setup` is supplied.
+
+### Usage
+
+```text
+Usage: gat mount add [OPTIONS] <NAME> <URL> [TARGET]
+```
+
+<Accordion title="All options" id="gat-mount-add-options">
+
+```text
+Usage: gat mount add [OPTIONS] <NAME> <URL> [TARGET]
+
+Arguments:
+  <NAME>
+          Stable mount identity and `mounts:` config key
+
+  <URL>
+          Upstream Git repository this mount pulls from: a local path, or a
+          remote URL (`http://`, `https://`, `ssh://`, `git://`, `file://`, or
+          scp-like `[user@]host:path`)
+
+  [TARGET]
+          Destination target this mount owns in this repository. Cannot be `.`,
+          and cannot overlap another mount's target. If omitted, Gat derives it
+          from `URL`'s parsed source repository path -- its repository name,
+          with a terminal `.git` stripped where applicable
+
+Options:
+      --path <PATH>
+          Select this file or subtree. Any explicit --path, --include, or
+          --exclude replaces the complete configured selection. Use --path . for
+          the whole repository. For mount add, omission selects the source root;
+          repository selection defaults never apply to mounts
+
+      --include <INCLUDE>
+          Glob pattern (matched relative to `--path`) selecting which paths to
+          include. Repeatable. Component-aware: `*.bin` matches only immediate
+          children, while `**/*.bin` matches recursively. Empty means everything
+          under `--path`
+
+      --exclude <EXCLUDE>
+          Glob pattern (matched relative to `--path`) excluded from `--include`
+          (or from everything under `--path`, if `--include` is empty).
+          Repeatable. Component-aware like `--include`; exclude always wins over
+          include
+
+      --rev <REV>
+          Git ref (branch, tag, or commit) to track. Defaults to the other
+          repository's default branch
+
+      --remote <REMOTE>
+          Route the target to this remote, resolving destination names first,
+          then importing or reusing the source repository's matching remote
+
+      --no-setup
+          Skip automatic remote and route setup for this operation
+
+      --global
+          Write to the global config (`~/.gat/gat.yaml`), applying to every
+          repository for this user
+
+      --project
+          Write to the project config (`<repo_root>/gat.yaml`), committed to git
+          and shared with everyone who clones the repo. The default
+
+      --local
+          Write to the local config (`<repo_root>/.gat/gat.yaml`), repo-local
+          and never committed (`.gat/` isn't tracked)
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+### Examples
+
+<Tabs sync={false}>
+<Tab title="No setup">
+
+Import mount metadata without changing remotes or routes.
+
+```sh
+gat mount add resnet ../models --no-setup
+```
+
+</Tab>
+<Tab title="Local source">
+
+Import rows from another repository.
+
+```sh
+gat mount add resnet ../models releases/resnet
+```
+
+</Tab>
+<Tab title="Source filters">
+
+Choose a source subtree, glob, and revision.
+
+```sh
+gat mount add resnet ../models releases/resnet --path exports --include '**/*.onnx' --rev main
+```
+
+</Tab>
+</Tabs>
+
+## gat mount list
+
+List effective mounts and their targets.
+
+### Usage
+
+```text
+Usage: gat mount list
+```
+
+<Accordion title="All options" id="gat-mount-list-options">
+
+```text
+Usage: gat mount list
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+### Examples
+
+Show every effective mount.
+
+```sh
+gat mount list
+```
+
+## gat mount remove
+
+Remove a mount and its imported tracking entries. Use `--detach-only` to retain the entries under local ownership. Routes and remotes are kept.
+
+### Usage
+
+```text
+Usage: gat mount remove [OPTIONS] <NAME>
+```
+
+<Accordion title="All options" id="gat-mount-remove-options">
+
+```text
+Usage: gat mount remove [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>
+          Name of the mount to remove
+
+Options:
+      --detach-only
+          Keep the mount's currently-owned `gat.lock` rows instead of deleting
+          them; only the `mounts:` config entry is removed
+
+      --global
+          Write to the global config (`~/.gat/gat.yaml`), applying to every
+          repository for this user
+
+      --project
+          Write to the project config (`<repo_root>/gat.yaml`), committed to git
+          and shared with everyone who clones the repo. The default
+
+      --local
+          Write to the local config (`<repo_root>/.gat/gat.yaml`), repo-local
+          and never committed (`.gat/` isn't tracked)
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+### Examples
+
+<Tabs sync={false}>
+<Tab title="Remove">
+
+Remove the definition and its owned rows.
+
+```sh
+gat mount remove resnet
+```
+
+</Tab>
+<Tab title="Detach">
+
+Keep imported rows as root-owned paths.
+
+```sh
+gat mount remove resnet --detach-only
+```
+
+</Tab>
+</Tabs>
+
+## gat mount show
+
+Show the source, pinned revision, filters, target, owned path count, effective storage route, and defining scope.
+
+### Usage
+
+```text
+Usage: gat mount show <NAME>
+```
+
+<Accordion title="All options" id="gat-mount-show-options">
+
+```text
+Usage: gat mount show <NAME>
+
+Arguments:
+  <NAME>
+          Name of the mount to inspect
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+### Examples
+
+Inspect source, target, ownership, revision, and routing details.
+
+```sh
+gat mount show resnet
+```
+
+## gat mount update
+
+Refresh the source snapshot. Omitted settings are preserved; supplied filter lists replace the saved lists.
+
+### Usage
+
+```text
+Usage: gat mount update [OPTIONS] <NAME>
+```
+
+<Accordion title="All options" id="gat-mount-update-options">
+
+```text
+Usage: gat mount update [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>
+          Name of the mount to update (its stable `mounts:` config key)
+
+Options:
+      --url <URL>
+          New upstream Git repository URL (keeps the current URL if omitted)
+
+      --target <TARGET>
+          New destination target this mount owns (keeps the current target if
+          omitted). Cannot be `.`, and cannot overlap another mount's target
+
+      --path <PATH>
+          New subtree inside the source repository to pull from (keeps the
+          current `--path` if omitted)
+
+      --rev <REV>
+          New Git ref to track (keeps the current `--rev` if omitted)
+
+      --remote <REMOTE>
+          Route the target to this remote, resolving destination names first,
+          then importing or reusing the source repository's matching remote
+
+      --no-setup
+          Skip automatic remote and route setup for this operation
+
+      --include <INCLUDE>
+          Replace the mount's `--include` globs (keeps the current ones if
+          omitted). Repeatable
+
+      --exclude <EXCLUDE>
+          Replace the mount's `--exclude` globs (keeps the current ones if
+          omitted). Repeatable
+
+      --global
+          Write to the global config (`~/.gat/gat.yaml`), applying to every
+          repository for this user
+
+      --project
+          Write to the project config (`<repo_root>/gat.yaml`), committed to git
+          and shared with everyone who clones the repo. The default
+
+      --local
+          Write to the local config (`<repo_root>/.gat/gat.yaml`), repo-local
+          and never committed (`.gat/` isn't tracked)
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+### Examples
+
+<Tabs sync={false}>
+<Tab title="No setup">
+
+Refresh the mount while leaving remotes and routes unchanged.
+
+```sh
+gat mount update resnet --no-setup
+```
+
+</Tab>
+<Tab title="Revision">
+
+Refresh a mount from a new revision and source path.
+
+```sh
+gat mount update resnet --rev v2 --path exports
+```
+
+</Tab>
+<Tab title="Filters">
+
+Replace the mount's include and exclude lists.
+
+```sh
+gat mount update resnet --include '**/*.onnx' --exclude 'tests/**'
+```
+
+</Tab>
+</Tabs>

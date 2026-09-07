@@ -1,0 +1,28 @@
+[package]
+name = "gat-tools"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+autobins = false
+
+[[bin]]
+name = "generate-docs"
+path = "generate-docs.rs"
+
+[[bin]]
+name = "generate-benchmark"
+path = "generate-benchmark.rs"
+
+[dependencies]
+gat = { path = ".." }
+gat-core = { path = "../gat-core" }
+gat-engine = { path = "../gat-engine" }
+anyhow = "1"
+clap = { version = "4", features = ["derive", "wrap_help"] }
+indicatif = "0.18"
+rayon = "1"
+serde_json = "1"
+tempfile = "3"
+
+[lints]
+workspace = true

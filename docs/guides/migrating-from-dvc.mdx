@@ -1,0 +1,153 @@
+---
+title: "Migrating from DVC"
+description: "Move current data and models to Gat without rewriting old commits."
+---
+
+Migrate the current files, then use Gat for future versions. Old commits keep
+their DVC metadata and may still need DVC and its storage.
+See [How Gat works](/concepts/how-gat-works) for the lock, cache, and publishing model
+that will manage new versions.
+
+<Note>
+  Gat replaces data versioning, not DVC pipelines, experiments, metrics, or plots.
+  Retire or replace those workflows before removing their output definitions.
+  Configure Gat storage separately; it uses a different object format.
+</Note>
+
+## Migrate the current version
+
+These examples move `data/` and `models/`. Substitute only the paths you intend
+to migrate, and start with a <Tooltip tip="A checkout with no pending changes you need to preserve. Review git status and commit or set aside existing work so the migration commit contains only the intended transition." cta="Review the publishing workflow" href="/guides/branching-and-merging#typical-workflows">clean working tree</Tooltip>.
+
+<Steps>
+  <Step title="Create a branch and restore the data">
+    ```sh
+    git status
+    git switch -c migrate-to-gat
+    dvc pull
+    ```
+
+    Verify the real files are present before removing any DVC metadata.
+  </Step>
+  <Step title="Configure Gat storage">
+    ```sh
+    gat init
+    gat remote add storage '<gat-remote-url>'
+    gat remote default storage
+    ```
+
+    Replace the URL and configure credentials using [Set up a remote](/set-up-a-remote).
+  </Step>
+  <Step title="Release DVC ownership">
+    <Tabs sync={false}>
+      <Tab title="Standalone files">
+        ```sh
+        dvc remove data.dvc
+        dvc remove models.dvc
+        ```
+
+        This removes the definitions and their ignore entries while keeping
+        workspace files. **Do not pass `--outs`**, which deletes the outputs.
+      </Tab>
+      <Tab title="Pipeline outputs">
+        Once the producing stage has been retired or replaced, use
+        `dvc remove STAGE` without `--outs` to keep its working files.
+        Keep unrelated stages and DVC configuration intact.
+      </Tab>
+    </Tabs>
+  </Step>
+  <Step title="Track the files with Gat">
+    ```sh
+    gat add data/ models/
+    gat ls-files --path .
+    ```
+
+    Confirm all intended files are listed. If old ignore rules still match,
+    remove those rules or use `gat add --force` for the intended paths.
+  </Step>
+  <Step title="Commit and publish">
+    ```sh
+    git add -u
+    git add gat.yaml gat.lock
+    git diff --cached --stat
+    git commit -m "Migrate data from DVC to Gat"
+    gat push --path .
+    git push -u origin migrate-to-gat
+    ```
+
+    Review the staged changes before committing. Upload Gat objects before
+    publishing the Git branch. `--path .` includes all paths even if a default
+    selection is configured.
+  </Step>
+</Steps>
+
+## Validate from a fresh clone
+
+Replace the repository URL, then run:
+
+```sh
+git clone --branch migrate-to-gat '<repository-url>' gat-migration-test
+cd gat-migration-test
+gat init
+gat pull --path .
+gat ls-files --path .
+```
+
+<Check>
+  Open the restored files and confirm their contents. This revision should
+  reconstruct the migrated data without DVC.
+</Check>
+
+Merge the migration branch once validation succeeds. Keep the old DVC storage
+for as long as pre-migration revisions must remain reproducible.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="DVC cannot restore the files">
+    Keep the DVC metadata. Resolve its credentials or storage access first.
+    If objects are missing, recover the bytes from another clone, cache, or
+    backup. Metadata alone cannot recover file contents.
+  </Accordion>
+  <Accordion title="Gat says a file is tracked by Git">
+    Check with `git ls-files -- PATH`. If the data file is listed, remove only
+    its index entry, keeping the working copy:
+
+    ```sh
+    git rm --cached -- path/to/file
+    gat add path/to/file
+    ```
+
+    Keep `.dvc` files and pipeline metadata that still serve unmigrated data.
+  </Accordion>
+  <Accordion title="Gat skips a migrated file">
+    Run `git check-ignore -v PATH` and inspect `.gatignore`. Remove stale rules
+    or use `gat add --force PATH`. Force bypasses ignore filtering, but still
+    rejects Git-tracked files and other unsafe selections.
+  </Accordion>
+  <Accordion title="I used --outs and the files disappeared">
+    Restore the DVC definition, then download the data again:
+
+    ```sh
+    git restore -- path/to/data.dvc
+    dvc pull
+    ```
+
+    For pipeline outputs, restore the relevant `dvc.yaml` and `dvc.lock` instead.
+    Verify the restored bytes before retrying the migration without `--outs`.
+  </Accordion>
+  <Accordion title="Can I remove the remaining DVC configuration?">
+    Keep `.dvc/`, `dvc.yaml`, and `dvc.lock` while any pipeline, experiment, or
+    unmigrated data still uses them. A partial migration is fine; give each
+    output one owner and retain historical storage as needed.
+  </Accordion>
+</AccordionGroup>
+
+<CardGroup cols={2}>
+  <Card title="Storage troubleshooting" icon="cloud" href="/references/remote-providers">
+    Credentials, endpoints, and connection failures.
+  </Card>
+  <Card title="Missing files or conflicts" icon="arrows-rotate" href="/concepts/automatic-sync">
+    Restore files, preserve edits, or repair cached objects.
+  </Card>
+</CardGroup>

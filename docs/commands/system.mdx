@@ -1,0 +1,258 @@
+---
+title: "gat system"
+description: "Inspect, repair, or clean internals and local cache state."
+tag: "Experimental"
+---
+
+<Warning>
+`gat system` is **Experimental**: its interface or behavior may change or be removed between releases. See [Feature lifecycle](/references/feature-lifecycle).
+</Warning>
+
+Inspect and maintain <Tooltip tip="Clone-specific bookkeeping, cache data, and Git integration. These commands operate on local maintenance concerns rather than publishing new asset versions." cta="Understand the local files" href="/concepts/how-gat-works#what-lives-where">local repository state</Tooltip> with these experimental commands.
+
+| Command | Purpose |
+| --- | --- |
+| `inspect` | Read-only checks of lock, state, cache, and Git integration. |
+| `repair` | Restore repository consistency. |
+| `clean` | Remove disposable state. Explicit purge flags can delete cached objects or temporary files. |
+
+<Warning>
+Purging cached objects can remove your only copy of unpublished content.
+Upload or back up needed objects before using `--purge-objects`.
+</Warning>
+
+For missing working files or damaged cached content, start with
+[missing and corrupted objects](/concepts/automatic-sync#missing-and-corrupted-objects).
+To remove unneeded stored content using history-based protection, see [gat gc](/commands/gc).
+
+## Usage
+
+```text
+Usage: gat system <COMMAND>
+```
+
+<Accordion title="All options" id="gat-system-options">
+
+```text
+Usage: gat system <COMMAND>
+
+Commands:
+  inspect  Read-only inspection of Gat-managed maintenance state. Never writes
+           or repairs anything; reports actionable findings only
+  repair   Restore invariants deliberately: recover authoritative `gat.lock`
+           state only via an explicit recovery choice, and rebuild derived state
+           (`SQLite` mirrors, cache metadata, managed Git excludes) when needed.
+           Omit the scope to target every domain
+  clean    Remove only state proven disposable: completed transaction scratch,
+           abandoned temporary cache files, stale Gat-managed Git artifacts, and
+           other cleanup that never makes an authoritative recovery choice. Omit
+           the scope to target every domain
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+## Subcommands
+
+<CardGroup cols={2}>
+  <Card title="gat system inspect" href="#gat-system-inspect" />
+  <Card title="gat system repair" href="#gat-system-repair" />
+  <Card title="gat system clean" href="#gat-system-clean" />
+</CardGroup>
+
+## gat system clean
+
+Remove disposable state. Purge flags also remove unverified temporary files or cached objects.
+
+### Usage
+
+```text
+Usage: gat system clean [OPTIONS] [SCOPE]
+```
+
+<Accordion title="All options" id="gat-system-clean-options">
+
+```text
+Usage: gat system clean [OPTIONS] [SCOPE]
+
+Arguments:
+  [SCOPE]
+          Maintenance domain to clean (`all` by default)
+
+          [possible values: lock, state, cache, git, all]
+
+Options:
+      --purge-temporary
+          Also remove unverified `tmp-*` cache ingest scratch files, in addition
+          to the ordinary proven-safe cleanup `gat system clean` does by
+          default. Gat cannot tell an abandoned temp file apart from one an
+          in-progress `add`/`fetch` on this or another process sharing the cache
+          is still writing, so this is an explicit, destructive opt-in: it can
+          disrupt another process's in-progress ingest. Never implied by `all`
+
+      --purge-objects
+          Also empty Gat's content-object fan-out namespace under the local
+          cache, in addition to the ordinary disposable temporary cache state
+          `gat system clean` removes by default. All locally cached objects are
+          removed and may need to be fetched/rebuilt again. Never implied by
+          `all`; must be opted into explicitly
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+### Examples
+
+<Tabs sync={false}>
+<Tab title="Disposable state">
+
+Remove only state Gat can prove is disposable.
+
+```sh
+gat system clean
+```
+
+</Tab>
+<Tab title="Temporary files">
+
+Explicitly remove unverified ingest scratch files.
+
+```sh
+gat system clean cache --purge-temporary
+```
+
+</Tab>
+<Tab title="Cached objects">
+
+<Warning>This deletes cached objects, including unpublished content. Upload or back up needed objects first.</Warning>
+
+```sh
+gat system clean cache --purge-objects
+```
+
+</Tab>
+</Tabs>
+
+## gat system inspect
+
+Check repository state without changing it. Omit the domain to inspect all domains.
+
+### Usage
+
+```text
+Usage: gat system inspect [SCOPE]
+```
+
+<Accordion title="All options" id="gat-system-inspect-options">
+
+```text
+Usage: gat system inspect [SCOPE]
+
+Arguments:
+  [SCOPE]
+          Maintenance domain to inspect (`all` by default)
+
+          [possible values: lock, state, cache, git, all]
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+### Examples
+
+<Tabs sync={false}>
+<Tab title="All domains">
+
+Inspect lock, state, cache, and Git integration.
+
+```sh
+gat system inspect
+```
+
+</Tab>
+<Tab title="Cache">
+
+Restrict inspection to the cache domain.
+
+```sh
+gat system inspect cache
+```
+
+</Tab>
+</Tabs>
+
+## gat system repair
+
+Repair the selected repository domain. Review inspection results before choosing recovery options.
+
+### Usage
+
+```text
+Usage: gat system repair [OPTIONS] [SCOPE]
+```
+
+<Accordion title="All options" id="gat-system-repair-options">
+
+```text
+Usage: gat system repair [OPTIONS] [SCOPE]
+
+Arguments:
+  [SCOPE]
+          Maintenance domain to repair (`all` by default)
+
+          [possible values: lock, state, cache, git, all]
+
+Options:
+      --restore-backup
+          Explicitly restore the validated backup representation left by an
+          interrupted `gat.lock` reshape (`.gat/lock-reshape/<txn>/backup`)
+          instead of promoting the staged target. Only meaningful with `gat
+          system repair lock`
+
+      --promote-staged
+          Explicitly promote the validated staged `gat.lock` target left by an
+          interrupted reshape (`.gat/lock-reshape/<txn>/new`) instead of
+          restoring the backup. Only meaningful with `gat system repair lock`
+
+      --transaction <TRANSACTION>
+          Which interrupted `gat.lock` reshape transaction id to recover when
+          more than one exists under `.gat/lock-reshape/`. Only meaningful with
+          `gat system repair lock`
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+### Examples
+
+<Tabs sync={false}>
+<Tab title="State">
+
+Rebuild derived repository state.
+
+```sh
+gat system repair state
+```
+
+</Tab>
+<Tab title="Lock backup">
+
+Choose the validated backup during explicit lock recovery.
+
+```sh
+gat system repair lock --restore-backup
+```
+
+</Tab>
+</Tabs>

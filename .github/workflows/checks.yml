@@ -1,0 +1,213 @@
+name: Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Full dependency debug information plus workspace doctest executables exceed
+# hosted runner disks. Keep source-line backtraces without full debug symbols.
+env:
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
+jobs:
+  workflows:
+    name: workflow lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/actionlint.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/rhysd/actionlint/releases/download/v$ACTIONLINT_VERSION/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            --output "$archive"
+          echo "$ACTIONLINT_SHA256  $archive" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/actionlint-bin"
+          tar xzf "$archive" -C "$RUNNER_TEMP/actionlint-bin" actionlint
+          echo "$RUNNER_TEMP/actionlint-bin" >> "$GITHUB_PATH"
+      - run: actionlint
+
+  installers-unix:
+    name: installer resilience (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: Dash
+            installer-shell: /bin/dash
+          - os: macos-latest
+            name: Bash 3.2
+            installer-shell: /bin/bash
+    runs-on: ${{ matrix.os }}
+    env:
+      INSTALLER_SHELL: ${{ matrix.installer-shell }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Verify Bash baseline
+        if: runner.os == 'macOS'
+        run: |
+          version="$(/bin/bash -c 'printf "%s" "$BASH_VERSION"')"
+          echo "Bash $version"
+          case "$version" in
+            3.2.*) ;;
+            *) echo 'Expected Bash 3.2'; exit 1 ;;
+          esac
+      - name: Lint Unix installers
+        if: runner.os == 'Linux'
+        run: shellcheck docs/install.sh tools/test-installers.sh
+      - name: Unix installer fixtures
+        run: bash tools/test-installers.sh "$INSTALLER_SHELL"
+      # Enable once the v0.1.0 release and its assets are publicly downloadable.
+      # - name: Install v0.1.0 over HTTPS and smoke-test the binary
+      #   env:
+      #     GAT_INSTALL_DIR: ${{ runner.temp }}/gat-install-smoke
+      #   run: |
+      #     "$INSTALLER_SHELL" docs/install.sh --version v0.1.0
+      #     "$GAT_INSTALL_DIR/gat" --version
+
+  installers-windows:
+    name: installer resilience (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows PowerShell 5.1
+            shell: powershell
+            version: '5.1.'
+          - name: PowerShell 7
+            shell: pwsh
+            version: '7.'
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Verify PowerShell baseline
+        env:
+          EXPECTED_VERSION: ${{ matrix.version }}
+        run: |
+          $version = $PSVersionTable.PSVersion.ToString()
+          Write-Host "PowerShell $version"
+          if (-not $version.StartsWith($env:EXPECTED_VERSION)) {
+            throw "Expected PowerShell $env:EXPECTED_VERSION"
+          }
+      - name: Lint PowerShell installers
+        if: matrix.shell == 'pwsh'
+        run: |
+          Save-Module -Name PSScriptAnalyzer -RequiredVersion 1.25.0 -Path $env:RUNNER_TEMP -ErrorAction Stop
+          Import-Module (Join-Path $env:RUNNER_TEMP 'PSScriptAnalyzer/1.25.0/PSScriptAnalyzer.psd1')
+          $diagnostics = @(Invoke-ScriptAnalyzer -Path docs/install.ps1)
+          $diagnostics += @(Invoke-ScriptAnalyzer -Path tools/test-installers.ps1)
+          $diagnostics += @(Invoke-ScriptAnalyzer -Path tools/test-installer-network.ps1)
+          if ($diagnostics.Count -gt 0) {
+            $diagnostics | Format-Table -Wrap
+            throw 'Installer static analysis failed'
+          }
+      - name: PowerShell installer fixtures
+        run: ./tools/test-installers.ps1
+      # Enable once the v0.1.0 release and its assets are publicly downloadable.
+      # - name: Install v0.1.0 over HTTPS and smoke-test the binary
+      #   env:
+      #     GAT_INSTALL_DIR: ${{ runner.temp }}/gat-install-smoke
+      #   run: |
+      #     ./docs/install.ps1 -Version v0.1.0
+      #     & "$env:GAT_INSTALL_DIR/gat.exe" --version
+      #     if ($LASTEXITCODE -ne 0) { throw 'Installed gat failed its smoke test' }
+
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Test-hygiene script self-tests
+        run: ./tools/check-test-hygiene.sh --self-test
+      - name: Test-hygiene source checks
+        run: ./tools/check-test-hygiene.sh
+      - name: Error-architecture script self-tests
+        run: ./tools/check-error-architecture.sh --self-test
+      - name: Error-architecture source checks
+        run: ./tools/check-error-architecture.sh
+      - name: Workspace-boundary script self-tests
+        run: ./tools/check-workspace-boundary.sh --self-test
+      - name: Workspace-boundary checks
+        run: ./tools/check-workspace-boundary.sh
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          cache-on-failure: true
+      - uses: taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3 # v2
+        with:
+          tool: cargo-nextest@0.9.140
+      - run: cargo nextest run --profile ci --all-features --locked --no-fail-fast
+      - name: Doctests (nextest does not run these)
+        run: cargo test --doc --all-features --locked
+
+  # Nextest does not reproduce the standard harness's in-process unit-test
+  # behavior. Run the complete workspace suite once on Linux so both unit
+  # and integration targets stay valid under Cargo's native harness.
+  std-harness-test:
+    name: std-harness test (workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo test --workspace --all-features --locked
+
+  feature-matrix:
+    name: default feature matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo check -p gat-core --lib --no-default-features --locked
+      - run: cargo check -p gat-io --lib --no-default-features --locked
+      - run: cargo check -p gat-engine --lib --no-default-features --locked
+      - run: cargo check -p gat-command --lib --no-default-features --locked
+      - run: cargo check -p gat-tools --all-targets --all-features --locked
+
+  msrv:
+    name: msrv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Read MSRV from Cargo.toml
+        id: msrv
+        run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo check --workspace --all-targets --all-features --locked

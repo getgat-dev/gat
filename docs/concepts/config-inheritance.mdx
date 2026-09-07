@@ -1,0 +1,118 @@
+---
+title: "Config inheritance"
+description: "Share configuration with your team and override it locally without copying settings."
+---
+
+Gat combines three configuration layers. **Local overrides project; project overrides global.**
+
+| Layer | File | Purpose |
+| --- | --- | --- |
+| Global | `~/.gat/gat.yaml` | Your defaults across repositories. |
+| Project | `<repo>/gat.yaml` | Shared settings committed to Git. |
+| Local | `<repo>/.gat/gat.yaml` | Personal overrides for this repository. |
+
+Reads show the <Tooltip tip="The settings Gat actually uses after combining global, project, and local values. A value shown by a read command may be inherited from a different file than the one you are editing.">effective configuration</Tooltip> from all layers. `--global`, `--project`,
+and `--local` choose where a command writes; project is the default <Tooltip tip="The configuration file a change targets. Selecting a write scope does not stop reads from combining all layers, and a higher-priority override can still hide the changed value.">write scope</Tooltip>.
+
+## What inherits?
+
+| Configuration | Rule |
+| --- | --- |
+| General settings, such as `sync.auto_fetch` or `cache.location` | Each key inherits independently. Lists replace rather than append. |
+| Named selections, remotes, routes, and mounts | Different names coexist. The highest-priority definition of the same name replaces the entry. |
+
+A complete named definition comes from one layer. Omitted optional fields use
+that resource's defaults, not fields from a lower layer. For example, a local
+selection's path never inherits a project's include or exclude patterns.
+
+An empty collection such as `selections: {}` adds no overrides; it does not clear
+inherited names or defaults. Removing a named override can reveal the lower-layer
+definition again.
+
+## Share definitions, choose your default
+
+<Steps>
+  <Step title="Share a definition">
+    Save the selections in project configuration:
+
+    ```yaml gat.yaml (excerpt)
+    selections:
+      runtime:
+        path: models
+        include: ['**/*.onnx']
+        exclude: ['experimental/**']
+      training:
+        path: datasets
+        include: ['**/*.parquet']
+    ```
+  </Step>
+  <Step title="Choose your default locally">
+    ```sh
+    gat selection default training --local
+    ```
+
+    Only the choice is saved locally:
+
+    ```yaml .gat/gat.yaml (excerpt)
+    selections:
+      default: training
+    ```
+  </Step>
+</Steps>
+
+The project still supplies the `training` definition. Project updates to it
+apply automatically. A local definition also named `training` would replace it
+completely.
+
+A <Tooltip tip="A stored name pointing to a selection or remote definition. The pointer inherits separately from the definition, so you can share resources while choosing a personal default.">default</Tooltip> refers to a named definition.
+Adding a selection or remote **never chooses a default**. Choose explicitly with
+[gat selection default](/commands/selection#gat-selection-default) or
+[gat remote default](/commands/remote#gat-remote-default), followed by the name. Unknown selection names
+and dangling selection defaults are errors. With no default selection, supported
+commands select the whole repository.
+
+<Note>
+  `gat selection` is experimental. Use `--selection NAME` for a single operation,
+  or supply a complete inline selection with `--path`, `--include`, and `--exclude`.
+  Named and inline selectors cannot be combined. See [Path selection](/concepts/path-selection).
+</Note>
+
+## Update or restore inheritance
+
+Use `gat config` for general settings, and `gat selection`, `gat remote`,
+`gat route`, or `gat mount` for named resources.
+
+An explicit `update` preserves omitted fields within the saved definition being
+edited. Updates require that definition in the selected scope and reject one
+hidden by a higher-priority definition. Use `add --local` with a complete
+definition to create a local override.
+
+Unsetting a default restores inheritance; it does not select an unrestricted
+repository:
+
+```bash
+gat selection default --local --unset
+gat remote default --local --unset
+```
+
+To save an unrestricted selection, add a named selection with `--path .` and no
+filters, then choose it as the default. Removing a selection or remote is rejected
+if it would leave the effective default dangling.
+
+For general list settings, `--clear` writes an empty list where allowed;
+`--unset` removes the key and restores inheritance. For example,
+`gat config git.ignore_patterns --local --unset` restores inherited custom
+ignore patterns.
+
+## Check what is active
+
+| What to inspect | Command |
+| --- | --- |
+| Default selection and its source layer | `gat selection default` |
+| Default remote and its source layer | `gat remote default` |
+| Saved selection and its source layer | `gat selection show NAME` |
+| Remote and its source layer | `gat remote show NAME` |
+| Route and its source layer | `gat route show NAME` |
+| Mount and its source layer | `gat mount show NAME` |
+
+See the [configuration reference](/references/configuration) for individual settings.

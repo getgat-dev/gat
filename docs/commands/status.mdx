@@ -1,0 +1,229 @@
+---
+title: "gat status"
+description: "Check file status locally or on remote storage."
+---
+
+Without `--remote`, compare the current lock with the <Tooltip tip="The gat.lock version in Git’s index, prepared by git add for the next commit. This can differ from both the working lock and the last committed lock." cta="Review and publish changes" href="/guides/branching-and-merging#typical-workflows">staged lock</Tooltip>. Deleted files
+remain visible because selection uses tracking metadata.
+
+<Note>
+Local status does not inspect file contents. Run [gat add](/commands/add) to record edits,
+or `gat sync --dry-run` to preview working-tree reconciliation. Cache presence
+does not verify cached bytes.
+</Note>
+
+With `--remote`, check whether required objects exist. A bare
+`--remote` follows path routing; a named value forces one remote.
+See [remote routing](/guides/using-multiple-remotes#remote-selection-at-a-glance)
+for storage precedence. [History flags](/concepts/history-selection) apply only to remote checks. Mount-owned entries show their mount name.
+
+Without path flags, use the default named selection, or all paths if none is set.
+Explicit filters replace that selection; `--path .` selects the whole repository.
+
+<Accordion title="Path selection rules">
+  | Selector | Selection used |
+  | --- | --- |
+  | `--selection NAME` | One saved definition, without changing the default. |
+  | `--path`, `--include`, or `--exclude` | <Tooltip tip="Path, include, and exclude flags supplied directly to this command. These replace the saved selection as a whole, so repeat any exclusions you still need." cta="Selection precedence" href="/concepts/path-selection">A complete inline selection</Tooltip>. |
+
+  Named and inline selectors cannot be combined. Paths are relative to the
+  repository root; patterns are relative to the selected path.
+  See [Path selection](/concepts/path-selection) and [gat selection](/commands/selection).
+</Accordion>
+
+## Usage
+
+```text
+Usage: gat status [OPTIONS]
+```
+
+<Accordion title="All options" id="gat-status-options">
+
+```text
+Usage: gat status [OPTIONS]
+
+Options:
+      --selection <NAME>
+          Use this saved selection for this operation without changing the
+          default
+
+      --path <PATH>
+          Select this file or subtree. Any explicit --path, --include, or
+          --exclude replaces the complete configured selection. Use --path . for
+          the whole repository. For mount add, omission selects the source root;
+          repository selection defaults never apply to mounts
+
+      --include <INCLUDE>
+          Glob pattern (matched relative to `--path`) selecting which paths to
+          include. Repeatable. Component-aware: `*.bin` matches only immediate
+          children, while `**/*.bin` matches recursively. Empty means everything
+          under `--path`
+
+      --exclude <EXCLUDE>
+          Glob pattern (matched relative to `--path`) excluded from `--include`
+          (or from everything under `--path`, if `--include` is empty).
+          Repeatable. Component-aware like `--include`; exclude always wins over
+          include
+
+      --remote [<REMOTE>]
+          Check remote object presence instead of local status. Bare `--remote`
+          routes each selected path independently -- explicit override, then
+          most-specific route, then repository default -- same as
+          `push`/`fetch`; `--remote <name>` ignores routing and checks every
+          selected path against that one named remote
+
+      --rev <REV>
+          Explicit revision/rev-spec to select (e.g. a commit, tag, or branch
+          name). Repeatable; each one is resolved strictly and becomes its own
+          root. Alone (with no other history flag), selects only that revision
+          itself -- add `--ancestors`/`--depth`/`--since`/`--until` to also walk
+          its ancestry. Combinable with `--branches`/`--tags`; mutually
+          exclusive with `--all-history`
+
+      --branches
+          Select every branch tip: local (`refs/heads/**`) and remote-tracking
+          (`refs/remotes/**`), deduplicated by commit id. There is no separate
+          remote-tracking-only flag -- select a specific remote-tracking ref
+          with `--rev origin/main`. Alone, selects only those tip commits
+          themselves, not their ancestry -- combine with `--ancestors` (or
+          `--depth`) to also walk backwards from each tip. A branch that
+          *validly* resolves to a non-commit object is silently skipped rather
+          than erroring; but a branch ref that *fails* to resolve at all
+          (dangling, corrupt, unreadable) makes resolution fail closed with an
+          error instead. Combinable with `--rev`/`--tags`; mutually exclusive
+          with `--all-history`
+
+      --tags
+          Select every tag, peeled to the commit it points at. Alone, selects
+          only those tagged commits themselves, not their ancestry -- combine
+          with `--ancestors` (or `--depth`) to also walk backwards from each
+          tag. A tag that *validly* resolves to a non-commit object (e.g. a tag
+          pointing at a blob or tree) is silently skipped rather than erroring
+          -- use an explicit `--rev` if you need that case to fail loudly; but a
+          tag ref that *fails* to resolve at all makes resolution fail closed
+          with an error instead. Combinable with `--rev`/`--branches`; mutually
+          exclusive with `--all-history`
+
+      --all-history
+          Select every commit-bearing ref of any kind (branches, tags, and
+          anything else, e.g. notes/CI refs) as roots, and walk each one's full,
+          unbounded ancestry -- the only scope option that implicitly enables
+          ancestry; every other scope option stays `Tips` unless a traversal
+          flag is also given. A ref that *validly* resolves to a non-commit
+          object (e.g. one pointing at a blob or tree) is silently skipped
+          rather than erroring; but a ref that *fails* to resolve at all
+          (dangling, corrupt, unreadable) makes resolution fail closed with an
+          error instead. Combine with `--depth` to cap the walked depth per root
+          instead of walking unbounded ancestry. Mutually exclusive with
+          `--rev`/`--branches`/`--tags`: it is a distinct, broader root set, not
+          a shorthand for combining them
+
+      --ancestors
+          Walk each selected root's full, unbounded ancestry (closest ancestors
+          first, not commit-timestamp order) instead of selecting only the roots
+          themselves. With no scope selector given (`--rev`/
+          `--branches`/`--tags`/`--all-history`), the root defaults to `HEAD`
+          alone. Mutually exclusive with `--depth` (which already implies
+          walking ancestry, bounded)
+
+      --depth <DEPTH>
+          Limit ancestry traversal from each selected root to at most this many
+          *visited* commits (closest ancestors first, not commit-timestamp
+          order), then union/deduplicate across roots. This bounds how far the
+          walk goes, not how many commits end up in the result: combined with
+          `--since`/`--until`, a commit outside the time window still consumes
+          one unit of the depth budget, so `--depth 5 --since DATE` can return
+          fewer than 5 commits per root (even zero) without walking further than
+          5 ancestors -- it never means "keep walking until 5 commits match".
+          With no scope selector given
+          (`--rev`/`--branches`/`--tags`/`--all-history`), the root defaults to
+          `HEAD` alone -- `--depth 5` alone visits `HEAD` and its 4 closest
+          ancestors, not 5 commits from every branch/tag. `--branches --depth 5`
+          means up to 5 commits visited from *each* branch tip, not 5 total.
+          `--all-history --depth 5` keeps `--all-history`'s root set (every
+          commit-bearing ref) and only bounds that per-root walk to 5 commits
+          each. Mutually exclusive with `--ancestors`
+
+      --since <SINCE>
+          Only include commits committed at/after this date. Accepts
+          Git-style/ISO dates (e.g. `2024-01-01`, `2 weeks ago`). Implies
+          walking ancestry from the selected roots to find commits in the time
+          window, even without `--ancestors`/`--depth`; with no scope selector
+          given, the root defaults to `HEAD` alone
+
+      --until <UNTIL>
+          Only include commits committed at/before this date. Accepts
+          Git-style/ISO dates (e.g. `2024-01-01`, `2 weeks ago`). Implies
+          walking ancestry from the selected roots to find commits in the time
+          window, even without `--ancestors`/`--depth`; with no scope selector
+          given, the root defaults to `HEAD` alone
+
+      --first-parent
+          Follow only the first parent of each commit instead of every parent
+          (excludes commits only reachable via a merged-in branch). Only
+          meaningful while walking ancestry -- implies walking it, even without
+          `--ancestors`/`--depth`/`--since`/`--until`; with no scope selector
+          given, the root defaults to `HEAD` alone (not every ref)
+
+      --exclude-rev <EXCLUDE_REV>
+          Exclude this revision and its ancestors from the selection.
+          Repeatable. Only meaningful while walking ancestry -- implies walking
+          it, even without `--ancestors`/`--depth`/`--since`/ `--until`; with no
+          scope selector given, the root defaults to `HEAD` alone (not every
+          ref)
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+## Examples
+
+<Tabs sync={false}>
+<Tab title="Local">
+
+Compare tracked files with staged desired state.
+
+```sh
+gat status
+```
+
+</Tab>
+<Tab title="Directory">
+
+Inspect one tracked subtree.
+
+```sh
+gat status --path data/
+```
+
+</Tab>
+<Tab title="Glob pattern">
+
+Inspect matching tracked paths.
+
+```sh
+gat status --include '**/*.bin'
+```
+
+</Tab>
+<Tab title="Remote">
+
+Verify each path on its resolved remote.
+
+```sh
+gat status --remote
+```
+
+</Tab>
+<Tab title="History">
+
+Verify one historical revision on a named remote.
+
+```sh
+gat status --remote backup --rev HEAD~5
+```
+
+</Tab>
+</Tabs>

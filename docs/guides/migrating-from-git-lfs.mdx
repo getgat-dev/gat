@@ -1,0 +1,157 @@
+---
+title: "Migrating from Git LFS"
+description: "Move current files to Gat while preserving your existing Git history."
+---
+
+One migration commit replaces the current LFS pointers with `gat.lock` metadata.
+Old commits remain unchanged and may still require Git LFS and its storage.
+See [Gat’s file lifecycle](/concepts/how-gat-works#follow-one-file-through-a-change)
+for how new versions are recorded and published.
+
+## Before you start
+
+Start from a <Tooltip tip="A checkout with no pending changes you need to preserve. Review git status and commit or set aside existing work so the migration commit contains only the intended transition." cta="Review the publishing workflow" href="/guides/branching-and-merging#typical-workflows">clean working tree</Tooltip> and restore the real file contents:
+
+```sh
+git status
+git switch -c migrate-to-gat
+git lfs pull
+git lfs ls-files
+```
+
+<Warning>
+  Do not add LFS pointer files to Gat. If a file starts with
+  `version https://git-lfs.github.com/spec/v1`, restore the real LFS object first.
+</Warning>
+
+Initialize Gat and [configure storage](/set-up-a-remote). Replace the example
+bucket and region, and set provider credentials:
+
+```sh
+gat init
+gat remote add storage 's3://my-bucket/my-project?region=eu-west-1'
+gat remote default storage
+```
+
+## Migrate the files
+
+This example moves `models/encoder.bin` and `models/decoder.bin`. Substitute
+your paths. For a partial migration, preserve LFS rules for files that stay in LFS.
+
+<Steps>
+  <Step title="Remove the matching LFS rule">
+    ```sh
+    git lfs untrack "models/**"
+    git diff -- .gitattributes
+    ```
+
+    Replace `models/**` with the rule you intend to remove. Preserve unrelated
+    attributes, and narrow broader rules if other files still need them.
+  </Step>
+  <Step title="Remove only Git's index entries">
+    ```sh
+    git rm --cached -- models/encoder.bin models/decoder.bin
+    ```
+
+    <Warning>
+      Keep `--cached`: plain `git rm` can delete the working files you need to migrate.
+    </Warning>
+  </Step>
+  <Step title="Track the bytes with Gat">
+    ```sh
+    gat add models/encoder.bin models/decoder.bin
+    gat ls-files --path models
+    ```
+
+    Confirm the files remain on disk and both paths appear in Gat's listing.
+  </Step>
+  <Step title="Review and commit the metadata">
+    ```sh
+    git add .gitattributes gat.yaml gat.lock
+    git diff --cached --stat
+    git commit -m "Migrate large files from Git LFS to Gat"
+    ```
+
+    Git shows the original paths as deleted; their versions are now recorded
+    in `gat.lock`.
+  </Step>
+  <Step title="Publish the bytes, then the branch">
+    ```sh
+    gat push --path .
+    gat status --remote --path .
+    git push -u origin migrate-to-gat
+    ```
+
+    Confirm the required objects are present before publishing the branch.
+    `--path .` overrides any configured default selection.
+  </Step>
+</Steps>
+
+## Validate from a fresh clone
+
+Replace the repository URL:
+
+```sh
+git clone --branch migrate-to-gat '<repository-url>' gat-migration-test
+cd gat-migration-test
+gat init
+gat pull --path .
+gat ls-files --path .
+```
+
+<Check>
+  Open the restored files and confirm their contents before merging the
+  migration branch. No history rewrite or force-push is needed.
+</Check>
+
+## Roll out to the team
+
+After the migration branch is merged, existing clones run:
+
+```sh
+git pull
+gat init
+gat pull --path .
+```
+
+Files may briefly disappear while Git removes the old tracked paths. Gat restores
+those recorded in the new lock. Keep Git LFS and its old storage for historical
+revisions. Migrate any `git lfs lock` workflow separately; Gat does not replace it.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Gat says a file is still tracked by Git">
+    `git lfs untrack` changes attributes, not the index. Run
+    `git rm --cached -- PATH`, then `gat add PATH` for each migrating file.
+    Avoid removing an entire directory from the index unless every file is moving.
+  </Accordion>
+  <Accordion title="The file is missing or contains an LFS pointer">
+    Recover the real bytes from the pre-migration revision or a clean LFS
+    checkout. Run `git lfs pull` there before copying the files into the
+    migration checkout and repeating `gat add`.
+  </Accordion>
+  <Accordion title="LFS still lists some files">
+    That is expected for a partial migration. Inspect `git lfs track` and
+    `git lfs ls-files`; remove only rules for paths Gat should own.
+  </Accordion>
+  <Accordion title="I ran git lfs migrate export">
+    That command can rewrite history and turn LFS content into ordinary Git
+    blobs. It is not required here. If the rewrite was unintended, use your
+    original branch or backup before starting this migration.
+  </Accordion>
+  <Accordion title="I want to abandon the migration">
+    If the branch is unmerged, preserve needed local work and return to the
+    original branch. Earlier commits still use LFS. Keep its client and storage
+    available to restore those revisions.
+  </Accordion>
+</AccordionGroup>
+
+<CardGroup cols={2}>
+  <Card title="Storage troubleshooting" icon="cloud" href="/references/remote-providers">
+    Credentials, endpoints, and connection failures.
+  </Card>
+  <Card title="Missing files or conflicts" icon="arrows-rotate" href="/concepts/automatic-sync">
+    Restore files, preserve edits, or repair cached objects.
+  </Card>
+</CardGroup>

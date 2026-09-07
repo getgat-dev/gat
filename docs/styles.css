@@ -1,0 +1,27 @@
+#content-area {
+  padding-left: 0 !important;
+  margin: auto !important;
+}
+
+@media (min-width: 1280px) {
+  div:has(> #content-area):has(> #content-side-layout) {
+    gap: 0 !important;
+  }
+
+  #content-area {
+    max-width: 750px !important;
+    /* this should not be needed, but ensure a flex-item can shrink */
+    min-width: 0;
+  }
+}
+
+/* Emulate mode: wide between 1280px and 1439px */
+@media (min-width: 1280px) and (max-width: 1439px) {
+  #content-side-layout {
+    display: none !important;
+  }
+
+  #content-area {
+    padding-left: 0 !important;
+  }
+}

@@ -1,0 +1,154 @@
+---
+title: "Automatic sync"
+description: "Keep working files aligned with Git, and choose when sync can fetch."
+---
+
+[gat init](/commands/init) installs <Tooltip tip="Scripts Git runs after particular operations. Gat adds managed blocks to these local scripts so the selected file versions can be restored automatically.">hooks</Tooltip> that sync managed files after common Git operations.
+Sync uses the local cache by default and reports conflicts instead of discarding
+local edits. For the cache, lock, and working-file relationship, see
+[how sync decides what to change](/concepts/how-gat-works#how-sync-decides-what-to-change).
+
+## Which Git operations trigger sync?
+
+| Git operation | Hook |
+| --- | --- |
+| `git checkout`, `git switch` | `post-checkout` |
+| Successful `git merge`, merge-based `git pull` | `post-merge` |
+| `git rebase`, `git commit --amend` | `post-rewrite` |
+
+After `git reset --hard`, `git restore`, or `git read-tree -u`, run `gat sync`
+yourself. If a merge stops for conflicts, resolve them and sync explicitly.
+
+<Accordion title="Turn automatic sync off">
+  ```sh
+  gat init --no-hooks
+  ```
+
+  This removes Gat's managed hook blocks while preserving other hook code and
+  the lock merge driver. Run `gat init` to install the hooks again.
+</Accordion>
+
+## Choose when to fetch
+
+<Tabs sync={false}>
+  <Tab title="On demand">
+    ```sh
+    gat pull
+    ```
+
+    Fetch missing objects and update working files. Use this after a branch
+    switch if the required content is not cached.
+  </Tab>
+  <Tab title="During every sync">
+    ```sh
+    gat config --local sync.auto_fetch true
+    ```
+
+    Allow manual and hook-triggered sync to fetch missing objects. Omit
+    `--local` and commit `gat.yaml` to share the setting with your team.
+  </Tab>
+  <Tab title="Cache only">
+    ```sh
+    gat sync
+    ```
+
+    With the default configuration, use cached objects and report missing ones.
+    Set `gat config --local sync.auto_fetch false` to override inherited fetching.
+    `sync.auto_repair` can independently enable network access for repair.
+  </Tab>
+</Tabs>
+
+`gat sync --fetch` enables fetching for one run. `gat fetch` only downloads
+objects; it leaves working files unchanged.
+
+## Local changes and conflicts
+
+Preview the planned updates, removals, conflicts, and missing objects:
+
+```sh
+gat sync --dry-run
+```
+
+<Tabs sync={false}>
+  <Tab title="Keep local edits">
+    Save a separate copy of any local work you need. For repository-owned files,
+    run `gat add PATH` to record the edited contents, then commit `gat.lock`.
+    For mounted files, make changes in the source repository instead.
+  </Tab>
+  <Tab title="Discard local edits">
+    <Warning>
+      `--force` can overwrite or remove locally modified managed files.
+      Preserve needed work before using it.
+    </Warning>
+
+    ```sh
+    gat sync --force
+    ```
+
+    Add `--fetch` if the desired objects are missing locally.
+  </Tab>
+</Tabs>
+
+## Working-tree validation
+
+Sync checks <Tooltip tip="Filesystem information used to detect possible changes without reading the whole file. It is distinct from tracking metadata in gat.lock, which records paths and content IDs.">file metadata</Tooltip> first and hashes content when needed. `gat status`
+compares tracking metadata; it does not inspect payload edits.
+
+<Accordion title="Skip file checks with trust-state">
+  ```sh
+  gat sync --trust-state
+  ```
+
+  When the lock and <Tooltip tip="Local bookkeeping about the content Gat last placed at each path. It cannot by itself prove that another program has not edited or deleted the file." cta="How sync checks files" href="/concepts/how-gat-works#how-sync-decides-what-to-change">recorded materialized state</Tooltip> agree, this skips inspecting
+  the corresponding working file. External edits or deletions can be missed.
+
+  Use only when that tradeoff is acceptable. See
+  [Performance tuning](/guides/improving-performance#use-the-trust-state-fast-path-for-sync).
+</Accordion>
+
+## Missing and corrupted objects
+
+<AccordionGroup>
+  <Accordion title="A required object is missing locally">
+    Run `gat pull`. If the remote also lacks the object, upload it with
+    `gat push` from a clone that still has the content.
+
+    Check the selected remote with `gat status --remote` and review
+    [provider credentials](/references/remote-providers) if access fails.
+  </Accordion>
+  <Accordion title="A cached object is corrupted">
+    If the remote has a good copy, fetch a replacement:
+
+    ```sh
+    gat sync --repair
+    ```
+
+    Add `--remote NAME` to choose a remote. Set `sync.auto_repair` to `true`
+    to allow repair during future syncs. Ordinary working-file edits are
+    handled as local changes, separately from cache corruption.
+  </Accordion>
+</AccordionGroup>
+
+## Limit automatic sync to selected paths
+
+Hooks honor the default named selection. Without one, they select all paths.
+To save a personal working set, use the experimental selection command:
+
+```sh
+gat selection add runtime --local --include '**/*.onnx' --exclude 'tests/**'
+gat selection default runtime --local
+```
+
+<Note>
+  Excluded paths are not updated and may retain an older version. For a one-time
+  override, use `gat sync --path models`; `--path .` selects the whole repository.
+</Note>
+
+<CardGroup cols={2}>
+  <Card title="Sync options" icon="arrows-rotate" href="/commands/sync">
+    Fetch, repair, preview, and rematerialize.
+  </Card>
+  <Card title="Path selection" icon="filter" href="/concepts/path-selection">
+    Save filters and choose defaults.
+  </Card>
+</CardGroup>

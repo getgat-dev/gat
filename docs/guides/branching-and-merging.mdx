@@ -1,0 +1,243 @@
+---
+title: "Branching and merging"
+description: "Publish large-file changes and resolve conflicts with Git."
+---
+
+Use Git for branches and commits. Run `gat add` after editing large files,
+then publish their bytes with `gat push` before publishing commits.
+
+<Note>
+  Run `gat init` in every clone. Git does not copy Gat's local hooks or
+  <Tooltip tip="A Git merge helper that compares lock entries by path and content ID, so independent asset changes can merge without relying on text-line positions." cta="Merge rules" href="/spec/lock-v1#three-way-merge">semantic lock merge-driver</Tooltip> configuration.
+</Note>
+
+## Typical workflows
+
+<Tabs sync={false}>
+  <Tab title="Publish">
+    ```sh
+    git switch -c improve-model
+    # Edit or replace models/encoder.onnx, then record it:
+    gat add models/encoder.onnx
+    gat diff
+    git add gat.lock
+    git commit -m "Update encoder model"
+    gat push
+    git push -u origin improve-model
+    ```
+
+    Commit `gat.yaml` too if shared configuration changed. `gat push` normally
+    uploads only the current selection. Use [history selectors](/concepts/history-selection)
+    when earlier commits introduce other objects teammates will need.
+  </Tab>
+  <Tab title="Receive">
+    ```sh
+    git pull
+    gat pull
+    ```
+
+    Git receives the metadata. Gat downloads missing objects and updates working
+    files. For automatic fetching during Git hooks, set
+    `gat config sync.auto_fetch true` and commit `gat.yaml`.
+  </Tab>
+  <Tab title="Review">
+    ```sh
+    git diff main...HEAD
+    gat diff main HEAD --path models
+    ```
+
+    Gat compares tracked paths and content IDs. It does not compare the contents
+    of binary files. The Gat example compares the two branch tips directly.
+  </Tab>
+</Tabs>
+
+## Switching branches
+
+```sh
+git switch experiment
+```
+
+The checkout hook syncs files from the local cache. If objects are missing,
+run `gat pull`. Preserve local edits before switching; Gat reports conflicts
+when reconciliation would overwrite them.
+
+## Merging branches
+
+Merge with Git as usual:
+
+```bash
+git switch main
+git merge improve-model
+```
+
+When both branches changed `gat.lock`, Gat's semantic merge driver compares the lock **by tracked path**, not by text line.
+
+### What merges automatically?
+
+Independent path changes, identical additions, and one-sided changes merge
+automatically. Different edits to the same path, or an edit versus deletion,
+require a decision. Gat does not merge binary contents.
+
+<Accordion title="Three-way merge rules">
+  Gat compares each path's content ID, treating absence as deletion:
+
+  ```text
+  ours == theirs      → keep it
+  ours == ancestor    → take theirs
+  theirs == ancestor  → take ours
+  otherwise           → conflict
+  ```
+
+  See the [lock specification](/spec/lock-v1#three-way-merge) for the complete model.
+</Accordion>
+
+### Why you may not see conflict markers
+
+The semantic merge driver fails closed. When it cannot resolve a path, Git records `gat.lock` as unresolved, but Gat leaves the current lock content untouched instead of writing `<<<<<<<` / `=======` / `>>>>>>>` markers into it.
+
+<Info>
+Use `git status` as the source of truth for whether `gat.lock` is unresolved. A conflicted lock can still look syntactically valid on disk.
+</Info>
+
+### Resolve a same-path conflict
+
+<Steps>
+  <Step title="Find the conflicted lock file">
+    ```bash
+    git status
+    ```
+
+    Most repositories use a flat `gat.lock`. If lock sharding is enabled, Git may report a specific file below `gat.lock/` instead.
+  </Step>
+
+  <Step title="Inspect ours and theirs">
+    For a flat lock:
+
+    <Tabs sync={false}>
+      <Tab title="Ancestor">
+        ```bash
+        git show :1:gat.lock
+        ```
+      </Tab>
+      <Tab title="Ours">
+        ```bash
+        git show :2:gat.lock
+        ```
+      </Tab>
+      <Tab title="Theirs">
+        ```bash
+        git show :3:gat.lock
+        ```
+      </Tab>
+    </Tabs>
+
+    Identify the path named by Gat's conflict diagnostic and decide which content ID—or deletion—belongs in the merged result.
+  </Step>
+
+  <Step title="Produce the final semantic lock">
+    Edit the lock to retain independent changes from both sides and resolve
+    the conflicting paths. Keep the two-field [lock format](/spec/lock-v1):
+    quoted path, a tab, and content ID. Remove an entry to choose deletion.
+
+    <Warning>
+    Do not delete `gat.lock` and try to recreate it from whichever files happen to be in your working tree. `gat.lock` is the authoritative versioned map; the working tree may represent only one side of the merge.
+    </Warning>
+  </Step>
+
+  <Step title="Mark the lock resolved">
+    ```bash
+    git add gat.lock
+    ```
+
+    If Git reported a sharded lock file, add the affected shard path instead.
+  </Step>
+
+  <Step title="Materialize the chosen result">
+    Fetch any selected objects that are not in your cache and reconcile the worktree:
+
+    ```bash
+    gat pull
+    ```
+  </Step>
+
+  <Step title="Finish the Git operation">
+    For a merge:
+
+    ```bash
+    git commit
+    ```
+
+    For a rebase:
+
+    ```bash
+    git rebase --continue
+    ```
+  </Step>
+</Steps>
+
+<Accordion title="Choose an entire side">
+  <Warning>
+    This replaces the whole conflicted lock file or shard, discarding changes
+    from the other side, including unrelated entries.
+  </Warning>
+
+  <CodeGroup>
+    ```sh Ours
+    git checkout --ours gat.lock
+    git add gat.lock
+    gat pull
+    ```
+
+    ```sh Theirs
+    git checkout --theirs gat.lock
+    git add gat.lock
+    gat pull
+    ```
+  </CodeGroup>
+
+  Then finish the merge or rebase. During rebase, “ours” is the branch you are
+  rebasing onto; “theirs” is the commit being replayed.
+</Accordion>
+
+## Rebasing and amending
+
+Use `git rebase` and `git commit --amend` normally. The merge driver resolves
+independent path changes during rebase; resolve incompatible changes using the
+steps above, then run `git rebase --continue`.
+
+<Warning>
+  During a rebase, Git's “ours” is the branch you are rebasing onto and “theirs”
+  is the commit being replayed. Inspect both stages before choosing a whole side.
+</Warning>
+
+The post-rewrite hook syncs after rebase or amend. After operations without a
+matching hook, such as `git reset --hard` or `git restore`, run `gat sync`
+yourself, or `gat pull` if objects are missing. See
+[Automatic sync](/concepts/automatic-sync).
+
+## Troubleshooting collaboration
+
+<AccordionGroup>
+  <Accordion title="A teammate cannot fetch my file">
+    From a clone that has the required object, run `gat push` and check
+    `gat status --remote`. Then the teammate can retry `gat pull`.
+    Use history selectors if the missing object belongs to an earlier commit.
+  </Accordion>
+  <Accordion title="Git tries to merge the lock as plain text">
+    Run `gat init` to install the semantic merge driver, then retry the merge
+    from a clean Git state. Every clone needs this local setup.
+  </Accordion>
+  <Accordion title="Files still show the old version after conflict resolution">
+    A stopped merge does not run the successful post-merge hook. After resolving
+    and staging the lock, run `gat pull` explicitly.
+  </Accordion>
+</AccordionGroup>
+
+<CardGroup cols={2}>
+  <Card title="Automatic sync" icon="arrows-rotate" href="/concepts/automatic-sync">
+    Handle missing files and local edits after Git operations.
+  </Card>
+  <Card title="History selection" icon="clock" href="/concepts/history-selection">
+    Publish objects needed by earlier commits.
+  </Card>
+</CardGroup>

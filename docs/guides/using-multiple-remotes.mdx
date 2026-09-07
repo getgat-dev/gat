@@ -1,0 +1,203 @@
+---
+title: "Using multiple remotes"
+description: "Route paths to different stores, create backups, and move existing objects."
+---
+
+Use `--remote NAME` to choose storage for one command. Add routes when different
+paths should use different remotes automatically. A <Tooltip tip="A path-to-remote rule. Gat chooses the matching rule with the longest path prefix, unless the command explicitly selects a remote.">route</Tooltip> maps a subtree to storage.
+For a first remote, start with [Set up a remote](/set-up-a-remote).
+
+<Note>
+  Routing is experimental. Routes choose storage; they do not restrict access,
+  move existing objects, or change file ownership.
+</Note>
+
+## Remote selection at a glance
+
+Gat uses the first applicable choice:
+
+1. An explicit `--remote NAME`.
+2. The route with the most-specific matching path.
+3. The configured default remote.
+
+Route names do not affect precedence. Paths match by segment: `models` covers
+`models/a.bin`, but not `models-old/a.bin`.
+
+## Set up multiple remotes
+
+Initialize Gat first. Replace these buckets and regions with yours, and configure
+[provider credentials](/references/remote-providers).
+
+<Steps>
+  <Step title="Add storage locations">
+    ```sh
+    gat remote add origin 's3://company-main/gat?region=eu-west-1'
+    gat remote default origin
+    gat remote add model-store 's3://company-models/gat?region=eu-west-1'
+    gat remote add secure-store 's3://company-secure/gat?region=eu-west-1'
+    ```
+
+    Adding a remote never selects a default.
+  </Step>
+  <Step title="Route the model paths">
+    ```sh
+    gat route add models model-store models
+    gat route add private-models secure-store models/private
+    ```
+
+    | Tracked path | Remote |
+    | --- | --- |
+    | `data/train.parquet` | `origin` |
+    | `models/base.onnx` | `model-store` |
+    | `models/private/customer.onnx` | `secure-store` |
+
+    The nested `models/private` route wins over `models`.
+  </Step>
+  <Step title="Review and share the settings">
+    ```sh
+    gat route list
+    git add gat.yaml
+    git commit -m "Route model storage"
+    ```
+
+    Project settings are shared through Git. Each user still needs storage
+    credentials. Use `--local` for machine-specific overrides.
+  </Step>
+</Steps>
+
+## Transfer across several remotes
+
+Normal transfers now follow the routes. Use `--path` to narrow the operation:
+
+<CodeGroup>
+  ```sh Upload
+  gat push --path models
+  ```
+
+  ```sh Download
+  gat fetch --path models
+  ```
+
+  ```sh Restore files
+  gat pull --path models
+  ```
+
+  ```sh Check presence
+  gat status --remote --path models
+  ```
+</CodeGroup>
+
+`gat sync --fetch` follows the same routing. Omit `--path` to use your default
+selection, or `--path .` to include all repository paths.
+
+## Override routing for one command
+
+After configuring a remote named `backup`, choose it without changing routes:
+
+<CodeGroup>
+  ```sh Fetch from backup
+  gat fetch --path models --remote backup
+  ```
+
+  ```sh Upload to backup
+  gat push --path models --remote backup
+  ```
+
+  ```sh Check backup
+  gat status --path models --remote backup
+  ```
+</CodeGroup>
+
+A bare `gat status --remote` checks each path's routed remote.
+`gat status --remote backup` checks every selected path against `backup`.
+
+## Routes do not copy existing objects
+
+To move repository-owned model objects to another store, populate that store
+**before** changing the route:
+
+<Steps>
+  <Step title="Fetch from the existing storage">
+    ```sh
+    gat fetch --path models
+    ```
+
+    This fills the local cache using the current routes.
+  </Step>
+  <Step title="Upload and verify the new store">
+    ```sh
+    gat remote add archive 's3://company-archive/gat?region=eu-west-1'
+    gat push --path models --remote archive
+    gat status --path models --remote archive
+    ```
+
+    Confirm the required objects are present before continuing.
+  </Step>
+  <Step title="Change the route and commit">
+    ```sh
+    gat route update models --remote archive
+    git add gat.yaml
+    git commit -m "Move model storage to archive"
+    ```
+
+    More-specific routes, such as `models/private`, still win. Change those
+    separately if their storage should move too.
+  </Step>
+</Steps>
+
+<Warning>
+  These commands copy the current selected objects. To preserve older revisions,
+  include the required [history selections](/concepts/history-selection) when
+  fetching and pushing. Keep the old store until you have verified every version
+  you need. A selected remote with missing objects does not trigger an automatic
+  search of other stores.
+</Warning>
+
+## Inspect routing
+
+| Task | Command |
+| --- | --- |
+| List routes and the default fallback | `gat route list` |
+| Inspect a route and its scope | `gat route show models` |
+| Move a route to a new path | `gat route update models --path assets/models` |
+| Remove a route | `gat route remove models` |
+| Show the default remote | `gat remote default` |
+| Choose a configured default | `gat remote default archive` |
+
+The `*` row in the route listing represents the <Tooltip tip="The configured remote used only when no explicit remote and no matching route apply. It is a selection rule, not a backup store tried after another remote fails." cta="Choose the default remote" href="/commands/remote#gat-remote-default">default fallback</Tooltip>; it is not a
+removable route. Changing the default affects only paths without a route.
+Removing a route keeps the remote and tracked files.
+
+## Advanced behavior
+
+<AccordionGroup>
+  <Accordion title="One object appears under several routes">
+    Identical bytes share one cached object. A <Tooltip tip="A fetch when the required content is absent from the local cache. If it is already cached, Gat can reuse it without downloading another copy for each path." cta="Fetching and cache reuse" href="/concepts/how-gat-works#fetch-sync-and-pull">cold fetch</Tooltip> downloads it once,
+    using the first selected path's remote. Push can publish the same object
+    to each remote required by the selected paths.
+  </Accordion>
+  <Accordion title="Override shared routes locally">
+    Add a complete definition with the same name in local configuration:
+
+    ```sh
+    gat route add models model-store models --local
+    ```
+
+    Reads use the effective configuration. Updates and removals must target
+    the defining scope. See [Config inheritance](/concepts/config-inheritance).
+  </Accordion>
+  <Accordion title="Routes overlap mounted paths">
+    A route can serve repository-owned or mounted files. It changes storage
+    selection, not ownership. Moving or removing a mount does not move or remove
+    its route. See [Consuming Gat assets](/guides/consuming-gat-assets).
+  </Accordion>
+</AccordionGroup>
+
+<CardGroup cols={2}>
+  <Card title="Remote commands" icon="cloud" href="/commands/remote">
+    Manage named storage locations.
+  </Card>
+  <Card title="Route commands" icon="route" href="/commands/route">
+    Manage path-based storage rules.
+  </Card>
+</CardGroup>

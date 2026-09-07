@@ -1,0 +1,210 @@
+---
+title: "Consuming Gat assets"
+description: "Import a versioned snapshot of files owned by another repository."
+---
+
+A mount places another repository's Gat-tracked files under a local directory,
+such as `vendor/models`. Your repository <Tooltip tip="Records a resolved commit so later changes to the source branch do not silently change your imported files. Updating the mount explicitly selects a new snapshot.">pins</Tooltip> the snapshot it consumes.
+
+<Note>
+  Mounts are experimental. “Read-only” refers to <Tooltip tip="Which repository is responsible for changing a tracked entry. Mounted entries belong to their source; detach a mount if the consuming repository should take over tracking them." cta="Remove or detach a mount" href="/guides/consuming-gat-assets#stop-using-a-mount">Gat ownership</Tooltip>, not filesystem
+  permissions: tools can still edit these working files, but `gat add`, `gat rm`,
+  and `gat mv` cannot change mount-owned entries.
+</Note>
+
+## Before you start
+
+Initialize the destination with `gat init`. You need access to the source Git
+repository for metadata, and its Gat storage for bytes. The source must have
+committed its lock and uploaded the referenced objects. See
+[how Git metadata and Gat storage work together](/concepts/how-gat-works#follow-one-file-through-a-change).
+
+## Mount and use upstream data
+
+Replace the source URL below with your asset repository.
+
+<Steps>
+  <Step title="Import the snapshot">
+    ```sh
+    gat mount add models git@github.com:acme/model-assets.git vendor/models
+    ```
+
+    `models` is the mount name; `vendor/models` is its target directory.
+    Without a target, Gat uses the source repository name (`model-assets/`).
+  </Step>
+  <Step title="Check storage setup">
+    ```sh
+    gat mount show models
+    ```
+
+    Gat preserves an existing route at the target. Otherwise, it reuses or
+    imports the source default remote and creates a route. The destination's
+    default remote is unchanged.
+
+    <Accordion title="The source has no default remote">
+      Configure storage using the URL supplied by the asset publisher:
+
+      ```sh
+      gat remote add shared-assets '<object-storage-url>'
+      gat route add models shared-assets vendor/models
+      ```
+
+      Git authentication and storage credentials are separate.
+    </Accordion>
+  </Step>
+  <Step title="Restore the working files">
+    ```sh
+    gat pull --path vendor/models
+    ```
+
+    Open a restored file to confirm its contents. Your application can use the
+    directory like any other working directory.
+  </Step>
+  <Step title="Commit the snapshot">
+    ```sh
+    git add gat.yaml gat.lock
+    git commit -m "Mount shared models"
+    ```
+
+    Other clones need `gat init` and `gat pull`. Source Git access is needed
+    again when creating or refreshing a mount, not for ordinary pulls.
+  </Step>
+</Steps>
+
+## Mount only the data you need
+
+Use source filters when adding a mount, or change the existing one:
+
+```sh
+gat mount update models --path exports --include '**/*.onnx' --exclude '**/debug/**'
+```
+
+`--path` is relative to the **source repository**. Include and exclude patterns
+are relative to that path; exclusions win. The destination stays `vendor/models`.
+
+Omitted settings are preserved. Supplying an include or exclude list replaces
+that list only. See [Mount options](/commands/mount#gat-mount-update) to clear
+saved filters. Repository named selections do not apply to mount source filters.
+
+## Pin the upstream version
+
+Choose a revision when adding or updating a mount. Replace `<commit-hash>`
+with the full hash for a fixed version:
+
+<CodeGroup>
+  ```sh Branch
+  gat mount update models --rev main
+  ```
+
+  ```sh Tag
+  gat mount update models --rev v2.4.0
+  ```
+
+  ```sh Commit
+  gat mount update models --rev '<commit-hash>'
+  ```
+</CodeGroup>
+
+Every update records the <Tooltip tip="The exact commit hash found when Gat looks up the requested branch, tag, or revision. The saved snapshot stays at this commit until you explicitly update it again." cta="Use unambiguous revision names" href="/concepts/history-selection#when-a-branch-and-tag-share-a-name">resolved commit</Tooltip>. A branch or tag can resolve to another
+commit on a later update; use a full commit hash for a fixed revision.
+Upstream changes never silently refresh your snapshot.
+
+## Refresh mounted data
+
+```sh
+gat mount update models
+gat diff --path vendor/models
+gat pull --path vendor/models
+git add gat.yaml gat.lock
+git commit -m "Update mounted models"
+```
+
+Review the metadata diff and restored files before committing. `update` chooses
+the snapshot; [gat pull](/commands/pull) fetches and restores its bytes.
+Use [path filters](/concepts/path-selection) to preview which imported files
+are selected, and review [sync conflicts](/concepts/automatic-sync#local-changes-and-conflicts)
+if local edits prevent restoration.
+
+## Use an existing Gat remote
+
+To choose a configured remote for this mount:
+
+```sh
+gat mount update models --remote shared-assets
+```
+
+Use `--no-setup` on add or update to skip remote and route changes for that
+invocation. It cannot be combined with `--remote`.
+
+## Local modifications
+
+Make shared asset changes in the source repository, then refresh the mount.
+To inspect local differences that affect reconciliation:
+
+```sh
+gat sync --dry-run --path vendor/models
+```
+
+<Accordion title="Discard local edits and restore the snapshot">
+  <Warning>
+    This can overwrite or remove modified files. Save any local work you need first.
+  </Warning>
+
+  ```sh
+  gat sync --path vendor/models --fetch --force
+  ```
+</Accordion>
+
+## Stop using a mount
+
+<Tabs sync={false}>
+  <Tab title="Remove tracking">
+    ```sh
+    gat mount remove models
+    ```
+
+    Remove the mount definition and its imported tracking entries.
+  </Tab>
+  <Tab title="Keep local ownership">
+    ```sh
+    gat mount remove models --detach-only
+    ```
+
+    Keep the imported entries under your repository's ownership. Normal
+    Gat tracking commands can then manage them.
+  </Tab>
+</Tabs>
+
+<Note>
+  Routes and remotes are independent. Moving or removing a mount keeps them;
+  inspect [gat route list](/commands/route#gat-route-list) before changing storage policy.
+  See [routing precedence](/guides/using-multiple-remotes#remote-selection-at-a-glance)
+  to check which remote will serve the retained files.
+</Note>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="The target is rejected">
+    Choose a non-root target that does not overlap another mount or contain
+    repository-owned Gat entries. Move or remove conflicting tracking first.
+  </Accordion>
+  <Accordion title="The metadata exists but files cannot be fetched">
+    Check `gat mount show models` for the effective route and remote. Verify
+    storage credentials separately from Git access. If objects are missing,
+    the publisher must upload them from the source repository.
+  </Accordion>
+  <Accordion title="Upstream changed but my files did not">
+    Run `gat mount update models`, then `gat pull --path vendor/models`.
+    A fixed commit revision stays pinned until you change `--rev`.
+  </Accordion>
+</AccordionGroup>
+
+<CardGroup cols={2}>
+  <Card title="Mount reference" icon="folder-tree" href="/commands/mount">
+    Source filters, revisions, targets, and removal options.
+  </Card>
+  <Card title="Storage routing" icon="route" href="/guides/using-multiple-remotes">
+    Choose where mounted paths fetch their bytes.
+  </Card>
+</CardGroup>

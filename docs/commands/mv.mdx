@@ -1,0 +1,74 @@
+---
+title: "gat mv"
+description: "Move or rename files and update `gat.lock`."
+---
+
+Moving a tracked path renames the working-tree path, then publishes the move to
+`gat.lock`, updates materialized ownership, and regenerates managed excludes.
+Renaming reuses the content ID; see [path-independent content identity](/concepts/how-gat-works#content-identity-is-independent-of-path).
+Destinations must be explicit; `--force` is required to replace an existing destination.
+
+<Accordion title="Recover from a partial failure">
+If tracking-state publication fails, Gat attempts to rename the path back.
+The error distinguishes a completed rollback from a failed rollback. After a
+failed rollback, preserve the moved files and inspect `gat.lock` before
+reconciling tracking. A rollback does not restore an overwritten destination.
+
+If metadata cleanup fails after publication, the move is already recorded in
+`gat.lock`. Repeating the original move does not resume cleanup. Inspect the
+moved files and tracking state before running `gat sync`.
+</Accordion>
+
+## Usage
+
+```text
+Usage: gat mv [OPTIONS] <SRC> <DST>
+```
+
+<Accordion title="All options" id="gat-mv-options">
+
+```text
+Usage: gat mv [OPTIONS] <SRC> <DST>
+
+Arguments:
+  <SRC>
+          Tracked file or directory to rename/move
+
+  <DST>
+          New path for `src`. Must name the destination explicitly (not an
+          existing directory to move into)
+
+Options:
+      --force
+          Replace an existing destination file (and, if it's Gat-tracked, its
+          `gat.lock`/materialized-state ownership) instead of failing when `dst`
+          already exists. Does not allow moving into an existing directory
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+## Examples
+
+<Tabs sync={false}>
+<Tab title="Rename">
+
+Move the file and update its tracked path.
+
+```sh
+gat mv data/model.bin models/model.bin
+```
+
+</Tab>
+<Tab title="Overwrite">
+
+<Warning>This overwrites the destination file. A rollback does not restore its previous contents.</Warning>
+
+```sh
+gat mv --force old.bin new.bin
+```
+
+</Tab>
+</Tabs>

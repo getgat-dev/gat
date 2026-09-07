@@ -1,0 +1,78 @@
+---
+title: "gat rm"
+description: "Stop tracking files or directories, optionally keeping local files."
+---
+
+Selection is matched against `gat.lock`, so missing working-tree files and lock-only glob matches remain removable. By
+default Gat removes both tracked rows and working files; `--cached` retains the files while dropping <Tooltip tip="Gat’s responsibility for tracking and restoring a path. Removing ownership is different from deleting cached content; old Git snapshots can still refer to those bytes.">Gat ownership</Tooltip>.
+
+To reclaim stored bytes, review [gat gc](/commands/gc) and its history-protection rules.
+
+<Accordion title="Recover from a partial failure">
+Removals are published to `gat.lock` before working files are deleted.
+If deletion, empty-directory pruning, materialized ownership cleanup, or Git
+exclusion regeneration fails afterward, the error identifies the failed stage
+and the paths are already untracked. Cleanup may be incomplete. Repeating the
+same `gat rm` does not resume cleanup for those paths; inspect remaining files
+and metadata before further cleanup. If ownership cleanup fails with
+`--cached`, preserve retained files before running `gat sync`: stale ownership
+may cause sync to delete them.
+</Accordion>
+
+## Usage
+
+```text
+Usage: gat rm [OPTIONS] <PATHS>...
+```
+
+<Accordion title="All options" id="gat-rm-options">
+
+```text
+Usage: gat rm [OPTIONS] <PATHS>...
+
+Arguments:
+  <PATHS>...
+          Tracked files, directories, or glob patterns to stop tracking. `*.bin`
+          matches only the current directory; `**/*.bin` matches recursively
+
+Options:
+      --cached
+          Keep the file(s) on disk; only remove them from `gat.lock`
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+## Examples
+
+<Tabs sync={false}>
+<Tab title="Delete file">
+
+Stop tracking the file and remove its working-tree copy.
+
+```sh
+gat rm data/model.bin
+```
+
+</Tab>
+<Tab title="Keep file">
+
+Remove only the `gat.lock` entry.
+
+```sh
+gat rm --cached data/model.bin
+```
+
+</Tab>
+<Tab title="Directory">
+
+Remove all matching tracked rows recursively.
+
+```sh
+gat rm data/checkpoints/
+```
+
+</Tab>
+</Tabs>

@@ -1,0 +1,53 @@
+[package]
+name = "gat-io"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+description = "Physical I/O capabilities for gat: filesystem access, atomic publication, repository discovery/layout, and (over time) config/lock/state persistence, Git, content-addressed storage, and remote transfer. Depends only on gat-core among workspace crates."
+
+[lib]
+name = "gat_io"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Enables cfg(test)-only instrumentation (e.g. file_state's stat-proof
+# call counter) for consumption by the root `gat` crate's own test
+# suite, which cannot see another crate's #[cfg(test)] items directly.
+# Activated only via gat-io's dev-dependency feature unification when
+# running `gat`'s tests; never enabled in a release build. Also forwards
+# to `gat-core`'s own `test-support` feature, since `gat-io::lock`'s
+# test-only instrumentation (e.g. `test_support::btree_validation_parses`)
+# calls through to `gat_core::lock::codec::test_probes`.
+test-support = ["gat-core/test-support"]
+
+[dependencies]
+gat-core = { path = "../gat-core" }
+thiserror = "2"
+tempfile = "3"
+fs2 = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+yaml_serde = "0.10"
+rayon = "1"
+blake3 = { version = "1", features = ["mmap", "rayon"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+memmap2 = "0.9"
+reflink-copy = "0.1"
+mea = "0.6"
+bytes = "1"
+futures = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+opendal = { version = "0.58", features = ["services-s3", "services-azblob", "services-gcs", "services-oss", "services-fs", "layers-concurrent-limit"] }
+url = "2"
+gix = { version = "0.87", default-features = false, features = ["index", "attributes", "excludes", "dirwalk", "revision", "sha1", "sha256", "blocking-network-client", "blocking-http-transport-reqwest-rust-tls", "worktree-mutation"] }
+gix-config = "0.60"
+gix-lock = "24"
+
+[dev-dependencies]
+http = "1"
+tokio = { version = "1", features = ["test-util"] }
+test-support-git = { path = "../test-support-git" }
+
+[lints]
+workspace = true

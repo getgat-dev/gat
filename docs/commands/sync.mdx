@@ -1,0 +1,168 @@
+---
+title: "gat sync"
+description: "Reconcile the working tree and materialize files."
+---
+
+Sync reconciles the working tree with the current `gat.lock`: it creates new
+or missing files, replaces changed desired content, and removes paths no longer
+tracked. It uses <Tooltip tip="Gat checks filesystem metadata first and hashes content only when metadata cannot establish whether a file matches the expected object.">lazy validation</Tooltip>
+to check working files. See [how sync plans changes](/concepts/how-gat-works#how-sync-decides-what-to-change)
+and [automatic sync and conflicts](/concepts/automatic-sync).
+
+| Option | Effect |
+| --- | --- |
+| `--fetch` | Fetch missing objects before reconciliation. Also enabled by `sync.auto_fetch`. |
+| `--repair` | Fetch clean replacements for corrupted cache objects. Also enabled by `sync.auto_repair`. |
+| `--trust-state` | Skip working-tree validation. Also enabled by `sync.trust_state`. |
+| `--rematerialize` | Recreate clean files using the current materialization strategy, always validating them. Preview with `--dry-run`. |
+
+Without fetching or repair enabled, sync uses only the local cache.
+
+<Warning>
+Trusting recorded state can miss files changed or deleted outside Gat.
+</Warning>
+
+Without path flags, use the default named selection, or all paths if none is set.
+Explicit filters replace that selection; `--path .` selects the whole repository.
+
+<Accordion title="Path selection rules">
+  | Selector | Selection used |
+  | --- | --- |
+  | `--selection NAME` | One saved definition, without changing the default. |
+  | `--path`, `--include`, or `--exclude` | <Tooltip tip="Path, include, and exclude flags supplied directly to this command. These replace the saved selection as a whole, so repeat any exclusions you still need." cta="Selection precedence" href="/concepts/path-selection">A complete inline selection</Tooltip>. |
+
+  Named and inline selectors cannot be combined. Paths are relative to the
+  repository root; patterns are relative to the selected path.
+  See [Path selection](/concepts/path-selection) and [gat selection](/commands/selection).
+</Accordion>
+
+## Usage
+
+```text
+Usage: gat sync [OPTIONS]
+```
+
+<Accordion title="All options" id="gat-sync-options">
+
+```text
+Usage: gat sync [OPTIONS]
+
+Options:
+      --selection <NAME>
+          Use this saved selection for this operation without changing the
+          default
+
+      --path <PATH>
+          Select this file or subtree. Any explicit --path, --include, or
+          --exclude replaces the complete configured selection. Use --path . for
+          the whole repository. For mount add, omission selects the source root;
+          repository selection defaults never apply to mounts
+
+      --include <INCLUDE>
+          Glob pattern (matched relative to `--path`) selecting which paths to
+          include. Repeatable. Component-aware: `*.bin` matches only immediate
+          children, while `**/*.bin` matches recursively. Empty means everything
+          under `--path`
+
+      --exclude <EXCLUDE>
+          Glob pattern (matched relative to `--path`) excluded from `--include`
+          (or from everything under `--path`, if `--include` is empty).
+          Repeatable. Component-aware like `--include`; exclude always wins over
+          include
+
+      --force
+          Overwrite or remove locally modified gat-managed files instead of
+          leaving them untouched as conflicts
+
+      --dry-run
+          Show what would be materialized, replaced, removed, or flagged as a
+          conflict/missing object, without changing anything
+
+      --trust-state
+          Trust `gat.lock` plus recorded materialized state without touching the
+          working tree. This opts into the fast path; by default `gat sync`
+          validates with Git-style lazy stat-then-hash fallback
+
+      --fetch
+          Fetch missing cache objects from the remote before reconciling, like
+          `gat pull` does, instead of `gat sync`'s normal local-cache-only
+          behavior. Same as `gat config sync.auto_fetch true`, for one run
+
+      --repair
+          Re-fetch and re-materialize any cache object found corrupted during
+          this sync (a conflict where the cache object gat would have used is
+          itself bad, not just the working file) from a remote, instead of only
+          reporting it
+
+      --remote <REMOTE>
+          Remote to fetch missing/repair corrupted cache objects from. Defaults
+          to the configured default remote. Only meaningful with
+          `--fetch`/`--repair` (or `sync.auto_fetch`/ `sync.auto_repair`)
+
+      --rematerialize
+          Recreate already-correct managed files using the current
+          `cache.materialization_strategy`, even though their content is already
+          up to date. Unlike a plain `gat sync` (which leaves an already-correct
+          file untouched no matter how `cache.materialization_strategy`
+          changed), this may rewrite a large amount of working-tree data: every
+          selected clean file is recreated. Forces full working-tree validation
+          for this run (bypassing `sync.trust_state`'s fast path) so a locally
+          modified file is reported as a conflict instead of silently
+          overwritten; combine with `--force` to overwrite it anyway. Combinable
+          with `--dry-run` to preview what would be recreated
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+## Examples
+
+<Tabs sync={false}>
+<Tab title="Default selection">
+
+Materialize the current desired state.
+
+```sh
+gat sync
+```
+
+</Tab>
+<Tab title="Directory">
+
+Restrict reconciliation to one subtree.
+
+```sh
+gat sync --path data/
+```
+
+</Tab>
+<Tab title="Fetch">
+
+Fetch missing objects before reconciliation.
+
+```sh
+gat sync --fetch --remote backup
+```
+
+</Tab>
+<Tab title="Rematerialize">
+
+Show which clean files would be recreated.
+
+```sh
+gat sync --rematerialize --dry-run
+```
+
+</Tab>
+<Tab title="Glob pattern">
+
+Reconcile selected model files while excluding tests.
+
+```sh
+gat sync --include '**/*.onnx' --exclude 'tests/**'
+```
+
+</Tab>
+</Tabs>

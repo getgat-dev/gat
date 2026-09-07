@@ -1,0 +1,92 @@
+---
+title: "gat add"
+description: "Track files and directories and store them in the local cache."
+---
+
+Track files, directories, or quoted glob patterns. Gat caches the bytes, records
+paths and content IDs in `gat.lock`, and updates `.git/info/exclude`.
+See [the file lifecycle](/concepts/how-gat-works#follow-one-file-through-a-change)
+for how this becomes a shared Git version.
+
+Ignore rules from `.gatignore` and Git apply during expansion. `--force` bypasses
+ignore filtering only for the requested paths. It still rejects Git-tracked files,
+mount-owned paths, unsupported file types, and Gat or Git infrastructure paths.
+
+<Accordion title="Tracking succeeded, but metadata cleanup failed">
+  If ownership recording or Git exclusion updates fail after publication, the
+  paths are already tracked in `gat.lock`. The error names the incomplete stage;
+  it does not mean the addition was undone. Inspect the lock and Git exclusions
+  before staging files with Git.
+</Accordion>
+
+## Usage
+
+```text
+Usage: gat add [OPTIONS] <PATHS>...
+```
+
+<Accordion title="All options" id="gat-add-options">
+
+```text
+Usage: gat add [OPTIONS] <PATHS>...
+
+Arguments:
+  <PATHS>...
+          Files, directories, or glob patterns to start tracking. `*.bin`
+          matches only the current directory; `**/*.bin` matches recursively
+
+Options:
+  -f, --force
+          Disable `.gatignore`/Git-ignore (`.gitignore`/`.git/info/exclude`
+          /global excludes) filtering within the selection scope: an
+          explicitly-named ignored path, or an ignored file that a directory or
+          glob argument would otherwise skip, is included instead. Does not
+          widen the selection scope itself, and never bypasses the
+          plain-git-tracked or gat/git infrastructure-path refusals
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+## Examples
+
+<Tabs sync={false}>
+<Tab title="One file">
+
+Add one large file to `gat.lock` and the local cache.
+
+```sh
+gat add data/model.bin
+```
+
+</Tab>
+<Tab title="Directory">
+
+Recursively add eligible files and summarize exclusions.
+
+```sh
+gat add data/
+```
+
+</Tab>
+<Tab title="Glob pattern">
+
+Add matching files at any depth.
+
+```sh
+gat add 'data/**/*.bin'
+```
+
+</Tab>
+<Tab title="Ignored file">
+
+Include an ignored file without bypassing repository safety checks.
+
+```sh
+gat add --force data/model.bin
+```
+
+</Tab>
+</Tabs>

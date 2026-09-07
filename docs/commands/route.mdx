@@ -1,0 +1,286 @@
+---
+title: "gat route"
+description: "Route files to specific storage remotes by path."
+tag: "Experimental"
+---
+
+<Warning>
+`gat route` is **Experimental**: its interface or behavior may change or be removed between releases. See [Feature lifecycle](/references/feature-lifecycle).
+</Warning>
+
+Routes map tracked path prefixes to named remotes independently of mount ownership.
+The most-specific matching path wins; route names identify rules, not their priority.
+
+A <Tooltip tip="A literal repository-relative path matched by complete segments. A route for models covers models/a.bin, but not models-old/a.bin; it is not a glob pattern." cta="Routing examples" href="/guides/using-multiple-remotes#remote-selection-at-a-glance">path prefix</Tooltip>
+selects storage for a subtree. An explicit `--remote NAME` overrides routing for one
+command. See [Using multiple remotes](/guides/using-multiple-remotes) for setup,
+backups, and moving content between stores.
+
+Reads combine routes from all configuration layers. Changes target one layer and
+leave mounts, tracked entries, and remote definitions intact. See
+[Config inheritance](/concepts/config-inheritance#what-inherits) for local overrides,
+and [gat remote](/commands/remote) to manage the storage locations themselves.
+
+## Usage
+
+```text
+Usage: gat route <COMMAND>
+```
+
+<Accordion title="All options" id="gat-route-options">
+
+```text
+Usage: gat route <COMMAND>
+
+Commands:
+  list    List all configured routes, plus a synthetic `*` row showing the
+          repository default remote that applies when no route matches
+  add     Add a new named route: tracked paths at or beneath `PATH` are served
+          by `REMOTE`, unless a more specific route overrides it. `REMOTE` must
+          already be a named remote (`gat remote add` it first). Fails if `NAME`
+          already exists in the selected scope -- use `route update` to change
+          an existing route. A route selects storage only -- it never changes
+          which mount (if any) owns `PATH`. `NAME` `*` is reserved for `route
+          list`'s synthetic default-remote row and cannot be used
+  update  Update an existing route in place, preserving its stable `NAME`. Any
+          flag you omit keeps the route's current value
+  remove  Remove a named route. Only removes that route definition from the
+          selected scope; never touches mount configuration, `gat.lock`
+          ownership, remotes, or other routes
+  show    Show everything about one configured route: its name, normalized path,
+          remote, and which config layer defines it. Reads the effective config
+          merged across every scope
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+## Subcommands
+
+<CardGroup cols={2}>
+  <Card title="gat route list" href="#gat-route-list" />
+  <Card title="gat route add" href="#gat-route-add" />
+  <Card title="gat route update" href="#gat-route-update" />
+  <Card title="gat route remove" href="#gat-route-remove" />
+  <Card title="gat route show" href="#gat-route-show" />
+</CardGroup>
+
+## gat route add
+
+Route a path and its descendants to an existing remote. The most-specific matching path wins.
+
+### Usage
+
+```text
+Usage: gat route add [OPTIONS] <NAME> <REMOTE> <PATH>
+```
+
+<Accordion title="All options" id="gat-route-add-options">
+
+```text
+Usage: gat route add [OPTIONS] <NAME> <REMOTE> <PATH>
+
+Arguments:
+  <NAME>
+          Stable route identity and `routes:` config key
+
+  <REMOTE>
+          Name of an existing remote to route `PATH` to
+
+  <PATH>
+          Root-relative path this route applies to (and everything beneath it,
+          unless overridden by a more specific route)
+
+Options:
+      --global
+          Write to the global config (`~/.gat/gat.yaml`), applying to every
+          repository for this user
+
+      --project
+          Write to the project config (`<repo_root>/gat.yaml`), committed to git
+          and shared with everyone who clones the repo. The default
+
+      --local
+          Write to the local config (`<repo_root>/.gat/gat.yaml`), repo-local
+          and never committed (`.gat/` isn't tracked)
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+### Examples
+
+Send a tracked subtree to a named remote.
+
+```sh
+gat route add datasets backup data/datasets
+```
+
+## gat route list
+
+List effective routes. The synthetic `*` row shows the default remote fallback.
+
+### Usage
+
+```text
+Usage: gat route list
+```
+
+<Accordion title="All options" id="gat-route-list-options">
+
+```text
+Usage: gat route list
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+### Examples
+
+Show named routes and the default fallback.
+
+```sh
+gat route list
+```
+
+## gat route remove
+
+Remove a storage rule. Tracked files, mounts, and remote definitions are kept.
+
+### Usage
+
+```text
+Usage: gat route remove [OPTIONS] <NAME>
+```
+
+<Accordion title="All options" id="gat-route-remove-options">
+
+```text
+Usage: gat route remove [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>
+          Name of the route to remove
+
+Options:
+      --global
+          Write to the global config (`~/.gat/gat.yaml`), applying to every
+          repository for this user
+
+      --project
+          Write to the project config (`<repo_root>/gat.yaml`), committed to git
+          and shared with everyone who clones the repo. The default
+
+      --local
+          Write to the local config (`<repo_root>/.gat/gat.yaml`), repo-local
+          and never committed (`.gat/` isn't tracked)
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+### Examples
+
+Delete the route definition. `gat route rm datasets` is also accepted.
+
+```sh
+gat route remove datasets
+```
+
+## gat route show
+
+Show the route path, remote, and defining scope.
+
+### Usage
+
+```text
+Usage: gat route show <NAME>
+```
+
+<Accordion title="All options" id="gat-route-show-options">
+
+```text
+Usage: gat route show <NAME>
+
+Arguments:
+  <NAME>
+          Name of the route to inspect
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+### Examples
+
+Inspect the route's normalized path, remote, and defining scope.
+
+```sh
+gat route show datasets
+```
+
+## gat route update
+
+Change the path or remote in the defining scope. Omitted settings are preserved.
+
+### Usage
+
+```text
+Usage: gat route update [OPTIONS] <NAME>
+```
+
+<Accordion title="All options" id="gat-route-update-options">
+
+```text
+Usage: gat route update [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>
+          Name of the route to update (its stable `routes:` config key)
+
+Options:
+      --remote <REMOTE>
+          New remote to route to (keeps the current remote if omitted). Must
+          already be a named remote
+
+      --path <PATH>
+          New path this route applies to (keeps the current `path` if omitted)
+
+      --global
+          Write to the global config (`~/.gat/gat.yaml`), applying to every
+          repository for this user
+
+      --project
+          Write to the project config (`<repo_root>/gat.yaml`), committed to git
+          and shared with everyone who clones the repo. The default
+
+      --local
+          Write to the local config (`<repo_root>/.gat/gat.yaml`), repo-local
+          and never committed (`.gat/` isn't tracked)
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+### Examples
+
+Update route properties without changing its stable name.
+
+```sh
+gat route update datasets --remote archive --path datasets
+```

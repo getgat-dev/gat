@@ -1,0 +1,32 @@
+[package]
+name = "gat-engine"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+description = "Execution semantics and repository workflows for gat, built on gat-core and gat-io."
+
+[lib]
+name = "gat_engine"
+path = "src/lib.rs"
+
+[features]
+default = []
+test-support = ["gat-core/test-support", "gat-io/test-support"]
+
+[dependencies]
+gat-core = { path = "../gat-core" }
+gat-io = { path = "../gat-io" }
+blake3 = "1"
+futures = "0.3"
+rayon = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+[dev-dependencies]
+test-support-git = { path = "../test-support-git" }
+gat-core = { path = "../gat-core", features = ["test-support"] }
+gat-io = { path = "../gat-io", features = ["test-support"] }
+tempfile = "3"
+
+[lints]
+workspace = true

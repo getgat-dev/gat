@@ -1,0 +1,22 @@
+[package]
+name = "test-support-gat"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+description = "Dev-only test fixtures shared by gat's unit and integration tests."
+
+[lib]
+name = "test_support"
+path = "src/lib.rs"
+
+[dependencies]
+tempfile = "3"
+clap = { version = "4", features = ["derive", "wrap_help"] }
+test-support-git = { path = "../test-support-git" }
+gat = { path = ".." }
+gat-core = { path = "../gat-core" }
+gat-command = { path = "../gat-command", features = ["test-support"] }
+gat-engine = { path = "../gat-engine" }
+
+[lints]
+workspace = true

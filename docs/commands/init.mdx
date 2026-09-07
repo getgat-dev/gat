@@ -1,0 +1,88 @@
+---
+title: "gat init"
+description: "Initialize Gat with hooks, merge support, and a local cache."
+---
+
+Prepare the local cache and configure Gat's Git hooks and <Tooltip tip="A Git integration that merges lock entries by path and content ID. Independent changes can merge automatically; conflicting versions of the same path need a decision." cta="Resolve lock conflicts" href="/guides/branching-and-merging">semantic lock merge driver</Tooltip>. Run this in every clone; Git does not copy repository-local integration. See
+[Automatic sync](/concepts/automatic-sync) for hook triggers and fetching behavior.
+
+<Note>
+Re-running init updates the integration to match the supplied flags.
+`--no-hooks` removes existing Gat-managed hooks while preserving other hook code.
+`--example-config` creates a commented `gat.yaml` only if none exists.
+</Note>
+
+<Accordion title="Git configuration is locked">
+  Wait for the Git process to finish. Gat leaves an existing configuration lock
+  intact; remove a stale lock only after confirming that no process owns it.
+</Accordion>
+
+## Usage
+
+```text
+Usage: gat init [OPTIONS]
+```
+
+<Accordion title="All options" id="gat-init-options">
+
+```text
+Usage: gat init [OPTIONS]
+
+Options:
+      --no-hooks
+          Ensure gat's Git hooks are absent (removing gat's managed
+          `post-checkout`/`post-merge`/`post-rewrite` blocks if present) instead
+          of ensuring them installed. The merge driver and attributes (unless
+          `--no-merge-driver` is also passed) still converge to installed, and
+          the local cache dir is still set up
+
+      --no-merge-driver
+          Ensure the `gat.lock` semantic merge driver is absent (removing the
+          `merge.gat-lock.*` Git config and gat's managed `info/attributes`
+          block if present) instead of ensuring it installed. Hooks (unless
+          `--no-hooks` is also passed) and the local cache dir still converge to
+          installed/set up
+
+      --example-config
+          Also write an example `gat.yaml` (every key commented out) if the
+          project doesn't have one yet. An already-present `gat.yaml` is always
+          left completely untouched; this only opts into creating a fresh one
+          when none exists
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+## Examples
+
+<Tabs sync={false}>
+<Tab title="Default setup">
+
+Install Gat's normal Git integration and initialize the local cache.
+
+```sh
+gat init
+```
+
+</Tab>
+<Tab title="Example config">
+
+Scaffold a commented `gat.yaml` when one does not already exist.
+
+```sh
+gat init --example-config
+```
+
+</Tab>
+<Tab title="No hooks">
+
+Keep the merge driver while explicitly removing Gat-managed hooks.
+
+```sh
+gat init --no-hooks
+```
+
+</Tab>
+</Tabs>

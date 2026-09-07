@@ -1,0 +1,115 @@
+---
+title: "gat"
+description: "Simple, fast, versioned large-file storage for git."
+mode: "custom"
+---
+
+<div className="px-4 pt-16 pb-8 lg:pt-18 lg:pb-12 max-w-3xl mx-auto text-center">
+  <h1 className="text-3xl lg:text-4xl font-semibold text-gray-900 dark:text-zinc-50 tracking-tight">
+    Version large files without changing how you use Git
+  </h1>
+  <p className="mt-4 text-gray-500 dark:text-zinc-400">
+    Use your own storage with <code>gat add</code>, <code>git commit</code>,{" "}
+    <code>gat push</code>.
+  </p>
+  <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
+    <a
+      href="/quickstart"
+      className="px-5 py-2.5 rounded-lg bg-primary text-white font-medium hover:opacity-90 transition-opacity"
+    >
+      Get started
+    </a>
+    <a
+      href="https://github.com/getgat-dev/gat"
+      className="px-5 py-2.5 rounded-lg border border-gray-300 dark:border-zinc-700 text-gray-700 dark:text-zinc-200 font-medium hover:border-gray-400 dark:hover:border-zinc-500 transition-colors"
+    >
+      View on GitHub
+    </a>
+  </div>
+</div>
+
+<div className="max-w-2xl mx-auto px-4">
+
+<CodeGroup>
+```bash macOS / Linux
+curl -fsSL https://getgat.dev/install.sh | sh
+```
+
+```powershell Windows
+& ([scriptblock]::Create((irm https://getgat.dev/install.ps1)))
+```
+
+```bash Source
+cargo install --locked --bin gat --git https://github.com/getgat-dev/gat gat
+```
+</CodeGroup>
+
+</div>
+
+<div className="max-w-2xl mx-auto px-4 -mt-2 mb-16 text-center text-sm text-gray-500 dark:text-zinc-500">
+  Choose the installer for your shell. Git is used alongside gat.
+</div>
+
+<div className="max-w-2xl mx-auto px-4 mb-20">
+
+```bash Example
+gat init
+gat remote add origin 's3://my-bucket/assets?region=eu-west-1'
+gat add models/encoder.safetensors
+git add gat.lock gat.yaml
+git commit -m "Track encoder weights with gat"
+gat push --remote origin
+```
+
+</div>
+
+<div className="max-w-4xl mx-auto px-4 mb-20">
+  <h2 className="text-2xl font-semibold text-gray-900 dark:text-zinc-50 text-center mb-6">
+    Why gat
+  </h2>
+  <CardGroup cols={2}>
+    <Card title="No server to run" icon="server">
+      Store large files in cloud object storage or a local directory.
+    </Card>
+    <Card title="Plain git underneath" icon="code-branch">
+      Commit small metadata files with Git; upload large-file content with Gat.
+    </Card>
+    <Card title="Configurable, automatic syncing" icon="download">
+      Git hooks restore large files after branch switches, merges, and rebases.
+    </Card>
+    <Card title="Fast, content-addressed cache" icon="fingerprint">
+      Identical content shares one cached object across paths and versions.
+    </Card>
+  </CardGroup>
+</div>
+
+<div className="max-w-4xl mx-auto px-4 mb-20">
+  <CardGroup cols={3}>
+    <Card title="Open source" icon="github" href="https://github.com/getgat-dev/gat">
+      Apache-licensed, source on GitHub.
+    </Card>
+    <Card title="Linux & macOS" icon="linux" href="/installation">
+      Native binary, no runtime dependencies.
+    </Card>
+    <Card title="Windows" icon="windows" href="/installation">
+      Native builds for AMD64 and ARM64.
+    </Card>
+  </CardGroup>
+</div>
+
+<div className="max-w-4xl mx-auto px-4 mb-24">
+  <h2 className="text-2xl font-semibold text-gray-900 dark:text-zinc-50 text-center mb-6">
+    Next steps
+  </h2>
+  <CardGroup cols={3}>
+    <Card title="Installation" icon="download" href="/installation">
+      Prerequisites and how to install the `gat` binary.
+    </Card>
+    <Card title="Quickstart" icon="rocket" href="/quickstart">
+      Track and push your first large file, end to end.
+    </Card>
+    <Card title="Commands" icon="terminal" href="/commands/add">
+      Full reference, one page per subcommand.
+    </Card>
+  </CardGroup>
+</div>

@@ -1,0 +1,123 @@
+---
+title: "gat config"
+description: "View or update configuration settings in `gat.yaml`."
+---
+
+Read or change general settings. Reads show the effective value and its source;
+writes affect one scope, with project as the default.
+
+| Task | How |
+| --- | --- |
+| Set a <Tooltip tip="One setting value, such as true, a number, or a strategy name. List settings instead take one argument for each element." cta="Find a setting’s type" href="/references/configuration">scalar</Tooltip> | Pass one value. |
+| Replace a list | Pass one argument per element; commas are not separators. |
+| Save an empty list | Use `--clear` where allowed. |
+| Restore inheritance | Use `--unset`. |
+
+Manage named resources with [gat remote](/commands/remote), [gat mount](/commands/mount),
+[gat route](/commands/route), and [gat selection](/commands/selection). See
+[Config inheritance](/concepts/config-inheritance) for scope rules and
+[Configuration](/references/configuration) for keys and defaults.
+
+<Note>
+Output includes headings and source information. It is intended for people,
+not as a serialized configuration format.
+</Note>
+
+## Usage
+
+```text
+Usage: gat config [OPTIONS] <KEY> [VALUES]...
+```
+
+<Accordion title="All options" id="gat-config-options">
+
+```text
+Usage: gat config [OPTIONS] <KEY> [VALUES]...
+
+Arguments:
+  <KEY>
+          The `gat.yaml` key to get or set, e.g.
+          `cache.materialization_strategy`
+
+  [VALUES]...
+          New value(s) to set: one for a scalar key, or one positional argument
+          per element for a list-valued key. Omit (and omit `--clear`/`--unset`)
+          to print the current (or default) value
+
+Options:
+      --clear
+          Persist an explicit empty list in the selected scope (list-valued keys
+          only). Mutually exclusive with `--unset` and with passing values
+
+      --unset
+          Remove the key from the selected scope and inherit from lower layers
+          or use its built-in default. Mutually exclusive with `--clear` and
+          with passing values
+
+      --global
+          Write to the global config (`~/.gat/gat.yaml`), applying to every
+          repository for this user
+
+      --project
+          Write to the project config (`<repo_root>/gat.yaml`), committed to git
+          and shared with everyone who clones the repo. The default
+
+      --local
+          Write to the local config (`<repo_root>/.gat/gat.yaml`), repo-local
+          and never committed (`.gat/` isn't tracked)
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+## Examples
+
+<Tabs sync={false}>
+<Tab title="Read">
+
+Print the value and its source after applying overrides.
+
+```sh
+gat config cache.location
+```
+
+</Tab>
+<Tab title="Set value">
+
+Write a scalar setting to the selected scope.
+
+```sh
+gat config cache.location /mnt/gat-cache
+```
+
+</Tab>
+<Tab title="Set list">
+
+Replace a list with one argument per element.
+
+```sh
+gat config git.ignore_patterns '*.bin' '*.onnx'
+```
+
+</Tab>
+<Tab title="Clear list">
+
+Persist an explicit empty list.
+
+```sh
+gat config git.ignore_patterns --clear
+```
+
+</Tab>
+<Tab title="Unset">
+
+Restore inheritance or the built-in default.
+
+```sh
+gat config cache.location --unset
+```
+
+</Tab>
+</Tabs>

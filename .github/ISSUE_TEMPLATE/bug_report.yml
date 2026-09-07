@@ -1,0 +1,57 @@
+name: Bug report
+description: Something isn't working as expected.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact `gat` commands (and any relevant `git` commands) that trigger the issue.
+      placeholder: |
+        gat init
+        gat remote file:///tmp/remote
+        gat add big.bin
+        gat push
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: gat version
+      description: Output of `gat --version`.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: remote
+    attributes:
+      label: Remote type
+      description: s3://, azblob://, file://, or none.
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      render: shell

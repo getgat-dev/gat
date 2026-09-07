@@ -1,0 +1,32 @@
+[package]
+name = "gat-core"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+description = "Pure domain value types shared across gat's crates: paths, globs, semantic names, OIDs, Git revision/commit identity, and history-selection requests. No filesystem, SQLite, Gix, or OpenDAL access lives here."
+
+[lib]
+name = "gat_core"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Enables cfg(test)-only instrumentation (e.g. Oid::to_hex call counting)
+# for consumption by the root `gat` crate's own test suite, which cannot
+# see another crate's #[cfg(test)] items directly. Activated only via
+# gat-core's dev-dependency feature unification when running `gat`'s
+# tests; never enabled in a release build.
+test-support = []
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+blake3 = "1"
+glob = "0.3"
+
+[dev-dependencies]
+serde_json = "1"
+yaml_serde = "0.10"
+
+[lints]
+workspace = true

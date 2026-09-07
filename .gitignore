@@ -1,0 +1,84 @@
+# rust
+/target
+**/target/
+
+# gat
+.gat/
+gat.lock
+gat.yaml
+
+# github
+.github/mcp.json
+
+# docs
+/docs/node_modules
+/docs/.vitepress/cache
+/docs/.vitepress/dist
+/docs/dist
+
+# node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm/
+.pnpm-store/
+
+# agents
+plan.md
+.agent/
+.agents/
+.claude/
+.cursor/
+.codex/
+
+# IDE
+*.iml
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# environment
+.env
+.env.*
+!.env.example
+
+# local config
+*.local
+*.local.*
+local/
+
+# logs
+*.log
+logs/
+
+# coverage / reports
+coverage/
+.coverage/
+lcov.info
+
+# temp / cache
+.tmp/
+tmp/
+.temp/
+.cache/
+
+# OS
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+Desktop.ini
+
+# backups
+*.bak
+*.backup
+*.orig
+
+# generated
+dist/
+build/
+out/

@@ -1,0 +1,13 @@
+{
+  "private": true,
+  "devDependencies": {
+    "mint": "4.2.854"
+  },
+  "scripts": {
+    "login": "mint login",
+    "validate": "mint validate",
+    "broken-links": "mint broken-links",
+    "check": "npm run validate && npm run broken-links",
+    "dev": "mint dev"
+  }
+}

@@ -1,0 +1,204 @@
+---
+title: "How Gat works"
+description: "Git versions the metadata. Gat stores and restores the large files."
+---
+
+Gat separates a large file's **version** from its **bytes**. Git commits a small
+`gat.lock` file that maps paths to content IDs. Gat stores the bytes in a local
+<Tooltip tip="A local store of file content indexed by content ID. It can hold versions that are not currently checked out, allowing Gat to restore them without another download." cta="Storage layout" href="/concepts/how-gat-works#what-lives-where">cache</Tooltip> and, when configured, remote storage.
+
+A <Tooltip headline="Content ID" tip="A BLAKE3 hash calculated from a file's bytes. Identical bytes have the same ID, even under different names; changing the bytes produces a new ID." cta="Lock format" href="/spec/lock-v1">content ID</Tooltip>
+is the link between them: the lock says which content belongs at a path, and
+the cache holds that content. This lets a Git commit select an exact large-file
+version without putting the large file itself in Git history.
+
+<CardGroup cols={2}>
+  <Card title="Git selects the version" icon="code-branch" href="/guides/branching-and-merging">
+    Commits record the lock. Switching revisions changes which content IDs
+    belong at your file paths.
+  </Card>
+  <Card title="Gat restores the bytes" icon="folder-open" href="/concepts/automatic-sync">
+    Sync creates working files from cached content. Pull downloads missing
+    content before syncing.
+  </Card>
+</CardGroup>
+
+## Follow one file through a change
+
+Suppose `data/model.bin` contains version A, and you want to share it.
+
+<Steps>
+  <Step title="Record the bytes with Gat">
+    `gat add data/model.bin` hashes the file, caches its content, and records
+    its path and content ID in `gat.lock`. Gat also excludes the working file
+    from Git locally.
+
+    This updates Gat's metadata; it does not create a Git commit or upload bytes.
+  </Step>
+  <Step title="Commit the version with Git">
+    Stage `gat.lock` with `git add`, then commit it. Include `gat.yaml` when
+    shared configuration changes. The commit now identifies version A.
+  </Step>
+  <Step title="Publish the content, then the commit">
+    `gat push` uploads the selected content to your configured remote.
+    Run `git push` afterward so readers of the commit can fetch its bytes.
+
+    Git and Gat remotes are separate: one stores Git history, the other stores
+    large-file content. See [Set up a remote](/set-up-a-remote).
+  </Step>
+  <Step title="Restore the file in another clone">
+    `git clone` brings the lock and shared settings, but not the large-file bytes.
+    Run `gat init`, then `gat pull`: Gat downloads missing content to the cache
+    and creates `data/model.bin` with the version selected by the lock.
+  </Step>
+</Steps>
+
+When you replace the file with version B, run `gat add` again. Its new bytes get
+a new content ID; your next Git commit records that ID. The earlier commit still
+points to A. Checking out that commit and syncing restores A from the cache,
+or requires a download if A is no longer cached.
+
+<Tip>
+  Try the commands in the [Quickstart](/quickstart), or follow the
+  [branching and publishing workflow](/guides/branching-and-merging).
+</Tip>
+
+## Fetch, sync, and pull
+
+| Command | What changes |
+| --- | --- |
+| [gat fetch](/commands/fetch) | Downloads missing selected content into the cache. Working files stay as they are. |
+| [gat sync](/commands/sync) | Updates working files to match the selected lock entries. Uses cached content by default. |
+| [gat pull](/commands/pull) | Fetches missing content, then syncs the current checkout. |
+
+[Path selection](/concepts/path-selection) limits which files an operation uses.
+[History selection](/concepts/history-selection) can include content referenced by
+older commits, for example to prefetch it before going offline. Fetching history
+does not check out those versions: Git chooses the revision to restore.
+
+## What lives where
+
+<FileTree>
+- my-repo/
+  - gat.yaml
+  - gat.lock
+  - data/
+    - model.bin
+  - .gat/
+    - objects/
+    - state/
+  - .git/
+    - info/
+      - exclude
+</FileTree>
+
+Commit `gat.lock` and project `gat.yaml`. The cache, working files, and local
+bookkeeping stay out of Git.
+
+<AccordionGroup>
+  <Accordion title="gat.lock: which content belongs at each path">
+    Each entry holds a repository-relative path and a BLAKE3 content ID.
+    Checking out another Git revision selects that revision's file versions.
+
+    Large repositories can split the lock into a `gat.lock/` directory using
+    `lock.shard_levels`. The [logical format](/spec/lock-v1) stays the same.
+  </Accordion>
+  <Accordion title="gat.yaml: shared settings">
+    Project configuration defines remotes, selections, synchronization, and
+    other settings. Personal overrides belong in global or local configuration.
+    See [Config inheritance](/concepts/config-inheritance).
+  </Accordion>
+  <Accordion title=".gat/objects: cached bytes">
+    An **object** is one file's bytes, stored by content ID. Identical bytes share one object across
+    paths and revisions. The cache location is configurable. See [shared-cache setup](/guides/improving-performance#reuse-a-cache-across-repositories)
+    before reusing one across clones.
+  </Accordion>
+  <Accordion title=".gat/state: local bookkeeping">
+    Gat records what it last put in the working tree. Sync compares this record
+    with the current lock and files on disk to plan changes.
+  </Accordion>
+  <Accordion title=".git/info/exclude: keep managed files out of Git">
+    Gat maintains local exclusions so `git add -A` skips managed working files.
+    Your project's `.gitignore` remains separate.
+
+    Git cannot express exact ignore rules for filenames containing newlines.
+    Those files need a broader ignore pattern or a different name.
+  </Accordion>
+</AccordionGroup>
+
+## How sync decides what to change
+
+Sync reconciles three things:
+
+| Source | What it tells Gat |
+| --- | --- |
+| Current `gat.lock` | The desired content at each tracked path. |
+| Local state in `.gat/state` | What Gat previously placed in this clone. |
+| Files on disk | What is present now, including your edits. |
+
+Gat uses recorded state and filesystem checks to determine whether working files
+still match the expected content. It hashes bytes when metadata alone cannot
+establish a match. The local state is bookkeeping, not another version history.
+
+If the lock now selects B where Gat previously placed A, sync replaces a clean
+A with B from the cache. It can also restore a missing file or remove a previously
+managed path that is no longer desired. A file already at the desired version
+needs no replacement.
+
+If replacement or removal would discard local changes, sync reports a conflict.
+It also protects existing files that obstruct a desired path. Review the
+[dry run and conflict options](/concepts/automatic-sync#local-changes-and-conflicts)
+before forcing a change.
+
+<Note>
+  `gat status` compares lock metadata, not the bytes of working files. After
+  editing an asset, use [gat add](/commands/add) to record its new content.
+  See [what status reports](/commands/status).
+</Note>
+
+## When the Git version changes
+
+`gat init` installs Git hooks that run sync after supported operations such as
+switching branches and merging. Git selects the lock; Gat then restores the
+corresponding working files. Cached versions can be restored offline.
+
+Missing content needs `gat pull` or fetching enabled during sync. Run `gat init`
+in each clone. After operations without a suitable hook, such as `git reset
+--hard` or `git restore`, run `gat sync` yourself. See
+[Automatic sync](/concepts/automatic-sync) for triggers, fetching, and recovery.
+
+## Content identity is independent of path
+
+The content ID is a BLAKE3 hash of the bytes, not the filename. Renaming a tracked file
+with `gat mv` reuses its cached content. Editing a file requires `gat add`
+again to record the new bytes and content ID.
+
+<Accordion title="How cached content becomes a working file">
+  Creating a working file from cached content is called <Tooltip tip="Creating a usable file at its tracked path from cached content. The strategy controls whether Gat copies bytes or uses filesystem links or clones." cta="Compare strategies" href="/guides/improving-performance#avoid-unnecessary-copying-during-materialization">materialization</Tooltip>.
+  The default strategy creates an independent copy. Gat can also use reflinks,
+  hardlinks, or symlinks, depending on the filesystem and configuration.
+
+  Hardlinks and symlinks share bytes with the cache; editing them can change
+  cached content. Prefer independent copies or reflinks for editable files.
+
+  Changing the strategy affects future materializations. Use
+  `gat sync --rematerialize --dry-run` to preview recreating existing clean
+  files with the new strategy. See [Materialization strategies](/guides/improving-performance#avoid-unnecessary-copying-during-materialization).
+</Accordion>
+
+## Remotes, routes, and mounts
+
+<CardGroup cols={2}>
+  <Card title="Remote: store the bytes" icon="cloud" href="/set-up-a-remote">
+    Connect object storage or a local directory.
+  </Card>
+  <Card title="Route: choose storage by path" icon="route" href="/guides/using-multiple-remotes">
+    Send different paths to different remotes. Experimental.
+  </Card>
+  <Card title="Mount: import a snapshot" icon="folder-tree" href="/guides/consuming-gat-assets">
+    Consume tracked files owned by another repository. Experimental.
+  </Card>
+  <Card title="Selection: choose a working set" icon="filter" href="/concepts/path-selection">
+    Limit an operation to the files you need.
+  </Card>
+</CardGroup>

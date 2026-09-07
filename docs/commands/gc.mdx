@@ -1,0 +1,224 @@
+---
+title: "gat gc"
+description: "Remove objects from the local cache or remote storage."
+tag: "Experimental"
+---
+
+<Warning>
+`gat gc` is **Experimental**: its interface or behavior may change or be removed between releases. See [Feature lifecycle](/references/feature-lifecycle).
+</Warning>
+
+<Tooltip tip="Deleting stored content that is not protected by the selected locks and histories. Protection depends on the repositories and history you supply, not on when an object was last downloaded.">Garbage collection</Tooltip> keeps objects referenced by the selected Git histories and
+the current repository's working lock. Local-cache and remote collection use
+the same rules to decide what to keep. See [history selection](/concepts/history-selection)
+for snapshot traversal and [shared caches](/guides/improving-performance#reuse-a-cache-across-repositories)
+for storage used by multiple clones.
+
+| History choice | Protected snapshots |
+| --- | --- |
+| No history flags | All available history, plus the current working lock. |
+| Explicit history flags | Selected history from every repository, plus the current working lock. |
+| `--no-history` | The current working lock and each additional repository's HEAD lock. |
+
+Use repeatable `--repository <LOCATION>` to protect other Git repositories.
+History flags apply to each repository independently: revision and exclusion
+names must resolve in every repository. Per-repository selectors are not supported.
+
+```sh
+gat gc --dry-run --repository ../other-project --repository https://example.com/team/project.git
+gat gc --remote origin --dry-run --repository ../other-project
+```
+
+<Warning>
+Supply every repository that shares the storage, including shared local caches.
+Gat does not discover them automatically. Only committed locks from additional
+repositories are protected; their uncommitted changes are not included.
+</Warning>
+
+<Accordion title="How additional repositories are inspected">
+  Local paths, file URLs, and remote Git URLs all use temporary bare clones.
+  Gat removes these clones after inspection.
+</Accordion>
+
+Start with `--dry-run`. Remote deletion requires `--unsafe`:
+
+```sh
+gat gc --remote origin --unsafe --repository ../other-project
+```
+
+<Danger>
+An inspection failure or shallow history blocks deletion unless `--unsafe` is
+supplied; dry runs report uncertain objects. `--unsafe` can delete objects still
+in use. It does not protect against concurrent uploads or unlisted repositories
+sharing storage.
+</Danger>
+
+## Usage
+
+```text
+Usage: gat gc [OPTIONS]
+```
+
+<Accordion title="All options" id="gat-gc-options">
+
+```text
+Usage: gat gc [OPTIONS]
+
+Options:
+      --no-history
+          Keep only the current working lock and additional repositories' HEAD
+          locks. Conflicts with every history selection or traversal flag
+
+      --dry-run
+          Show what would be deleted without changing anything
+
+      --unsafe
+          Allow remote deletion and override incomplete repository inspection.
+          WARNING: unlisted repositories sharing storage are not protected
+
+      --remote <REMOTE>
+          Collect this remote instead of the local cache. Deletion requires
+          --unsafe
+
+      --repository <LOCATION>
+          Additional Git repository whose selected history is protected. Repeat
+          for multiple repositories. Local paths and Git URLs are cloned into
+          temporary repositories; uncommitted peer changes are not included
+
+      --rev <REV>
+          Explicit revision/rev-spec to select (e.g. a commit, tag, or branch
+          name). Repeatable; each one is resolved strictly and becomes its own
+          root. Alone (with no other history flag), selects only that revision
+          itself -- add `--ancestors`/`--depth`/`--since`/`--until` to also walk
+          its ancestry. Combinable with `--branches`/`--tags`; mutually
+          exclusive with `--all-history`
+
+      --branches
+          Select every branch tip: local (`refs/heads/**`) and remote-tracking
+          (`refs/remotes/**`), deduplicated by commit id. There is no separate
+          remote-tracking-only flag -- select a specific remote-tracking ref
+          with `--rev origin/main`. Alone, selects only those tip commits
+          themselves, not their ancestry -- combine with `--ancestors` (or
+          `--depth`) to also walk backwards from each tip. A branch that
+          *validly* resolves to a non-commit object is silently skipped rather
+          than erroring; but a branch ref that *fails* to resolve at all
+          (dangling, corrupt, unreadable) makes resolution fail closed with an
+          error instead. Combinable with `--rev`/`--tags`; mutually exclusive
+          with `--all-history`
+
+      --tags
+          Select every tag, peeled to the commit it points at. Alone, selects
+          only those tagged commits themselves, not their ancestry -- combine
+          with `--ancestors` (or `--depth`) to also walk backwards from each
+          tag. A tag that *validly* resolves to a non-commit object (e.g. a tag
+          pointing at a blob or tree) is silently skipped rather than erroring
+          -- use an explicit `--rev` if you need that case to fail loudly; but a
+          tag ref that *fails* to resolve at all makes resolution fail closed
+          with an error instead. Combinable with `--rev`/`--branches`; mutually
+          exclusive with `--all-history`
+
+      --all-history
+          Select every commit-bearing ref of any kind (branches, tags, and
+          anything else, e.g. notes/CI refs) as roots, and walk each one's full,
+          unbounded ancestry -- the only scope option that implicitly enables
+          ancestry; every other scope option stays `Tips` unless a traversal
+          flag is also given. A ref that *validly* resolves to a non-commit
+          object (e.g. one pointing at a blob or tree) is silently skipped
+          rather than erroring; but a ref that *fails* to resolve at all
+          (dangling, corrupt, unreadable) makes resolution fail closed with an
+          error instead. Combine with `--depth` to cap the walked depth per root
+          instead of walking unbounded ancestry. Mutually exclusive with
+          `--rev`/`--branches`/`--tags`: it is a distinct, broader root set, not
+          a shorthand for combining them
+
+      --ancestors
+          Walk each selected root's full, unbounded ancestry (closest ancestors
+          first, not commit-timestamp order) instead of selecting only the roots
+          themselves. With no scope selector given (`--rev`/
+          `--branches`/`--tags`/`--all-history`), the root defaults to `HEAD`
+          alone. Mutually exclusive with `--depth` (which already implies
+          walking ancestry, bounded)
+
+      --depth <DEPTH>
+          Limit ancestry traversal from each selected root to at most this many
+          *visited* commits (closest ancestors first, not commit-timestamp
+          order), then union/deduplicate across roots. This bounds how far the
+          walk goes, not how many commits end up in the result: combined with
+          `--since`/`--until`, a commit outside the time window still consumes
+          one unit of the depth budget, so `--depth 5 --since DATE` can return
+          fewer than 5 commits per root (even zero) without walking further than
+          5 ancestors -- it never means "keep walking until 5 commits match".
+          With no scope selector given
+          (`--rev`/`--branches`/`--tags`/`--all-history`), the root defaults to
+          `HEAD` alone -- `--depth 5` alone visits `HEAD` and its 4 closest
+          ancestors, not 5 commits from every branch/tag. `--branches --depth 5`
+          means up to 5 commits visited from *each* branch tip, not 5 total.
+          `--all-history --depth 5` keeps `--all-history`'s root set (every
+          commit-bearing ref) and only bounds that per-root walk to 5 commits
+          each. Mutually exclusive with `--ancestors`
+
+      --since <SINCE>
+          Only include commits committed at/after this date. Accepts
+          Git-style/ISO dates (e.g. `2024-01-01`, `2 weeks ago`). Implies
+          walking ancestry from the selected roots to find commits in the time
+          window, even without `--ancestors`/`--depth`; with no scope selector
+          given, the root defaults to `HEAD` alone
+
+      --until <UNTIL>
+          Only include commits committed at/before this date. Accepts
+          Git-style/ISO dates (e.g. `2024-01-01`, `2 weeks ago`). Implies
+          walking ancestry from the selected roots to find commits in the time
+          window, even without `--ancestors`/`--depth`; with no scope selector
+          given, the root defaults to `HEAD` alone
+
+      --first-parent
+          Follow only the first parent of each commit instead of every parent
+          (excludes commits only reachable via a merged-in branch). Only
+          meaningful while walking ancestry -- implies walking it, even without
+          `--ancestors`/`--depth`/`--since`/`--until`; with no scope selector
+          given, the root defaults to `HEAD` alone (not every ref)
+
+      --exclude-rev <EXCLUDE_REV>
+          Exclude this revision and its ancestors from the selection.
+          Repeatable. Only meaningful while walking ancestry -- implies walking
+          it, even without `--ancestors`/`--depth`/`--since`/ `--until`; with no
+          scope selector given, the root defaults to `HEAD` alone (not every
+          ref)
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+## Examples
+
+<Tabs sync={false}>
+<Tab title="No history">
+
+Retain the current working lock and peer protections without consulting this repository’s history.
+
+```sh
+gat gc --no-history --dry-run
+```
+
+</Tab>
+<Tab title="Remote">
+
+Inspect a named remote without deleting objects.
+
+```sh
+gat gc --remote backup --dry-run --repository ../other-project
+```
+
+</Tab>
+<Tab title="Branches">
+
+Build the keep set from all branch histories.
+
+```sh
+gat gc --branches --ancestors --dry-run
+```
+
+</Tab>
+</Tabs>

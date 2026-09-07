@@ -1,0 +1,27 @@
+[package]
+name = "gat-command"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+description = "Pure use-case orchestration for gat, built on gat-core and gat-engine."
+
+[lib]
+name = "gat_command"
+path = "src/lib.rs"
+
+[features]
+default = []
+test-support = ["gat-core/test-support", "gat-engine/test-support"]
+
+[dependencies]
+gat-core = { path = "../gat-core" }
+gat-engine = { path = "../gat-engine" }
+rayon = "1"
+thiserror = "2"
+
+[dev-dependencies]
+test-support-git = { path = "../test-support-git" }
+tempfile = "3"
+
+[lints]
+workspace = true

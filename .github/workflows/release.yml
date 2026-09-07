@@ -1,0 +1,304 @@
+name: Release
+
+# Releases are triggered by `git tag vX.Y.Z && git push origin vX.Y.Z`.
+# Leave the release-drafter draft unpublished: this workflow publishes it
+# only after validation and asset uploads succeed.
+# The tag is *not* published as a public GitHub Release until every
+# supported target has built, been packaged, checksummed, and passed the
+# `release_artifact_` acceptance subset (ADR 0020, ADR 0037) against the
+# exact packaged bytes. Only the final `publish` job is granted
+# `contents: write`; every other job is read-only.
+on:
+  push:
+    tags: ["v*.*.*"]
+  # Exercise packaging and acceptance on workflow changes without publishing.
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # Explicit, reproducible release toolchain. Kept in sync with
+  # `rust-version` in Cargo.toml so a release build never silently drifts
+  # onto a different compiler than a moving `stable` channel would give.
+  RELEASE_RUST_VERSION: "1.91.0"
+  TARGETS: "x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-msvc aarch64-pc-windows-msvc"
+
+jobs:
+  prepare:
+    name: prepare
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Validate tag matches package version
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkg_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag="v$pkg_version"
+          fi
+          version="${tag#v}"
+          if [ "$version" != "$pkg_version" ]; then
+            echo "::error::tag $tag (version $version) does not match Cargo.toml version $pkg_version"
+            exit 1
+          fi
+          msrv="$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)"
+          if [ "$RELEASE_RUST_VERSION" != "$msrv" ] && [ "$RELEASE_RUST_VERSION" != "$msrv.0" ]; then
+            echo "::error::release toolchain $RELEASE_RUST_VERSION does not match MSRV $msrv"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: prepare
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64 → x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          # Linux aarch64 → aarch64-unknown-linux-gnu (native arm64 runner, so
+          # the packaged binary can also be smoke-tested on real hardware)
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          # Darwin x86_64 → x86_64-apple-darwin (cross-built from the arm64
+          # runner; Rosetta 2 is preinstalled so the smoke test still runs)
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          # Darwin arm64 → aarch64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          # Windows AMD64 → x86_64-pc-windows-msvc
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          # Windows ARM64 → aarch64-pc-windows-msvc (native arm64 runner)
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: ${{ env.RELEASE_RUST_VERSION }}
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - run: cargo build --release --locked --target ${{ matrix.target }} --bin gat
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          staging="gat-${{ needs.prepare.outputs.tag }}-${{ matrix.target }}"
+          mkdir -p "$staging"
+          cp "target/${{ matrix.target }}/release/gat" "$staging/"
+          cp README.md LICENSE "$staging/"
+          tar czf "$staging.tar.gz" "$staging"
+          sha256sum "$staging.tar.gz" > "$staging.tar.gz.sha256"
+          echo "ASSET=$staging.tar.gz" >> "$GITHUB_ENV"
+          echo "STAGING=$staging" >> "$GITHUB_ENV"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $staging = "gat-${{ needs.prepare.outputs.tag }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $staging | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/gat.exe" $staging/
+          Copy-Item README.md, LICENSE $staging/
+          Compress-Archive -Path $staging -DestinationPath "$staging.zip"
+          $hash = (Get-FileHash "$staging.zip" -Algorithm SHA256).Hash.ToLower()
+          # GNU sha256sum needs LF records, including the final newline.
+          [System.IO.File]::WriteAllText("$staging.zip.sha256", "$hash  $staging.zip`n", [System.Text.Encoding]::ASCII)
+          echo "ASSET=$staging.zip" >> $env:GITHUB_ENV
+          echo "STAGING=$staging" >> $env:GITHUB_ENV
+
+      - name: Release-acceptance test packaged binary (Unix)
+        # Runs the `release_artifact_`-prefixed subset of
+        # `tests/cli_integration.rs` (ADR 0020, ADR 0037) against the exact
+        # executable extracted from this target's candidate archive, by
+        # pointing `GAT_TEST_BIN` at it -- not a hand-written duplicate of
+        # this behavior in Bash.
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          workdir="$(mktemp -d)"
+          tar xzf "$ASSET" -C "$workdir"
+          bin="$workdir/$STAGING/gat"
+          chmod +x "$bin"
+          GAT_TEST_BIN="$bin" cargo test --locked --test cli_integration release_artifact_
+
+      - name: Release-acceptance test packaged binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $workdir = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP "smoke") -Force
+          Expand-Archive -Path $env:ASSET -DestinationPath $workdir
+          $bin = Join-Path $workdir.FullName "$env:STAGING/gat.exe"
+          $env:GAT_TEST_BIN = $bin
+          cargo test --locked --test cli_integration release_artifact_
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  verify:
+    name: verify release artifacts
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Verify the complete target set built and packaged successfully
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ needs.prepare.outputs.tag }}"
+          missing=0
+          for target in $TARGETS; do
+            case "$target" in
+              *windows*) ext=zip ;;
+              *) ext=tar.gz ;;
+            esac
+            archive="dist/gat-$tag-$target.$ext"
+            checksum="$archive.sha256"
+            if [ ! -f "$archive" ] || [ ! -f "$checksum" ]; then
+              echo "::error::missing packaged artifact or checksum for target $target"
+              missing=1
+              continue
+            fi
+            (cd dist && sha256sum -c "$(basename "$checksum")")
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::release target matrix is incomplete; refusing to publish"
+            exit 1
+          fi
+
+      - name: Build combined checksums file
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat dist/*.sha256 > dist/SHA256SUMS
+          (cd dist && sha256sum --strict -c SHA256SUMS)
+
+      - name: Upload combined checksums
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-checksums
+          path: dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+  attest:
+    name: attest and verify provenance
+    # Fork PR tokens cannot write attestations. Never use pull_request_target
+    # to grant release permissions to builds of untrusted PR code.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: [prepare, verify]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          pattern: release-*
+          merge-multiple: true
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: "dist/*.tar.gz,dist/*.zip"
+
+      - name: Verify uploaded provenance for every archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for archive in dist/*.tar.gz dist/*.zip; do
+            gh attestation verify "$archive" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-digest "$GITHUB_SHA" \
+              --deny-self-hosted-runners
+          done
+
+  publish:
+    name: publish
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: [prepare, verify, attest]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Refuse to modify an already published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            --jq '.[] | select(.draft == false) | .tag_name' > published-tags
+          if grep -Fxq -- "$RELEASE_TAG" published-tags; then
+            echo "::error::release $RELEASE_TAG is already public; leave drafts unpublished until this workflow completes"
+            exit 1
+          fi
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          draft: false
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS

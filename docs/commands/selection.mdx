@@ -1,0 +1,378 @@
+---
+title: "gat selection"
+description: "Manage named path selections and the default selection."
+tag: "Experimental"
+---
+
+<Warning>
+`gat selection` is **Experimental**: its interface or behavior may change or be removed between releases. See [Feature lifecycle](/references/feature-lifecycle).
+</Warning>
+
+Save <Tooltip tip="A named root path plus optional include and exclude glob patterns. The definition describes a set of tracked paths; it does not store a copy of their bytes." cta="Matching rules and examples" href="/concepts/path-selection">reusable path filters</Tooltip> and choose an optional default. These commands change
+configuration only; they do not fetch files, sync the working tree, or change tracking.
+
+<Note>
+  Adding a selection does not activate it. Use `gat selection default NAME`
+  to choose a default, or `--selection NAME` for one operation. Without a
+  default, supported commands select the whole repository.
+</Note>
+
+Paths are relative to the repository root; include and exclude patterns are
+relative to that path. Exclusions win. Named and inline selectors cannot be
+combined, and mount source filters remain independent.
+
+<Accordion title="Defaults and configuration scopes">
+  Different names coexist across scopes. A higher-priority definition replaces
+  the complete entry of the same name. The default choice inherits separately,
+  so a local default can use a shared project definition.
+
+  Use `add --local` with a complete definition to override a project selection.
+  Updates and removals must target the defining scope. Removing an override can
+  reveal an inherited definition, but cannot leave the default dangling.
+
+  `gat selection default --local --unset` restores inheritance. To persist an
+  unrestricted choice, save a selection with `--path .` and no filters, then
+  choose it as the default.
+</Accordion>
+
+See [Path selection](/concepts/path-selection) for matching rules and examples,
+and [Config inheritance](/concepts/config-inheritance) for shared definitions and local overrides.
+
+## Usage
+
+```text
+Usage: gat selection <COMMAND>
+```
+
+<Accordion title="All options" id="gat-selection-options">
+
+```text
+Usage: gat selection <COMMAND>
+
+Commands:
+  list     List effective selections and mark the default
+  show     Show a selection, its filters, and defining scope
+  add      Save a complete selection without changing the default
+  update   Update a definition in its existing scope; omitted fields are
+           preserved
+  remove   Remove this scope's definition; a lower definition may become
+           effective
+  default  Show or set the default; unset restores inheritance from lower layers
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+## Subcommands
+
+<CardGroup cols={2}>
+  <Card title="gat selection list" href="#gat-selection-list" />
+  <Card title="gat selection show" href="#gat-selection-show" />
+  <Card title="gat selection add" href="#gat-selection-add" />
+  <Card title="gat selection update" href="#gat-selection-update" />
+  <Card title="gat selection remove" href="#gat-selection-remove" />
+  <Card title="gat selection default" href="#gat-selection-default" />
+</CardGroup>
+
+## gat selection add
+
+Save a complete definition. Adding a selection never chooses a default.
+
+### Usage
+
+```text
+Usage: gat selection add [OPTIONS] <NAME>
+```
+
+<Accordion title="All options" id="gat-selection-add-options">
+
+```text
+Usage: gat selection add [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>
+          Saved selection name
+
+Options:
+      --path <PATH>
+          Select this file or subtree. Any explicit --path, --include, or
+          --exclude replaces the complete configured selection. Use --path . for
+          the whole repository. For mount add, omission selects the source root;
+          repository selection defaults never apply to mounts
+
+      --include <INCLUDE>
+          Glob pattern (matched relative to `--path`) selecting which paths to
+          include. Repeatable. Component-aware: `*.bin` matches only immediate
+          children, while `**/*.bin` matches recursively. Empty means everything
+          under `--path`
+
+      --exclude <EXCLUDE>
+          Glob pattern (matched relative to `--path`) excluded from `--include`
+          (or from everything under `--path`, if `--include` is empty).
+          Repeatable. Component-aware like `--include`; exclude always wins over
+          include
+
+      --global
+          Write to the global config (`~/.gat/gat.yaml`), applying to every
+          repository for this user
+
+      --project
+          Write to the project config (`<repo_root>/gat.yaml`), committed to git
+          and shared with everyone who clones the repo. The default
+
+      --local
+          Write to the local config (`<repo_root>/.gat/gat.yaml`), repo-local
+          and never committed (`.gat/` isn't tracked)
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+### Examples
+
+Patterns are relative to models.
+
+```sh
+gat selection add runtime --path models --include '**/*.onnx' --exclude 'experimental/**'
+```
+
+## gat selection default
+
+Show or choose the optional default. --unset removes this scope's pointer and restores inheritance. It does not select everything when a lower layer has a default.
+
+### Usage
+
+```text
+Usage: gat selection default [OPTIONS] [NAME]
+```
+
+<Accordion title="All options" id="gat-selection-default-options">
+
+```text
+Usage: gat selection default [OPTIONS] [NAME]
+
+Arguments:
+  [NAME]
+          Existing selection to choose; omit to show the current choice
+
+Options:
+      --unset
+          Remove this scope's default pointer and restore inheritance
+
+      --global
+          Write to the global config (`~/.gat/gat.yaml`), applying to every
+          repository for this user
+
+      --project
+          Write to the project config (`<repo_root>/gat.yaml`), committed to git
+          and shared with everyone who clones the repo. The default
+
+      --local
+          Write to the local config (`<repo_root>/.gat/gat.yaml`), repo-local
+          and never committed (`.gat/` isn't tracked)
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+### Examples
+
+<Tabs sync={false}>
+<Tab title="Choose default">
+
+Uses the shared definition without copying its filters.
+
+```sh
+gat selection default runtime --local
+```
+
+</Tab>
+<Tab title="Unset">
+
+Removes only the local pointer.
+
+```sh
+gat selection default --local --unset
+```
+
+</Tab>
+</Tabs>
+
+## gat selection list
+
+List effective saved selections and mark the default.
+
+### Usage
+
+```text
+Usage: gat selection list
+```
+
+<Accordion title="All options" id="gat-selection-list-options">
+
+```text
+Usage: gat selection list
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+### Examples
+
+Lists available definitions without changing configuration.
+
+```sh
+gat selection list
+```
+
+## gat selection remove
+
+Remove a definition in the selected scope. A lower-priority definition may be revealed. Removal cannot leave the effective default dangling.
+
+### Usage
+
+```text
+Usage: gat selection remove [OPTIONS] <NAME>
+```
+
+<Accordion title="All options" id="gat-selection-remove-options">
+
+```text
+Usage: gat selection remove [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>
+          Saved selection name
+
+Options:
+      --global
+          Write to the global config (`~/.gat/gat.yaml`), applying to every
+          repository for this user
+
+      --project
+          Write to the project config (`<repo_root>/gat.yaml`), committed to git
+          and shared with everyone who clones the repo. The default
+
+      --local
+          Write to the local config (`<repo_root>/.gat/gat.yaml`), repo-local
+          and never committed (`.gat/` isn't tracked)
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+### Examples
+
+Reveals a project or global runtime definition when present.
+
+```sh
+gat selection remove runtime --local
+```
+
+## gat selection show
+
+Show the saved path, patterns, and defining scope.
+
+### Usage
+
+```text
+Usage: gat selection show <NAME>
+```
+
+<Accordion title="All options" id="gat-selection-show-options">
+
+```text
+Usage: gat selection show <NAME>
+
+Arguments:
+  <NAME>
+          Saved selection name
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+### Examples
+
+Reads the effective runtime definition.
+
+```sh
+gat selection show runtime
+```
+
+## gat selection update
+
+Update a definition in its existing scope. Omitted fields are preserved; supplied lists replace the saved lists.
+
+### Usage
+
+```text
+Usage: gat selection update [OPTIONS] <NAME>
+```
+
+<Accordion title="All options" id="gat-selection-update-options">
+
+```text
+Usage: gat selection update [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>
+          Saved selection name
+
+Options:
+      --path <PATH>
+          New literal repository-root-relative path
+
+      --include <INCLUDE>
+          Replace include patterns, relative to the saved path
+
+      --exclude <EXCLUDE>
+          Replace exclusions, relative to the saved path
+
+      --clear-include
+          Remove all saved include restrictions
+
+      --clear-exclude
+          Remove all saved exclusions
+
+      --global
+          Write to the global config (`~/.gat/gat.yaml`), applying to every
+          repository for this user
+
+      --project
+          Write to the project config (`<repo_root>/gat.yaml`), committed to git
+          and shared with everyone who clones the repo. The default
+
+      --local
+          Write to the local config (`<repo_root>/.gat/gat.yaml`), repo-local
+          and never committed (`.gat/` isn't tracked)
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+### Examples
+
+Keeps the saved path and includes.
+
+```sh
+gat selection update runtime --clear-exclude
+```

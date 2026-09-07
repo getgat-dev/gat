@@ -1,0 +1,77 @@
+name-template: "v$RESOLVED_VERSION"
+tag-template: "v$RESOLVED_VERSION"
+
+categories:
+  - title: "🚀 Features"
+    semver-increment: minor
+    when:
+      labels: ["feature", "enhancement"]
+  - title: "🐛 Bug Fixes"
+    when:
+      labels: ["fix", "bug"]
+  - title: "🧪 Experimental"
+    semver-increment: minor
+    when:
+      labels: ["experimental"]
+  - title: "⚠️ Deprecations"
+    when:
+      labels: ["deprecation"]
+  - title: "📚 Documentation"
+    when:
+      labels: ["docs", "documentation"]
+  - title: "🧰 Maintenance"
+    when:
+      labels: ["chore", "maintenance", "refactor"]
+  - title: "⬆️ Dependencies"
+    when:
+      labels: ["dependencies"]
+
+  - type: version-resolver
+    semver-increment: major
+    when:
+      label: "major"
+  - type: version-resolver
+    semver-increment: minor
+    when:
+      label: "minor"
+  - type: version-resolver
+    semver-increment: patch
+
+autolabeler:
+  - label: "feature"
+    title:
+      - "/^(:sparkles:|✨)/i"
+      - "/^feat(\\(.*\\))?!?:/i"
+  - label: "fix"
+    title:
+      - "/^(:bug:|🐛|:ambulance:|🚑)/i"
+      - "/^fix(\\(.*\\))?!?:/i"
+  - label: "docs"
+    title:
+      - "/^(:memo:|📝)/i"
+      - "/^docs(\\(.*\\))?!?:/i"
+  - label: "chore"
+    title:
+      - "/^(:wrench:|🔧|:recycle:|♻️|:construction_worker:|👷)/i"
+      - "/^(chore|refactor|style|test|ci)(\\(.*\\))?!?:/i"
+  - label: "dependencies"
+    title:
+      - "/^(:arrow_up:|⬆️|:arrow_down:|⬇️)/i"
+    files:
+      - "Cargo.lock"
+      - "Cargo.toml"
+  - label: "experimental"
+    title:
+      - "/^(:test_tube:|🧪)/i"
+      - "/\\bexperimental\\b/i"
+  - label: "deprecation"
+    title:
+      - "/^(:warning:|⚠️)/i"
+      - "/\\bdeprecat(e|ed|ion)\\b/i"
+
+change-template: "- $TITLE (#$NUMBER)"
+category-template: "## $TITLE"
+template: |
+  ## Changes
+
+  $CHANGES

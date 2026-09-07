@@ -1,0 +1,249 @@
+---
+title: "Improving performance"
+description: "Reduce ingest, sync, and lock-update costs while keeping the tradeoffs clear."
+---
+
+Measure the slow operation, change one setting, and compare results on the same
+workload. Keep the defaults unless a change helps. Start with the
+[cache and working-file model](/concepts/how-gat-works) if these operations are new to you.
+
+| Slow operation | Start here |
+| --- | --- |
+| Git status in a large asset tree | [Combine exclusions](#combine-file-exclusions) |
+| Small updates to a huge lock | [Shard the lock](#shard-a-very-large-gat-lock) |
+| Copying large cached files | [Use reflinks](#avoid-unnecessary-copying-during-materialization) |
+| Syncing files you do not need | [Limit the working set](#reconcile-less-of-a-huge-repository) |
+| Repeated downloads across clones | [Share a cache](#reuse-a-cache-across-repositories) |
+| Ingesting stable large files | [Try hybrid ingest](#choose-a-faster-ingest-strategy) |
+| Checking many unchanged files | [Trust recorded state](#use-the-trust-state-fast-path-for-sync) |
+
+## Combine file exclusions
+
+By default, Gat writes an exact `.git/info/exclude` rule for each tracked path
+that has no newline. For a directory used only for Gat assets, replace thousands
+of exact rules with a broad pattern:
+
+```sh
+gat config git.ignore_patterns '/data/' '/models/'
+```
+
+Gat omits redundant exact rules for paths covered by these patterns. Use one
+argument per pattern; commas do not separate list elements. Negated patterns
+such as `!keep.txt` are unsupported.
+
+<Warning>
+  These rules also hide files Gat does not track. Use them only for directories
+  that should stay entirely out of ordinary Git tracking.
+</Warning>
+
+<AccordionGroup>
+  <Accordion title="Keep temporary files out of Gat">
+    `.gatignore` filters files during `gat add`. For example:
+
+    ```text .gatignore
+    data/tmp/
+    **/*.partial
+    **/*.log
+    ```
+
+    `git.ignore_patterns` controls Git exclusions after tracking. `.gatignore`
+    controls which files Gat ingests.
+  </Accordion>
+  <Accordion title="Filenames containing newlines">
+    Git's ignore format cannot express an exact path containing LF. Gat records
+    an escaped comment instead. The file remains visible to Git unless a broader
+    pattern covers it. Review `git status` before staging.
+  </Accordion>
+</AccordionGroup>
+
+## Shard a very large `gat.lock`
+
+A flat lock is simplest for most repositories. If small `add`, `rm`, or `mv`
+operations spend substantial time rewriting it, start with one shard level:
+
+```sh
+gat config lock.shard_levels 1
+```
+
+Paths are distributed across up to 256 files such as `gat.lock/a4.tsv`.
+Routine sparse updates can then rewrite only affected shards.
+
+<Steps>
+  <Step title="Choose the layout">
+    Use `1` to start. `2` adds another level, such as `gat.lock/a4/7f.tsv`, at the
+    cost of more directories. `0` returns to a flat lock.
+  </Step>
+  <Step title="Convert and review">
+    The next lock-writing or reshaping command, such as `gat sync`, converts the
+    full lock once. Inspect the resulting metadata with Git.
+  </Step>
+  <Step title="Commit the shared setting and lock">
+    ```sh
+    git add gat.yaml gat.lock
+    git commit -m "Shard Gat lock"
+    ```
+
+    Keep the setting in project configuration. Conflicting local values can
+    repeatedly convert the layout.
+  </Step>
+</Steps>
+
+<Accordion title="What sharding does and does not speed up">
+  Sharding reduces lock rewrites. Explicit root-anchored directory exclusions
+  such as `/models/` also let Gat skip covered ranges while rebuilding Git
+  exclusions. Other patterns may still require checking individual paths.
+
+  Existing state databases pay a one-time indexing cost. Memory and output size
+  still grow with uncovered paths. Measure the full command, not just lock writes.
+</Accordion>
+
+## Avoid unnecessary copying during materialization
+
+Copy-on-write clones share disk blocks until a file changes; edits keep the
+cache intact. Try them with an independent-copy fallback:
+
+```sh
+gat config --local cache.materialization_strategy reflink copy
+```
+
+Strategies are attempted in order. A local setting suits machines with different
+filesystem capabilities.
+
+| Strategy | Behavior | Tradeoff |
+| --- | --- | --- |
+| `copy` (default) | Independent bytes | Copies the entire file |
+| `reflink` | <Tooltip tip="A separate file that initially shares disk blocks with its source. The filesystem copies blocks as they change, so editing the working file preserves the cached bytes.">Copy-on-write clone</Tooltip> | Requires filesystem support |
+| `hardlink` | Cache and working file share an <Tooltip tip="The filesystem record for one file’s data. Hardlinked paths refer to that same file, so writing through either path changes the shared bytes." cta="Cache and working-file identity" href="/concepts/how-gat-works#content-identity-is-independent-of-path">inode</Tooltip> | Same filesystem; writes can affect cached bytes |
+| `symlink` | Working path points to the cache object | Exposes the cache path; writes can affect cached bytes |
+
+<Warning>
+  Use hardlinks or symlinks only when you accept shared bytes between the cache
+  and working tree. Prefer `reflink copy` for files that tools may edit.
+</Warning>
+
+Changing the setting affects future materializations. To recreate already-correct
+files using the new strategy:
+
+```sh
+gat sync --rematerialize --dry-run
+gat sync --rematerialize
+```
+
+This revisits every selected clean file and can do much more I/O than ordinary sync.
+
+## Reconcile less of a huge repository
+
+For one operation:
+
+```sh
+gat sync --path models --exclude 'legacy/**'
+```
+
+For a saved working set, use the experimental selection command:
+
+```sh
+gat selection add working --local --include 'models/**' --include 'datasets/current/**'
+gat selection default working --local
+```
+
+The default applies to sync (including hooks), pull, fetch, push, status, diff,
+and ls-files. Explicit path filters replace it completely; `--path .` selects
+all repository paths. See [Path selection](/concepts/path-selection).
+
+<Warning>
+  Excluded files are not reconciled. They may remain absent or contain a version
+  from an earlier checkout until you sync them explicitly.
+</Warning>
+
+## Reuse a cache across repositories
+
+Choose a writable directory shared by the clones that reuse content:
+
+<CodeGroup>
+  ```sh macOS / Linux
+  gat config --local cache.location "$HOME/.cache/gat/objects"
+  ```
+
+  ```powershell Windows PowerShell
+  gat config --local cache.location "$HOME\gat-cache\objects"
+  ```
+</CodeGroup>
+
+`GAT_CACHE_DIR` overrides the configured location. Identical bytes share one
+cached object, avoiding repeated storage and downloads.
+
+<Warning>
+  Garbage collection does not discover other cache users. Supply every sharing
+  repository with `gat gc --repository LOCATION`, repeating the option as needed.
+  Only committed locks from additional repositories are protected; their
+  uncommitted changes are not. See [gat gc](/commands/gc).
+</Warning>
+
+## Choose a faster ingest strategy
+
+<Tooltip tip="The process gat add uses to hash a source file and publish its bytes into the object cache before recording the content ID in the lock." cta="Recording a file" href="/concepts/how-gat-works#follow-one-file-through-a-change">Ingest</Tooltip> happens when you add or update tracked content.
+
+<Tabs>
+  <Tab title="Safe (default)">
+    ```sh
+    gat config --local cache.ingest_strategy safe
+    ```
+
+    Gat copies the source, then hashes the completed copy. The content ID
+    describes the exact published bytes even if the source changes during ingest.
+  </Tab>
+  <Tab title="Hybrid (experimental)">
+    ```sh
+    gat config --local cache.ingest_strategy hybrid
+    ```
+
+    Copying and hashing run concurrently. Gat falls back to safe ingest when
+    source metadata changes, but this detection is a heuristic: a same-size
+    rewrite within the filesystem's timestamp resolution can escape detection.
+
+    Use only for completed artifacts whose producer has stopped writing, and
+    benchmark against `safe` on your storage.
+  </Tab>
+</Tabs>
+
+<Warning>
+  `safe` is the only strategy that unconditionally establishes the object ID
+  from the completed bytes being published. `mmap` is deprecated; do not adopt
+  it for new tuning. See [Feature lifecycle](/references/feature-lifecycle).
+</Warning>
+
+## Use the trust-state fast path for sync
+
+Normal sync checks file metadata and hashes content only when needed. If even
+those checks are expensive, you can trust recorded state for one run:
+
+```sh
+gat sync --trust-state
+```
+
+Or save the choice locally:
+
+```sh
+gat config --local sync.trust_state true
+```
+
+<Warning>
+  When desired and recorded materialized state agree, this mode skips file
+  inspection. It can miss external edits or deletions. Use it only when that
+  tradeoff is acceptable, such as <Tooltip tip="Directories treated as read-only after creation, with tools prevented from editing or deleting their files. This is an operating assumption, not a protection enabled by trust-state." cta="Understand validation" href="/concepts/automatic-sync#working-tree-validation">immutable artifact workspaces</Tooltip>.
+</Warning>
+
+To restore validation even if a lower layer enables trust-state:
+
+```sh
+gat config --local sync.trust_state false
+```
+
+<CardGroup cols={2}>
+  <Card title="Configuration reference" icon="sliders" href="/references/configuration">
+    Defaults, constraints, and accepted values.
+  </Card>
+  <Card title="Sync reference" icon="arrows-rotate" href="/commands/sync">
+    Preview, fetch, repair, and rematerialize files.
+  </Card>
+</CardGroup>

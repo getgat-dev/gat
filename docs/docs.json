@@ -1,0 +1,130 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "colors": {
+    "dark": "#115E59",
+    "light": "#CCFBF1",
+    "primary": "#0F766E"
+  },
+  "description": "Simple, fast, versioned large-file storage for git.",
+  "favicon": {
+    "dark": "/images/favicon-white.png",
+    "light": "/images/favicon-original.png"
+  },
+  "integrations": {
+    "gtm": {
+      "tagId": "GTM-NV5TV492"
+    }
+  },
+  "logo": {
+    "dark": "/images/logo-white.png",
+    "light": "/images/logo-original.png"
+  },
+  "name": "gat",
+  "navbar": {
+    "links": [
+      {
+        "href": "https://github.com/getgat-dev/gat",
+        "label": "GitHub"
+      }
+    ]
+  },
+  "navigation": {
+    "groups": [
+      {
+        "group": "Getting Started",
+        "pages": [
+          "installation",
+          "quickstart",
+          "set-up-a-remote"
+        ]
+      },
+      {
+        "group": "Concepts",
+        "icon": "file-text",
+        "pages": [
+          "concepts/how-gat-works",
+          "concepts/automatic-sync",
+          "concepts/path-selection",
+          "concepts/history-selection",
+          "concepts/config-inheritance"
+        ]
+      },
+      {
+        "group": "Guides",
+        "icon": "graduation-cap",
+        "pages": [
+          "guides/improving-performance",
+          "guides/branching-and-merging",
+          "guides/using-multiple-remotes",
+          "guides/consuming-gat-assets",
+          "guides/migrating-from-git-lfs",
+          "guides/migrating-from-dvc"
+        ]
+      },
+      {
+        "group": "References",
+        "icon": "book-open",
+        "pages": [
+          "references/configuration",
+          "references/remote-providers",
+          "references/feature-lifecycle"
+        ]
+      },
+      {
+        "group": "Commands",
+        "icon": "square-terminal",
+        "pages": [
+          "commands/add",
+          "commands/config",
+          "commands/diff",
+          "commands/fetch",
+          "commands/gc",
+          "commands/init",
+          "commands/ls-files",
+          "commands/mount",
+          "commands/mv",
+          "commands/pull",
+          "commands/push",
+          "commands/remote",
+          "commands/rm",
+          "commands/route",
+          "commands/selection",
+          "commands/status",
+          "commands/sync",
+          "commands/system"
+        ]
+      }
+    ]
+  },
+  "redirects": [
+    {
+      "destination": "https://raw.githubusercontent.com/getgat-dev/gat/main/docs/install.sh",
+      "source": "/install.sh"
+    },
+    {
+      "destination": "https://raw.githubusercontent.com/getgat-dev/gat/main/docs/install.ps1",
+      "source": "/install.ps1"
+    }
+  ],
+  "seo": {
+    "indexing": "navigable",
+    "metatags": {
+      "og:site_name": "Gat"
+    },
+    "organization": {
+      "id": "https://getgat.dev/#organization",
+      "logo": "https://getgat.dev/images/logo-original.png",
+      "name": "Gat",
+      "sameAs": [
+        "https://github.com/getgat-dev/gat"
+      ],
+      "url": "https://getgat.dev"
+    }
+  },
+  "theme": "linden",
+  "variables": {
+    "colors.dark": "#115E59",
+    "colors.light": "#CCFBF1",
+    "colors.primary": "#0F766E"
+  }
+}

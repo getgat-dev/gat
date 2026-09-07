@@ -1,0 +1,108 @@
+---
+title: "gat ls-files"
+description: "List files with optional path and glob filters."
+---
+
+List paths from the current `gat.lock`, including files missing from disk.
+Filters match tracked paths without walking the filesystem. Use
+[Path selection](/concepts/path-selection#preview-your-selection) to preview a working set,
+or [gat status](/commands/status) to compare the working lock with the staged lock.
+
+<Note>
+Output includes headings, counts, and hints. It is not a plain path stream for scripts.
+</Note>
+
+Without path flags, use the default named selection, or all paths if none is set.
+Explicit filters replace that selection; `--path .` selects the whole repository.
+
+<Accordion title="Path selection rules">
+  | Selector | Selection used |
+  | --- | --- |
+  | `--selection NAME` | One saved definition, without changing the default. |
+  | `--path`, `--include`, or `--exclude` | <Tooltip tip="Path, include, and exclude flags supplied directly to this command. These replace the saved selection as a whole, so repeat any exclusions you still need." cta="Selection precedence" href="/concepts/path-selection">A complete inline selection</Tooltip>. |
+
+  Named and inline selectors cannot be combined. Paths are relative to the
+  repository root; patterns are relative to the selected path.
+  See [Path selection](/concepts/path-selection) and [gat selection](/commands/selection).
+</Accordion>
+
+## Usage
+
+```text
+Usage: gat ls-files [OPTIONS]
+```
+
+<Accordion title="All options" id="gat-ls-files-options">
+
+```text
+Usage: gat ls-files [OPTIONS]
+
+Options:
+      --selection <NAME>
+          Use this saved selection for this operation without changing the
+          default
+
+      --path <PATH>
+          Select this file or subtree. Any explicit --path, --include, or
+          --exclude replaces the complete configured selection. Use --path . for
+          the whole repository. For mount add, omission selects the source root;
+          repository selection defaults never apply to mounts
+
+      --include <INCLUDE>
+          Glob pattern (matched relative to `--path`) selecting which paths to
+          include. Repeatable. Component-aware: `*.bin` matches only immediate
+          children, while `**/*.bin` matches recursively. Empty means everything
+          under `--path`
+
+      --exclude <EXCLUDE>
+          Glob pattern (matched relative to `--path`) excluded from `--include`
+          (or from everything under `--path`, if `--include` is empty).
+          Repeatable. Component-aware like `--include`; exclude always wins over
+          include
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+## Examples
+
+<Tabs sync={false}>
+<Tab title="Default selection">
+
+List paths in the current selection.
+
+```sh
+gat ls-files
+```
+
+</Tab>
+<Tab title="Directory">
+
+List one tracked subtree.
+
+```sh
+gat ls-files --path data/
+```
+
+</Tab>
+<Tab title="Glob pattern">
+
+List matching tracked paths.
+
+```sh
+gat ls-files --include '**/*.onnx'
+```
+
+</Tab>
+<Tab title="All paths">
+
+Replace the complete configured selection with an explicit repository-root selection.
+
+```sh
+gat ls-files --path .
+```
+
+</Tab>
+</Tabs>

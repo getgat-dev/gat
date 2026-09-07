@@ -1,0 +1,356 @@
+---
+title: "gat remote"
+description: "Configure remote storage including local file remotes."
+---
+
+Manage named storage locations for large-file objects. Reads show the <Tooltip tip="The result of combining global, project, and local settings. A remote can be inherited even when it is absent from the file you are editing." cta="Understand configuration layers" href="/concepts/config-inheritance">effective configuration</Tooltip>; changes use project scope unless you pass `--global` or `--local`.
+
+<Note>
+  Adding a remote does not choose a default. Run `gat remote default NAME`, or
+  use `--remote NAME` for one transfer. Gat remotes are separate from Git remotes.
+</Note>
+
+Updates and removals must target the defining scope. To override a project
+remote on one machine, add the same name with `--local`.
+
+<Accordion title="URL templates and storage options">
+  Gat supports `file://`, `s3://`, `azblob://`, `gcs://`, and `oss://` when
+  enabled in the build. Use single-quoted `${VAR}` references for URL secrets.
+  Read-only commands redact sensitive values without expanding templates or
+  contacting storage. Redaction does not remove secrets from the saved file.
+
+  File remotes accept only the optional `root` query setting. Uploads publish
+  by atomic rename and may replace an existing object at the same key.
+
+  See [Remote providers](/references/remote-providers) for authentication and
+  [Set up a remote](/set-up-a-remote) for a complete workflow.
+</Accordion>
+
+## Usage
+
+```text
+Usage: gat remote <COMMAND>
+```
+
+<Accordion title="All options" id="gat-remote-options">
+
+```text
+Usage: gat remote <COMMAND>
+
+Commands:
+  default  Show or choose the default remote. Adding a remote never chooses it
+  list     List all configured remotes
+  add      Add a named remote
+  update   Update an existing remote, preserving its stable name. Omitted flags
+           keep their current values
+  remove   Remove a named remote
+  show     Show a remote's redacted URL, default status, and defining scope.
+           Reads the effective configuration merged across every scope. Whole
+           `${VAR}` query references and sanitized Azure endpoints remain
+           visible. Userinfo, literal query secrets, and fragments are hidden.
+           Display never reads environment variables or opens a backend
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+## Subcommands
+
+<CardGroup cols={2}>
+  <Card title="gat remote default" href="#gat-remote-default" />
+  <Card title="gat remote list" href="#gat-remote-list" />
+  <Card title="gat remote add" href="#gat-remote-add" />
+  <Card title="gat remote update" href="#gat-remote-update" />
+  <Card title="gat remote remove" href="#gat-remote-remove" />
+  <Card title="gat remote show" href="#gat-remote-show" />
+</CardGroup>
+
+## gat remote add
+
+Add a storage URL in the selected scope. Configure provider credentials before transferring objects.
+
+### Usage
+
+```text
+Usage: gat remote add [OPTIONS] <NAME> <URL>
+```
+
+<Accordion title="All options" id="gat-remote-add-options">
+
+```text
+Usage: gat remote add [OPTIONS] <NAME> <URL>
+
+Arguments:
+  <NAME>
+          Name to add the remote under (`default` is reserved)
+
+  <URL>
+          Remote URL (`file://`, `s3://`, `azblob://`, `gcs://`, or `oss://`,
+          subject to enabled build features); may contain `${VAR}` references,
+          expanded from the environment every time gat runs (quote the argument
+          so your shell doesn't expand it first), instead of writing a
+          secret-bearing URL (e.g. one with a SAS token or embedded credentials)
+          into `gat.yaml`
+
+Options:
+      --global
+          Write to the global config (`~/.gat/gat.yaml`), applying to every
+          repository for this user
+
+      --project
+          Write to the project config (`<repo_root>/gat.yaml`), committed to git
+          and shared with everyone who clones the repo. The default
+
+      --local
+          Write to the local config (`<repo_root>/.gat/gat.yaml`), repo-local
+          and never committed (`.gat/` isn't tracked)
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+### Examples
+
+<Tabs sync={false}>
+<Tab title="S3">
+
+Configure S3-compatible object storage.
+
+```sh
+gat remote add origin 's3://my-bucket/gat?region=eu-west-1'
+```
+
+</Tab>
+<Tab title="Azure Blob">
+
+Configure Azure Blob Storage.
+
+```sh
+gat remote add azure 'azblob://my-container/gat?endpoint=https://myaccount.blob.core.windows.net'
+```
+
+</Tab>
+<Tab title="Local directory">
+
+Configure storage on a local or mounted filesystem.
+
+```sh
+gat remote add local file:///mnt/gat-storage
+```
+
+</Tab>
+</Tabs>
+
+## gat remote default
+
+Show or choose the optional default remote. Adding a remote never chooses a default. --unset restores inheritance from lower layers.
+
+### Usage
+
+```text
+Usage: gat remote default [OPTIONS] [NAME]
+```
+
+<Accordion title="All options" id="gat-remote-default-options">
+
+```text
+Usage: gat remote default [OPTIONS] [NAME]
+
+Arguments:
+  [NAME]
+          Existing remote to choose; omit to show the current default
+
+Options:
+      --unset
+          Remove this scope's choice and inherit from lower layers
+
+      --global
+          Write to the global config (`~/.gat/gat.yaml`), applying to every
+          repository for this user
+
+      --project
+          Write to the project config (`<repo_root>/gat.yaml`), committed to git
+          and shared with everyone who clones the repo. The default
+
+      --local
+          Write to the local config (`<repo_root>/.gat/gat.yaml`), repo-local
+          and never committed (`.gat/` isn't tracked)
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+### Examples
+
+Selects a previously configured remote.
+
+```sh
+gat remote default origin
+```
+
+## gat remote list
+
+List remotes, their defining scopes, and the effective default.
+
+### Usage
+
+```text
+Usage: gat remote list
+```
+
+<Accordion title="All options" id="gat-remote-list-options">
+
+```text
+Usage: gat remote list
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+### Examples
+
+Show configured remotes after applying scope overrides.
+
+```sh
+gat remote list
+```
+
+## gat remote remove
+
+Remove a remote definition. Change or unset references to it first.
+
+### Usage
+
+```text
+Usage: gat remote remove [OPTIONS] <NAME>
+```
+
+<Accordion title="All options" id="gat-remote-remove-options">
+
+```text
+Usage: gat remote remove [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>
+          Name of the remote to remove
+
+Options:
+      --global
+          Write to the global config (`~/.gat/gat.yaml`), applying to every
+          repository for this user
+
+      --project
+          Write to the project config (`<repo_root>/gat.yaml`), committed to git
+          and shared with everyone who clones the repo. The default
+
+      --local
+          Write to the local config (`<repo_root>/.gat/gat.yaml`), repo-local
+          and never committed (`.gat/` isn't tracked)
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+### Examples
+
+Delete the named remote. `gat remote rm archive` is also accepted.
+
+```sh
+gat remote remove archive
+```
+
+## gat remote show
+
+Show the redacted URL, default status, and defining scope without contacting storage.
+
+### Usage
+
+```text
+Usage: gat remote show <NAME>
+```
+
+<Accordion title="All options" id="gat-remote-show-options">
+
+```text
+Usage: gat remote show <NAME>
+
+Arguments:
+  <NAME>
+          Name of the remote to inspect
+
+Options:
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+### Examples
+
+Show the redacted URL, default status, and defining scope.
+
+```sh
+gat remote show origin
+```
+
+## gat remote update
+
+Change a saved URL in its defining scope. Omit `--url` to preserve it.
+
+### Usage
+
+```text
+Usage: gat remote update [OPTIONS] <NAME>
+```
+
+<Accordion title="All options" id="gat-remote-update-options">
+
+```text
+Usage: gat remote update [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>
+          Name of the remote to update
+
+Options:
+      --url <URL>
+          New URL template; may contain `${VAR}` references (see `add`)
+
+      --global
+          Write to the global config (`~/.gat/gat.yaml`), applying to every
+          repository for this user
+
+      --project
+          Write to the project config (`<repo_root>/gat.yaml`), committed to git
+          and shared with everyone who clones the repo. The default
+
+      --local
+          Write to the local config (`<repo_root>/.gat/gat.yaml`), repo-local
+          and never committed (`.gat/` isn't tracked)
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+</Accordion>
+
+### Examples
+
+Update one named endpoint.
+
+```sh
+gat remote update origin --url 's3://new-bucket/gat?region=eu-west-1'
+```
