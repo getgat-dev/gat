@@ -407,12 +407,7 @@ mod tests {
         assert_eq!(notice.kind, NoticeKind::Deprecated);
         assert_eq!(notice.replacement, None);
         let reason = lifecycle_reason(notice.kind, notice.replacement, notice.note);
-        assert!(!reason.contains("Use `"), "{reason}");
-        assert!(
-            reason.contains("remains available for compatibility"),
-            "{reason}"
-        );
-        assert!(reason.contains("`safe` is the stable default"), "{reason}");
+        assert_eq!(reason, "`safe` is the stable default.");
     }
 
     #[test]

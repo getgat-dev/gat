@@ -34,6 +34,8 @@ pub mod runtime_bootstrap;
 #[cfg(test)]
 mod snapshot;
 mod sync;
+#[cfg(test)]
+mod ui_layout_tests;
 mod worktree_path;
 
 // Classify the typed OS category only; raw messages and source chains are private.

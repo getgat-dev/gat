@@ -15,18 +15,32 @@ impl From<gat_core::config::ConfigError> for Failure {
             ),
             DomainError::InvalidRoutePath { name, path, .. } => Self::infrastructure(
                 Diagnostic::new(ErrorCode::InvalidPath, "This route has an invalid path")
-                    .with_subject(UserLine::identifier(&format!("{name} ({path})"))),
+                    .with_subject(UserLine::compose([
+                        UserLine::identifier(name),
+                        UserLine::authored(" ("),
+                        UserLine::identifier(path),
+                        UserLine::authored(")"),
+                    ])),
                 err,
             ),
             DomainError::InvalidMountSourcePath { name, path, .. } => Self::infrastructure(
                 Diagnostic::new(ErrorCode::InvalidPath, "This mount has an invalid path")
-                    .with_subject(UserLine::identifier(&format!("{name} ({path})"))),
+                    .with_subject(UserLine::compose([
+                        UserLine::identifier(name),
+                        UserLine::authored(" ("),
+                        UserLine::identifier(path),
+                        UserLine::authored(")"),
+                    ])),
                 err,
             ),
             DomainError::ReservedRouteName => Self::expected(
                 Diagnostic::new(
                     ErrorCode::InvalidConfig,
-                    "Route name `*` is reserved for `gat route list`'s synthetic row",
+                    UserLine::compose([
+                        UserLine::authored("Route name `*` is reserved for "),
+                        UserLine::authored("`gat route list`").unbroken(),
+                        UserLine::authored("'s synthetic row"),
+                    ]),
                 )
                 .with_hint("Rename or remove this route from gat.yaml."),
             ),
@@ -77,12 +91,14 @@ impl From<gat_core::config::ConfigError> for Failure {
                         ]),
                     )
                     .with_subject(UserLine::identifier(subject))
-                    .with_hint(
-                        "Run `gat mount list` to inspect every configured mount across all scopes.",
-                    ),
+                    .with_hint(UserLine::compose([
+                        UserLine::authored("Run "),
+                        UserLine::authored("`gat mount list`").unbroken(),
+                        UserLine::authored(" to inspect every configured mount across all scopes."),
+                    ])),
                 )
             }
-            DomainError::InvalidLinkMode { value, valid } => Self::expected(
+            DomainError::InvalidLinkMode { value } => Self::expected(
                 Diagnostic::new(
                     ErrorCode::InvalidArgumentValue,
                     "Unknown materialization mode",
@@ -90,7 +106,12 @@ impl From<gat_core::config::ConfigError> for Failure {
                 .with_subject(UserLine::identifier(value))
                 .with_hint(UserLine::compose([
                     UserLine::authored("Valid modes are: "),
-                    UserLine::identifier(valid),
+                    UserLine::join(
+                        gat_core::config::MaterializationMode::ALL
+                            .into_iter()
+                            .map(|mode| UserLine::identifier(mode.as_str())),
+                        ", ",
+                    ),
                     UserLine::authored("."),
                 ])),
             ),
@@ -105,12 +126,17 @@ impl From<gat_core::config::ConfigError> for Failure {
                 ErrorCode::InvalidArgumentValue,
                 "cache.materialization_strategy must list at least one mode",
             )),
-            DomainError::InvalidIngestStrategy { value, valid } => Self::expected(
+            DomainError::InvalidIngestStrategy { value } => Self::expected(
                 Diagnostic::new(ErrorCode::InvalidArgumentValue, "Unknown ingest strategy")
                     .with_subject(UserLine::identifier(value))
                     .with_hint(UserLine::compose([
                         UserLine::authored("Valid strategies are: "),
-                        UserLine::identifier(valid),
+                        UserLine::join(
+                            gat_core::config::IngestStrategy::ALL
+                                .into_iter()
+                                .map(|strategy| UserLine::identifier(strategy.as_str())),
+                            ", ",
+                        ),
                         UserLine::authored("."),
                     ])),
             ),
@@ -163,7 +189,12 @@ impl From<gat_core::config::ConfigError> for Failure {
                             UserLine::authored(" pattern"),
                         ]),
                     )
-                    .with_subject(UserLine::identifier(&format!("{name} ({pattern})"))),
+                    .with_subject(UserLine::compose([
+                        UserLine::identifier(name),
+                        UserLine::authored(" ("),
+                        UserLine::identifier(pattern),
+                        UserLine::authored(")"),
+                    ])),
                     err,
                 )
             }
@@ -178,9 +209,14 @@ impl From<gat_core::config::ConfigError> for Failure {
                 )
                 .with_subject(UserLine::identifier(name))
                 .with_hint(UserLine::compose([
-                    UserLine::authored("Run `gat remote add "),
-                    UserLine::identifier(name),
-                    UserLine::authored(" <url>` to configure it."),
+                    UserLine::authored("Run `"),
+                    UserLine::compose([
+                        UserLine::authored("gat remote add "),
+                        UserLine::identifier(name),
+                        UserLine::authored(" <url>"),
+                    ])
+                    .unbroken(),
+                    UserLine::authored("` to configure it."),
                 ])),
             ),
             DomainError::InvalidBooleanValue { field, value } => Self::expected(

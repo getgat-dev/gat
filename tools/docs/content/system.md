@@ -14,3 +14,15 @@ Upload or back up needed objects before using `--purge-objects`.
 For missing working files or damaged cached content, start with
 [missing and corrupted objects](/concepts/automatic-sync#missing-and-corrupted-objects).
 To remove unneeded stored content using history-based protection, see {{command:gc}}.
+
+If lock repair cannot resolve invalid lock or transaction state, the report retains
+the inspection findings and any validated recovery choices. `repair all` stops at
+that lock report before repairing other domains.
+
+Recovering one transaction can leave other transaction problems unresolved. The
+report shows both the completed recovery and remaining findings; `repair all`
+continues only once blocking lock state is resolved.
+
+If several transactions support a recovery choice, specify `--transaction` using
+one of the recovery commands shown in the report. This is distinct from a request
+that matches no eligible transaction.

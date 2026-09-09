@@ -86,8 +86,8 @@ pub enum ConfigError {
 
     /// `cache.materialization_strategy`/a link-mode CLI value names a mode
     /// gat does not know.
-    #[error("unknown materialization mode `{value}` (expected one of: {valid})")]
-    InvalidLinkMode { value: String, valid: String },
+    #[error("unknown materialization mode `{value}`")]
+    InvalidLinkMode { value: String },
 
     /// `cache.materialization_strategy` lists the same mode more than
     /// once.
@@ -100,8 +100,8 @@ pub enum ConfigError {
 
     /// `cache.ingest_strategy`'s value names a strategy gat does not
     /// know.
-    #[error("unknown ingest strategy `{value}` (expected one of: {valid})")]
-    InvalidIngestStrategy { value: String, valid: String },
+    #[error("unknown ingest strategy `{value}`")]
+    InvalidIngestStrategy { value: String },
 
     /// `lock.shard_levels`'s value is not a valid number.
     #[error("invalid lock.shard_levels value `{value}` (expected a number)")]
@@ -406,19 +406,6 @@ impl MaterializationMode {
             Self::Copy => "copy",
         }
     }
-
-    /// A canonical, human-readable, comma-separated list of every valid
-    /// mode name (e.g. `"reflink, hardlink, symlink, copy"`) -- the single
-    /// place user-facing errors get this list from, instead of ad hoc
-    /// `{:?}`-formatting a `Vec`/array (which renders as a Rust debug
-    /// list, not prose).
-    pub fn valid_values() -> String {
-        Self::ALL
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
 }
 
 impl std::fmt::Display for MaterializationMode {
@@ -438,7 +425,6 @@ impl std::str::FromStr for MaterializationMode {
             "copy" => Ok(Self::Copy),
             other => Err(ConfigError::InvalidLinkMode {
                 value: other.to_string(),
-                valid: Self::valid_values(),
             }),
         }
     }
@@ -577,7 +563,15 @@ pub enum IngestStrategy {
 
 /// Valid `cache.ingest_strategy` values, in the order `gat config` should
 /// list them.
-pub const INGEST_STRATEGIES: &[&str] = &["safe", "hybrid", "mmap"];
+pub const INGEST_STRATEGIES: &[&str] = &{
+    let mut names = [""; IngestStrategy::ALL.len()];
+    let mut index = 0;
+    while index < names.len() {
+        names[index] = IngestStrategy::ALL[index].as_str();
+        index += 1;
+    }
+    names
+};
 
 /// `cache.ingest_strategy`'s default when unset. For a
 /// content-addressed cache, correctness by construction takes priority
@@ -593,8 +587,7 @@ pub const INGEST_STRATEGIES: &[&str] = &["safe", "hybrid", "mmap"];
 pub const DEFAULT_INGEST_STRATEGY: IngestStrategy = IngestStrategy::Safe;
 
 impl IngestStrategy {
-    /// Every variant, for tests that must exercise all three.
-    #[cfg(any(test, feature = "test-support"))]
+    /// Every variant, in the order configuration and documentation list them.
     pub const ALL: [Self; 3] = [Self::Safe, Self::Hybrid, Self::Mmap];
 
     /// Static lowercase spelling, matching [`Display`](std::fmt::Display)
@@ -621,15 +614,12 @@ impl std::str::FromStr for IngestStrategy {
     type Err = ConfigError;
 
     fn from_str(s: &str) -> std::result::Result<Self, ConfigError> {
-        match s {
-            "safe" => Ok(Self::Safe),
-            "hybrid" => Ok(Self::Hybrid),
-            "mmap" => Ok(Self::Mmap),
-            other => Err(ConfigError::InvalidIngestStrategy {
-                value: other.to_string(),
-                valid: INGEST_STRATEGIES.join(", "),
-            }),
-        }
+        Self::ALL
+            .into_iter()
+            .find(|strategy| strategy.as_str() == s)
+            .ok_or_else(|| ConfigError::InvalidIngestStrategy {
+                value: s.to_owned(),
+            })
     }
 }
 
@@ -1402,15 +1392,12 @@ mod tests {
     }
 
     #[test]
-    fn materialization_mode_from_str_reports_invalid_link_mode_with_a_joined_valid_list() {
+    fn materialization_mode_from_str_reports_invalid_link_mode_with_the_invalid_value() {
         let err = "bogus".parse::<MaterializationMode>().unwrap_err();
-        let ConfigError::InvalidLinkMode { value, valid } = err else {
+        let ConfigError::InvalidLinkMode { value } = err else {
             panic!("expected ConfigError::InvalidLinkMode");
         };
         assert_eq!(value, "bogus");
-        assert_eq!(valid, "reflink, hardlink, symlink, copy");
-        assert!(!valid.contains('['));
-        assert!(!valid.contains('"'));
     }
 
     #[test]
@@ -1426,13 +1413,25 @@ mod tests {
     }
 
     #[test]
-    fn ingest_strategy_from_str_reports_invalid_ingest_strategy_with_a_joined_valid_list() {
+    fn ingest_strategy_names_agree_with_parsing_and_persisted_values() {
+        for strategy in IngestStrategy::ALL {
+            let name = strategy.as_str();
+            assert_eq!(name.parse::<IngestStrategy>().unwrap(), strategy);
+            assert_eq!(
+                yaml_serde::from_str::<IngestStrategy>(name).unwrap(),
+                strategy
+            );
+            assert_eq!(yaml_serde::to_string(&strategy).unwrap().trim(), name);
+        }
+    }
+
+    #[test]
+    fn ingest_strategy_from_str_reports_invalid_ingest_strategy_with_the_invalid_value() {
         let err = "bogus".parse::<IngestStrategy>().unwrap_err();
-        let ConfigError::InvalidIngestStrategy { value, valid } = err else {
+        let ConfigError::InvalidIngestStrategy { value } = err else {
             panic!("expected ConfigError::InvalidIngestStrategy");
         };
         assert_eq!(value, "bogus");
-        assert_eq!(valid, "safe, hybrid, mmap");
     }
 
     #[test]

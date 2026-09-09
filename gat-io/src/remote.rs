@@ -113,9 +113,11 @@ impl ObservedSemaphore {
 }
 
 struct ObservedPermit {
-    _permit: OwnedSemaphorePermit,
+    // Fields drop in declaration order. Decrement the observer before releasing
+    // capacity, which can immediately wake and count another request.
     #[cfg(test)]
-    _occupancy: Option<Arc<RequestOccupancyGuard>>,
+    _occupancy: Option<RequestOccupancyGuard>,
+    _permit: OwnedSemaphorePermit,
 }
 
 impl opendal::layers::ConcurrentLimitSemaphore for ObservedSemaphore {
@@ -126,9 +128,9 @@ impl opendal::layers::ConcurrentLimitSemaphore for ObservedSemaphore {
         #[cfg(test)]
         let occupancy = self.occupancy.as_ref().map(|occupancy| {
             occupancy.acquire();
-            Arc::new(RequestOccupancyGuard {
+            RequestOccupancyGuard {
                 occupancy: Arc::clone(occupancy),
-            })
+            }
         });
         ObservedPermit {
             _permit: permit,
@@ -857,6 +859,42 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let url = file_url(tmp.path());
         assert!(build_remote(&url).is_ok());
+    }
+
+    #[test]
+    fn request_occupancy_is_released_before_waking_the_next_waiter() {
+        use std::future::Future;
+        use std::sync::atomic::Ordering;
+        use std::task::{Context, Wake, Waker};
+
+        struct CheckReleased(Arc<RequestOccupancy>);
+        impl Wake for CheckReleased {
+            fn wake(self: Arc<Self>) {
+                assert_eq!(self.0.active.load(Ordering::Acquire), 0);
+            }
+        }
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (budget, occupancy) = RemoteRequestBudget::with_test_observer(
+                NonZeroUsize::new(1).unwrap(),
+                NonZeroUsize::new(1).unwrap(),
+            );
+            let first = budget.http_semaphore.acquire().await;
+            let mut next = std::pin::pin!(budget.http_semaphore.acquire());
+            let waker = Waker::from(Arc::new(CheckReleased(Arc::clone(&occupancy))));
+            assert!(
+                next.as_mut()
+                    .poll(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+            drop(first);
+            let second = next.await;
+            assert_eq!(occupancy.active.load(Ordering::Acquire), 1);
+            assert_eq!(occupancy.peak.load(Ordering::Acquire), 1);
+            drop(second);
+            assert_eq!(occupancy.active.load(Ordering::Acquire), 0);
+        });
     }
 
     #[test]

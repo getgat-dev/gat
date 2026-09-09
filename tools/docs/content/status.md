@@ -11,3 +11,7 @@ With `--remote`, check whether required objects exist. A bare
 {{arg:status:remote}} follows path routing; a named value forces one remote.
 See [remote routing](/guides/using-multiple-remotes#remote-selection-at-a-glance)
 for storage precedence. [History flags](/concepts/history-selection) apply only to remote checks. Mount-owned entries show their mount name.
+
+Missing cache objects use the short `uncached` annotation, with recovery guidance
+below the rows. [Human output limits](/references/cli-output) apply to these
+lists; use `gat status --full-output` (or `gat status -o`) to inspect every row and complete metadata.

@@ -5,7 +5,7 @@ tag: "Experimental"
 ---
 
 <Warning>
-`gat mount` is **Experimental**: its interface or behavior may change or be removed between releases. See [Feature lifecycle](/references/feature-lifecycle).
+`gat mount` is **Experimental**: its interface or behavior may change. See [Feature lifecycle](/references/feature-lifecycle).
 </Warning>
 
 A mount imports tracked files from another Git repository and owns every
@@ -37,13 +37,13 @@ does not move or remove them.
 ## Usage
 
 ```text
-Usage: gat mount <COMMAND>
+Usage: gat mount [OPTIONS] <COMMAND>
 ```
 
 <Accordion title="All options" id="gat-mount-options">
 
 ```text
-Usage: gat mount <COMMAND>
+Usage: gat mount [OPTIONS] <COMMAND>
 
 Commands:
   list    List all configured mounts
@@ -91,6 +91,9 @@ Commands:
   help    Print this message or the help of the given subcommand(s)
 
 Options:
+  -o, --full-output
+          Show all rows and complete details
+
   -h, --help
           Print help (see a summary with '-h')
 ```
@@ -138,6 +141,9 @@ Arguments:
           with a terminal `.git` stripped where applicable
 
 Options:
+  -o, --full-output
+          Show all rows and complete details
+
       --path <PATH>
           Select this file or subtree. Any explicit --path, --include, or
           --exclude replaces the complete configured selection. Use --path . for
@@ -224,15 +230,18 @@ List effective mounts and their targets.
 ### Usage
 
 ```text
-Usage: gat mount list
+Usage: gat mount list [OPTIONS]
 ```
 
 <Accordion title="All options" id="gat-mount-list-options">
 
 ```text
-Usage: gat mount list
+Usage: gat mount list [OPTIONS]
 
 Options:
+  -o, --full-output
+          Show all rows and complete details
+
   -h, --help
           Print help (see a summary with '-h')
 ```
@@ -270,6 +279,9 @@ Options:
       --detach-only
           Keep the mount's currently-owned `gat.lock` rows instead of deleting
           them; only the `mounts:` config entry is removed
+
+  -o, --full-output
+          Show all rows and complete details
 
       --global
           Write to the global config (`~/.gat/gat.yaml`), applying to every
@@ -319,19 +331,22 @@ Show the source, pinned revision, filters, target, owned path count, effective s
 ### Usage
 
 ```text
-Usage: gat mount show <NAME>
+Usage: gat mount show [OPTIONS] <NAME>
 ```
 
 <Accordion title="All options" id="gat-mount-show-options">
 
 ```text
-Usage: gat mount show <NAME>
+Usage: gat mount show [OPTIONS] <NAME>
 
 Arguments:
   <NAME>
           Name of the mount to inspect
 
 Options:
+  -o, --full-output
+          Show all rows and complete details
+
   -h, --help
           Print help (see a summary with '-h')
 ```
@@ -366,6 +381,9 @@ Arguments:
           Name of the mount to update (its stable `mounts:` config key)
 
 Options:
+  -o, --full-output
+          Show all rows and complete details
+
       --url <URL>
           New upstream Git repository URL (keeps the current URL if omitted)
 

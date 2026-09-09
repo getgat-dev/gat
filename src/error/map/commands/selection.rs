@@ -31,7 +31,11 @@ impl From<SavedSelectionError> for Failure {
             SavedSelectionError::AlreadyExists { name } => Self::expected(
                 Diagnostic::new(ErrorCode::InvalidConfig, "Selection already exists")
                     .with_subject(UserLine::identifier(name.as_str()))
-                    .with_hint("Use gat selection update to edit the existing definition."),
+                    .with_hint(UserLine::compose([
+                        UserLine::authored("Use "),
+                        UserLine::authored("`gat selection update`").unbroken(),
+                        UserLine::authored(" to edit the existing definition."),
+                    ])),
             ),
             SavedSelectionError::NotFound { name } => Self::expected(
                 Diagnostic::new(ErrorCode::InvalidConfig, "No selection with that name")

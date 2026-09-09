@@ -430,7 +430,7 @@ fn status_and_diff_append_effective_mount_ownership_to_existing_metadata() {
                 .unwrap();
             assert!(
                 mounted.ends_with(if command == "status" {
-                    "new, cached (mount models)"
+                    "new, cached (mount mo..."
                 } else {
                     "new (mount models)"
                 }),
@@ -442,5 +442,61 @@ fn status_and_diff_append_effective_mount_ownership_to_existing_metadata() {
                 .unwrap();
             assert!(!root.contains("(mount"));
         }
+    }
+}
+
+#[test]
+fn redirected_lists_are_bounded_and_full_output_is_global() {
+    use unicode_width::UnicodeWidthStr;
+    let tmp = init_repo();
+    let dir = tmp.path();
+    for index in 0..25 {
+        let name = format!("{index:02}-{}.bin", "long-name-".repeat(12));
+        std::fs::write(dir.join(name), b"payload").unwrap();
+    }
+    assert_ok(&gat(dir, &["add", "."]), "add files");
+    let bounded = gat(dir, &["ls-files"]);
+    assert_ok(&bounded, "bounded list");
+    let text = String::from_utf8(bounded.stdout).unwrap();
+    assert!(text.contains("(... 6 more rows)"), "{text}");
+    assert_eq!(
+        text.lines().filter(|line| line.starts_with("✓  ")).count(),
+        19
+    );
+    assert!(text.lines().all(|line| line.width() <= 100));
+    assert!(text.ends_with("25 file(s)\n"));
+    for args in [
+        ["--full-output", "ls-files"],
+        ["ls-files", "--full-output"],
+        ["-o", "ls-files"],
+        ["ls-files", "-o"],
+    ] {
+        let full = gat(dir, &args);
+        assert_ok(&full, "full list");
+        let text = String::from_utf8(full.stdout).unwrap();
+        assert!(!text.contains("more rows"));
+        assert_eq!(
+            text.lines().filter(|line| line.starts_with("✓  ")).count(),
+            25
+        );
+        assert!(text.lines().any(|line| line.width() > 100));
+    }
+}
+
+#[test]
+fn incomplete_sync_has_one_completion_report_and_a_nonzero_exit() {
+    let tmp = init_repo();
+    let dir = tmp.path();
+    std::fs::write(dir.join("file.bin"), b"original").unwrap();
+    assert_ok(&gat(dir, &["add", "file.bin"]), "add file");
+    std::fs::write(dir.join("file.bin"), b"locally changed").unwrap();
+    for args in [vec!["sync", "--dry-run"], vec!["sync", "--dry-run", "-o"]] {
+        let result = gat(dir, &args);
+        assert_failure_code(dir, &args, &result, 1);
+        let text = stderr(&result);
+        assert_eq!(text.matches("Sync incomplete").count(), 1, "{text}");
+        assert!(text.contains("Conflicts: 1"));
+        assert!(!text.contains("✗ error:"), "{text}");
+        assert!(result.stdout.is_empty());
     }
 }

@@ -353,20 +353,16 @@ fn sync_trust_state_flag_overrides_unset_config() {
     assert!(matches!(outcome, app::Outcome::Synced(_)));
 }
 
-/// `app::exit_result` maps a `Synced` outcome whose completion status is
-/// `Clean` to a successful process result -- the dispatch/policy split
-/// between "command ran without error" (`app::run` returning `Ok`) and
-/// "the process should still exit non-zero" (`exit_result`) is
-/// independently testable without spawning `gat`.
+/// Successful dispatch and successful completion are separate policies.
 #[test]
-fn exit_result_is_ok_for_a_clean_sync() {
+fn clean_sync_has_a_successful_exit_code() {
     let tmp = test_repo();
     let repo = Repo::at(tmp.path().to_path_buf());
     let context = Context::new(repo);
 
     let result = app::run(parse(&["sync"]), &context, &NoopProgress);
     let outcome = result.unwrap();
-    assert!(app::exit_result(&outcome).is_ok());
+    assert_eq!(app::exit_code(&outcome), 0);
 }
 
 /// `gat push --remote <name>` with an unknown, explicitly-named remote

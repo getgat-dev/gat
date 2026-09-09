@@ -39,7 +39,11 @@ impl From<RepositoryError> for Failure {
                     .with_detail(
                         "No `.git` was found in the current directory or any parent directory.",
                     )
-                    .with_hint("Run this from inside a git checkout, or `git init` first."),
+                    .with_hint(UserLine::compose([
+                        UserLine::authored("Run this from inside a git checkout, or "),
+                        UserLine::authored("`git init`").unbroken(),
+                        UserLine::authored(" first."),
+                    ])),
             ),
             RepositoryError::ConfigPathUnavailable => Self::expected(
                 Diagnostic::new(
@@ -65,9 +69,11 @@ impl From<RepositoryError> for Failure {
                     ErrorCode::InvalidConfig,
                     "The effective mount configuration is invalid",
                 )
-                .with_hint(
-                    "Run `gat mount list` to inspect every configured mount across all scopes.",
-                ),
+                .with_hint(UserLine::compose([
+                    UserLine::authored("Run "),
+                    UserLine::authored("`gat mount list`").unbroken(),
+                    UserLine::authored(" to inspect every configured mount across all scopes."),
+                ])),
                 err,
             ),
             RepositoryError::InvalidEffectiveSelections(source) => {
@@ -77,16 +83,25 @@ impl From<RepositoryError> for Failure {
                     diagnostic = diagnostic
                         .with_subject(crate::presentation::UserLine::identifier(name.as_str()));
                 }
-                Self::infrastructure(diagnostic.with_hint("Choose an existing selection with gat selection default, or unset the dangling default."), err)
+                Self::infrastructure(
+                    diagnostic.with_hint(UserLine::compose([
+                        UserLine::authored("Choose an existing selection with "),
+                        UserLine::authored("`gat selection default`").unbroken(),
+                        UserLine::authored(", or unset the dangling default."),
+                    ])),
+                    err,
+                )
             }
             RepositoryError::InvalidEffectiveRoutes(_) => Self::infrastructure(
                 Diagnostic::new(
                     ErrorCode::InvalidConfig,
                     "The effective route configuration is invalid",
                 )
-                .with_hint(
-                    "Run `gat route list` to inspect every configured route across all scopes.",
-                ),
+                .with_hint(UserLine::compose([
+                    UserLine::authored("Run "),
+                    UserLine::authored("`gat route list`").unbroken(),
+                    UserLine::authored(" to inspect every configured route across all scopes."),
+                ])),
                 err,
             ),
             RepositoryError::ConfigLoadScoped { scope, .. } => {
@@ -223,31 +238,39 @@ pub(super) fn repository_access_diagnostic(kind: RepositoryAccessFailureKind) ->
             let (summary, hint) = match kind {
                 LockFailureKind::Corrupt => (
                     "gat.lock is corrupted",
-                    Some(
+                    Some(UserLine::authored(
                         "Restore gat.lock from a trusted version-control revision before retrying.",
-                    ),
+                    )),
                 ),
                 LockFailureKind::Incompatible => (
                     "Unsupported gat.lock format",
-                    Some("Upgrade gat or restore gat.lock from a compatible version."),
+                    Some(UserLine::authored(
+                        "Upgrade gat or restore gat.lock from a compatible version.",
+                    )),
                 ),
                 LockFailureKind::InvalidPath => (
                     "gat.lock contains an invalid path",
-                    Some("Restore gat.lock from version control, or remove the offending row."),
+                    Some(UserLine::authored(
+                        "Restore gat.lock from version control, or remove the offending row.",
+                    )),
                 ),
                 LockFailureKind::UnsupportedFileType => (
                     "gat.lock is not a regular file or directory",
-                    Some(
+                    Some(UserLine::authored(
                         "gat.lock must be a regular file or directory, not a symlink, FIFO, \
                          socket, or device.",
-                    ),
+                    )),
                 ),
                 LockFailureKind::PermissionDenied => ("Could not access gat.lock", None),
                 LockFailureKind::StorageExhausted => ("Could not access gat.lock", None),
                 LockFailureKind::Unavailable => ("Could not access gat.lock", None),
                 LockFailureKind::RepairRequired => (
                     "gat.lock was modified while being read",
-                    Some("Run the command again; if this recurs, run `gat system repair lock`."),
+                    Some(UserLine::compose([
+                        UserLine::authored("Run the command again; if this recurs, run "),
+                        UserLine::authored("`gat system repair lock`").unbroken(),
+                        UserLine::authored("."),
+                    ])),
                 ),
                 LockFailureKind::InvalidArgument => ("Could not resolve a gat.lock pattern", None),
                 LockFailureKind::RepositoryLocked => unreachable!("handled above"),

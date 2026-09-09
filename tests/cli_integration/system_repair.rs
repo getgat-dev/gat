@@ -22,6 +22,33 @@ fn system_inspect_reports_a_healthy_repo() {
 }
 
 #[test]
+fn system_repair_preserves_and_reports_an_invalid_lock_before_other_domains() {
+    let tmp = init_repo();
+    let dir = tmp.path();
+    let invalid = b"not a gat lock\n";
+    std::fs::write(dir.join("gat.lock"), invalid).unwrap();
+    for scope in ["lock", "all"] {
+        for full in [false, true] {
+            let mut args = vec!["system", "repair", scope];
+            if full {
+                args.push("-o");
+            }
+            let out = gat(dir, &args);
+            assert_ok(&out, "gat system repair reports unresolved state");
+            let report = stdout(&out);
+            assert!(report.contains("System repair: incomplete"), "{report}");
+            assert!(report.contains("✗ Lock"), "{report}");
+            assert!(report.contains("gat.lock:"), "{report}");
+            assert!(!report.contains("no repair needed"), "{report}");
+            assert!(!report.contains("✓ State"), "{report}");
+            assert!(!report.contains("not a gat lock"), "{report}");
+            assert_eq!(std::fs::read(dir.join("gat.lock")).unwrap(), invalid);
+            assert_no_low_level_error_leak(&out, &["not a gat lock"]);
+        }
+    }
+}
+
+#[test]
 fn system_repair_state_rebuilds_a_corrupt_database() {
     let tmp = init_repo();
     let dir = tmp.path();
@@ -80,15 +107,23 @@ fn system_repair_cache_leaves_healthy_metadata_untouched() {
     );
     let before = std::fs::read(&cache_db).unwrap();
 
-    let repair = gat(dir, &["system", "repair", "cache"]);
-
-    assert_ok(&repair, "gat system repair cache");
-    assert!(stdout(&repair).contains("already valid"));
-    assert_eq!(
-        std::fs::read(&cache_db).unwrap(),
-        before,
-        "repair must not rewrite healthy shared cache metadata"
-    );
+    for (args, state) in [
+        (vec!["system", "repair", "cache"], "valid"),
+        (vec!["system", "repair", "cache", "-o"], "already valid"),
+    ] {
+        let repair = gat(dir, &args);
+        assert_ok(&repair, "gat system repair cache");
+        assert!(
+            stdout(&repair)
+                .lines()
+                .any(|line| line.starts_with("✓  cache metadata") && line.ends_with(state))
+        );
+        assert_eq!(
+            std::fs::read(&cache_db).unwrap(),
+            before,
+            "repair must not rewrite healthy shared cache metadata"
+        );
+    }
 }
 
 #[test]

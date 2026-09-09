@@ -35,17 +35,10 @@ fn raw_keys_and_action_cardinality_follow_the_typed_registry() {
         ConfigScope::Project,
     )
     .unwrap_err();
-    let ConfigError::UnknownKey { key, supported } = err else {
+    let ConfigError::UnknownKey { key } = err else {
         panic!("expected an unknown key");
     };
     assert_eq!(key, "cache.link");
-    for supported_key in ConfigKey::CANONICAL {
-        assert!(
-            supported.contains(supported_key.as_str()),
-            "diagnostic omitted {supported_key}"
-        );
-    }
-    assert!(!supported.contains("git.exclude_patterns"));
 
     let (_temp, repo) = repository();
     for key in ConfigKey::CANONICAL {

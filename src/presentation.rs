@@ -31,8 +31,8 @@ use std::path::Path;
 /// Escapes every ASCII control character (anything below `0x20`, plus
 /// `DEL`) in `text`, replacing it with its Rust `\u{..}`/`\r`/`\n`/
 /// `\t`-style escape sequence so it can never reach a terminal as a raw
-/// control byte -- including `\n`, since a [`UserLine`] must occupy
-/// exactly one terminal line.
+/// control byte -- including `\n`, so only the renderer can introduce physical line breaks into an approved
+/// logical line.
 fn sanitize_line(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
@@ -82,7 +82,7 @@ pub struct UserLine(LineStorage);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum LineStorage {
     Prose(std::borrow::Cow<'static, str>),
-    Identity(String),
+    Identity(std::borrow::Cow<'static, str>),
     Mixed(Box<LineContent>),
 }
 
@@ -96,7 +96,7 @@ impl UserLine {
     /// Sanitizes a dynamic value and protects it from prose wrapping.
     /// Authored prose is sanitized separately and allows whitespace breaks.
     fn raw(text: impl AsRef<str>) -> Self {
-        Self(LineStorage::Identity(sanitize_line(text.as_ref())))
+        Self(LineStorage::Identity(sanitize_line(text.as_ref()).into()))
     }
 
     /// Approved static product prose; borrows literals that need no sanitization.
@@ -108,6 +108,18 @@ impl UserLine {
             std::borrow::Cow::Borrowed(text)
         };
         Self(LineStorage::Prose(text))
+    }
+
+    /// Keep already-approved fragments together during prose wrapping, for
+    /// example a command assembled from a static verb and a dynamic name.
+    /// This changes layout metadata only; it cannot approve new text.
+    #[must_use]
+    pub(crate) fn unbroken(self) -> Self {
+        let text = match self.0 {
+            LineStorage::Prose(text) | LineStorage::Identity(text) => text,
+            LineStorage::Mixed(content) => content.text.into(),
+        };
+        Self(LineStorage::Identity(text))
     }
 
     /// Composes approved prose by concatenating already-approved
@@ -135,13 +147,23 @@ impl UserLine {
         match protected.as_slice() {
             [] => Self(LineStorage::Prose(out.into())),
             [range] if range.start == 0 && range.end == out.len() => {
-                Self(LineStorage::Identity(out))
+                Self(LineStorage::Identity(out.into()))
             }
             _ => Self(LineStorage::Mixed(Box::new(LineContent {
                 text: out,
                 protected,
             }))),
         }
+    }
+
+    /// Join approved values without erasing their individual wrapping boundaries.
+    pub(crate) fn join(parts: impl IntoIterator<Item = Self>, separator: &'static str) -> Self {
+        Self::compose(parts.into_iter().enumerate().flat_map(|(index, part)| {
+            [
+                Self::authored(if index == 0 { "" } else { separator }),
+                part,
+            ]
+        }))
     }
 
     /// Convenience wrapper around `UserLine::compose` for the common
@@ -255,10 +277,10 @@ impl UserLine {
     #[must_use]
     pub const fn as_str(&self) -> &str {
         match &self.0 {
-            LineStorage::Prose(std::borrow::Cow::Borrowed(text)) => text,
-            LineStorage::Prose(std::borrow::Cow::Owned(text)) | LineStorage::Identity(text) => {
-                text.as_str()
-            }
+            LineStorage::Prose(std::borrow::Cow::Borrowed(text))
+            | LineStorage::Identity(std::borrow::Cow::Borrowed(text)) => text,
+            LineStorage::Prose(std::borrow::Cow::Owned(text))
+            | LineStorage::Identity(std::borrow::Cow::Owned(text)) => text.as_str(),
             LineStorage::Mixed(content) => content.text.as_str(),
         }
     }
@@ -355,6 +377,27 @@ impl From<&gat_core::oid::Oid> for UserLine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unbroken_compositions_preserve_approval_and_identity_whitespace() {
+        assert!(matches!(
+            UserLine::authored("gat sync").unbroken().0,
+            LineStorage::Identity(std::borrow::Cow::Borrowed(_))
+        ));
+        let command = UserLine::compose([
+            UserLine::authored("gat route remove "),
+            UserLine::identifier("  name with spaces\n\u{1b}  "),
+        ]);
+        let approved = command.as_str().to_owned();
+        let command = command.unbroken();
+        assert_eq!(command.as_str(), approved);
+        assert_eq!(
+            command.wrapping_words().collect::<Vec<_>>(),
+            vec![approved.as_str()]
+        );
+        assert!(!command.as_str().contains('\n'));
+        assert!(!command.as_str().contains('\u{1b}'));
+    }
 
     #[test]
     fn plain_prose_borrows_and_identities_remain_indivisible() {

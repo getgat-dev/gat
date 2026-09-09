@@ -344,7 +344,6 @@ const ALL_PATHS: ConfigDefault = ConfigDefault {
 const CONFIG_SETTER: ConfigSetter = ConfigSetter::Command { path: "config" };
 #[cfg(test)]
 const MATERIALIZATION_MODES: &[&str] = &["reflink", "hardlink", "symlink", "copy"];
-const INGEST_MODES: &[&str] = &["safe", "hybrid", "mmap"];
 
 pub const CONFIG_KEYS: &[ConfigKeySpec] = &[
     ConfigKeySpec {
@@ -411,7 +410,7 @@ pub const CONFIG_KEYS: &[ConfigKeySpec] = &[
         path: ConfigPath::Static("cache.ingest_strategy"),
         section: ConfigSection::Cache,
         value: ConfigValueSpec::Enum {
-            values: INGEST_MODES,
+            values: crate::config::INGEST_STRATEGIES,
         },
         default: ConfigDefault {
             persisted: PersistedDefault::Unset,

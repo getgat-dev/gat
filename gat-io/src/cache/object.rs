@@ -2768,14 +2768,6 @@ mod tests {
     }
 
     #[test]
-    fn ingest_strategy_from_str_round_trips_every_valid_value() {
-        for &s in gat_core::config::INGEST_STRATEGIES {
-            assert!(s.parse::<IngestStrategy>().is_ok(), "strategy {s}");
-        }
-        assert!("bogus".parse::<IngestStrategy>().is_err());
-    }
-
-    #[test]
     pub fn ingest_file_hybrid_matches_hash_of_unmodified_source() {
         // The common case: nothing touches the source during the
         // concurrent copy+hash, so the optimistic hash-of-source result

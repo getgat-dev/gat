@@ -5,6 +5,7 @@
 //! itself -- only `output` constructs these, from already-typed domain
 //! facts.
 
+use super::layout::DetailMode;
 use crate::error::UserProblem;
 use crate::presentation::UserLine;
 use std::error::Error as StdError;
@@ -81,35 +82,35 @@ pub enum ListStatus {
     Skipped,
 }
 
-/// One rendered row/line's detail text: either plain authored/composed
-/// text, or a non-fatal [`UserProblem`] -- a finding that may carry a
-/// private technical source. Constructing a `RowDetail` from a
-/// `UserProblem` (via `From`/[`Self::composed`]) keeps the `UserProblem`
-/// itself intact instead of immediately flattening it into a `String`
-/// via `Display`, so its technical source survives into the final output
-/// model (`SystemOutcome`, `ListRow`, ...) for tests -- rendering itself
-/// always sees only the safe, pre-rendered
-/// summary text, exactly as a plain `UserLine` detail would. It lives in
-/// `output` because it is
-/// purely an output-row concern, not part of the fatal-error contract
-/// `error` owns.
+/// Approved row detail with an optional compact annotation and retained problem.
+/// Problem summaries keep their prose and identity boundaries through composition;
+/// their private technical sources remain available for inspection but never display.
 #[derive(Clone, Debug)]
 pub struct RowDetail {
     rendered: UserLine,
-    /// Kept only for its private technical source in tests; rendering always
-    /// uses `rendered` instead, so this
-    /// field is never read for its `Display`/`summary()` text after
-    /// construction. It has the same internal-inspection role as
-    /// [`UserProblem::technical_source`].
+    annotation: Option<UserLine>,
+    /// Retain the mapped problem for technical-source inspection in tests.
+    /// Both display variants use approved text; neither formats this source.
     #[cfg_attr(not(test), allow(dead_code))]
     problem: Option<UserProblem>,
 }
 
 impl RowDetail {
-    /// The safe, single-line text to render. Only exercised by this
-    /// module's own tests (`line()` is the production renderer's path) and
-    /// is kept for test assertions.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Supply a compact label while retaining complete detail for full output.
+    pub(crate) fn with_annotation(mut self, annotation: impl Into<UserLine>) -> Self {
+        self.annotation = Some(annotation.into());
+        self
+    }
+
+    pub(crate) fn display_line(&self, mode: DetailMode) -> &UserLine {
+        match mode {
+            DetailMode::Full => self.line(),
+            DetailMode::Compact => self.annotation.as_ref().unwrap_or(&self.rendered),
+        }
+    }
+
+    /// Full approved text for test assertions; renderers use `display_line()`.
+    #[cfg(test)]
     pub(crate) const fn as_str(&self) -> &str {
         self.rendered.as_str()
     }
@@ -125,6 +126,7 @@ impl RowDetail {
     /// into the binary, never a runtime `String`/`Display` result.
     pub(crate) fn authored(text: &'static str) -> Self {
         Self {
+            annotation: None,
             rendered: UserLine::authored(text),
             problem: None,
         }
@@ -134,6 +136,7 @@ impl RowDetail {
     /// [`UserLine::compose`]'s closed fragment API.
     pub(crate) const fn message(message: UserLine) -> Self {
         Self {
+            annotation: None,
             rendered: message,
             problem: None,
         }
@@ -166,9 +169,10 @@ impl RowDetail {
     ) -> Self {
         let prefix: UserLine = prefix.into();
         Self {
+            annotation: None,
             rendered: UserLine::compose([
                 prefix,
-                UserLine::identifier(problem.summary()),
+                problem.summary_line().clone(),
                 UserLine::authored(suffix),
             ]),
             problem: Some(problem),
@@ -178,7 +182,7 @@ impl RowDetail {
 
 impl PartialEq for RowDetail {
     fn eq(&self, other: &Self) -> bool {
-        self.rendered == other.rendered
+        self.rendered == other.rendered && self.annotation == other.annotation
     }
 }
 
@@ -187,7 +191,8 @@ impl Eq for RowDetail {}
 impl From<UserProblem> for RowDetail {
     fn from(problem: UserProblem) -> Self {
         Self {
-            rendered: UserLine::identifier(problem.summary()),
+            annotation: None,
+            rendered: problem.summary_line().clone(),
             problem: Some(problem),
         }
     }
@@ -237,8 +242,10 @@ impl ListRow {
         &self.path
     }
 
-    pub(crate) fn metadata(&self) -> Option<&UserLine> {
-        self.metadata.as_ref().map(RowDetail::line)
+    pub(crate) fn metadata(&self, mode: DetailMode) -> Option<&UserLine> {
+        self.metadata
+            .as_ref()
+            .map(|detail| detail.display_line(mode))
     }
 }
 
@@ -279,18 +286,60 @@ mod tests {
     const SENTINEL: &str = "sqlite: disk I/O error at offset 0x4f2c (os error 13)";
 
     #[test]
+    fn problem_details_preserve_prose_breaks_and_protected_identity_spaces() {
+        let problem = crate::error::map::problem::with_source_for_test(
+            UserLine::compose([
+                UserLine::authored("cannot read "),
+                UserLine::identifier("a folder/file"),
+                UserLine::authored("; retry later"),
+            ]),
+            DistinctiveTechnicalError(SENTINEL),
+        );
+        let direct = RowDetail::from(problem.clone());
+        let composed = RowDetail::composed("repair: ", problem, ".");
+        assert_eq!(
+            direct.line().wrapping_words().collect::<Vec<_>>(),
+            ["cannot", "read", "a folder/file;", "retry", "later"]
+        );
+        assert_eq!(
+            composed.line().wrapping_words().collect::<Vec<_>>(),
+            [
+                "repair:",
+                "cannot",
+                "read",
+                "a folder/file;",
+                "retry",
+                "later."
+            ]
+        );
+        for detail in [direct, composed] {
+            assert!(!detail.as_str().contains(SENTINEL));
+            assert_eq!(detail.technical_source().unwrap().to_string(), SENTINEL);
+        }
+    }
+
+    #[test]
     fn row_detail_from_a_source_bearing_user_problem_retains_the_source_after_cloning() {
         let problem = crate::error::map::problem::with_source_for_test(
             "disk unreadable",
             DistinctiveTechnicalError(SENTINEL),
         );
-        let detail = RowDetail::composed("desired (", problem, ")");
-        // Move/clone the detail the way it travels through a row/outcome.
-        let moved = detail;
-        let source = moved
-            .technical_source()
-            .expect("RowDetail::composed must retain the UserProblem's technical source");
-        assert_eq!(source.to_string(), SENTINEL);
+        let detail = RowDetail::composed("desired (", problem, ")").with_annotation("unreadable");
+        let cloned = detail.clone();
+        for detail in [detail, cloned] {
+            assert_eq!(
+                detail.display_line(DetailMode::Compact).as_str(),
+                "unreadable"
+            );
+            assert_eq!(
+                detail.display_line(DetailMode::Full).as_str(),
+                "desired (disk unreadable)"
+            );
+            let source = detail
+                .technical_source()
+                .expect("both variants retain the technical source");
+            assert_eq!(source.to_string(), SENTINEL);
+        }
     }
 
     #[test]

@@ -7,14 +7,26 @@ fn remote_resolution_context_for(
     remote_name: &str,
     route_name: Option<&str>,
     route: Option<&str>,
-) -> String {
-    match (route_name, route) {
-        (Some(route_name), Some(route)) => {
-            format!("remote `{remote_name}` via route `{route_name}` (`{route}`)")
+) -> UserLine {
+    let mut parts = vec![
+        UserLine::authored("remote `"),
+        UserLine::identifier(remote_name),
+        UserLine::authored("`"),
+    ];
+    if let Some(route) = route {
+        parts.push(UserLine::authored(" via route `"));
+        if let Some(name) = route_name {
+            parts.extend([
+                UserLine::identifier(name),
+                UserLine::authored("` (`"),
+                UserLine::path_text(route),
+                UserLine::authored("`)"),
+            ]);
+        } else {
+            parts.extend([UserLine::path_text(route), UserLine::authored("`")]);
         }
-        (_, Some(route)) => format!("remote `{remote_name}` via route `{route}`"),
-        _ => format!("remote `{remote_name}`"),
     }
+    UserLine::compose(parts)
 }
 
 impl From<gat_command::PushError> for Failure {
@@ -91,10 +103,7 @@ impl From<gat_engine::DownloadError> for Failure {
                 Self::infrastructure(
                     Diagnostic::new(
                         code,
-                        UserLine::compose([
-                            UserLine::authored("Could not open "),
-                            UserLine::identifier(&description),
-                        ]),
+                        UserLine::compose([UserLine::authored("Could not open "), description]),
                     )
                     .with_subject(UserLine::path_text(path.as_str())),
                     err,
@@ -125,7 +134,7 @@ impl From<gat_engine::DownloadError> for Failure {
                         code,
                         UserLine::compose([
                             UserLine::authored("Could not read the object from "),
-                            UserLine::identifier(&description),
+                            description,
                         ]),
                     )
                     .with_subject(UserLine::path_text(path.as_str())),
@@ -226,10 +235,7 @@ impl From<gat_engine::UploadError> for Failure {
                 Self::infrastructure(
                     Diagnostic::new(
                         code,
-                        UserLine::compose([
-                            UserLine::authored(message),
-                            UserLine::identifier(&description),
-                        ]),
+                        UserLine::compose([UserLine::authored(message), description]),
                     )
                     .with_subject(UserLine::path_text(path.as_str())),
                     err,
@@ -265,10 +271,7 @@ impl From<gat_engine::UploadError> for Failure {
                 Self::infrastructure(
                     Diagnostic::new(
                         code,
-                        UserLine::compose([
-                            UserLine::authored("Could not open "),
-                            UserLine::identifier(&description),
-                        ]),
+                        UserLine::compose([UserLine::authored("Could not open "), description]),
                     )
                     .with_subject(UserLine::path_text(path.as_str())),
                     err,
@@ -297,7 +300,7 @@ impl From<gat_engine::UploadError> for Failure {
                         code,
                         UserLine::compose([
                             UserLine::authored("Could not open an upload to "),
-                            UserLine::identifier(&description),
+                            description,
                         ]),
                     )
                     .with_subject(UserLine::path_text(path.as_str())),
@@ -326,7 +329,7 @@ impl From<gat_engine::UploadError> for Failure {
                         code,
                         UserLine::compose([
                             UserLine::authored("Could not write the object to "),
-                            UserLine::identifier(&description),
+                            description,
                         ]),
                     )
                     .with_subject(UserLine::path_text(path.as_str())),
@@ -350,7 +353,7 @@ impl From<gat_engine::UploadError> for Failure {
                         ErrorCode::RemoteOperationFailed,
                         UserLine::compose([
                             UserLine::authored("Could not finalize the upload to "),
-                            UserLine::identifier(&description),
+                            description,
                         ]),
                     )
                     .with_subject(UserLine::path_text(path.as_str())),
@@ -427,7 +430,7 @@ impl From<gat_engine::RemotePresenceError> for Failure {
         };
         let summary = UserLine::compose([
             UserLine::authored(action),
-            UserLine::identifier(&description),
+            description,
             UserLine::authored(suffix),
         ]);
         Self::infrastructure(
@@ -465,14 +468,35 @@ mod tests {
         let failure: Failure = gat_engine::DownloadError::RemoteRead {
             kind: gat_engine::DownloadRemoteFailureKind::NotFound,
             remote_name: "origin".into(),
-            route_name: None,
-            route: None,
+            route_name: Some(gat_core::name::RouteName::from_string("assets".into())),
+            route: Some(gat_core::lexical_path::GatPath::parse_canonical("data files").unwrap()),
             path: gat_core::lexical_path::GatPath::parse_canonical("file.bin").unwrap(),
             source: Box::new(source),
         }
         .into();
         assert!(!failure.diagnostic().summary().contains("FILE-READ-SECRET"));
         assert_eq!(failure.diagnostic().subject(), Some("file.bin"));
+        for width in [20, 39, 40, 60, 100, 120] {
+            let mut bytes = Vec::new();
+            let mut stdout = Vec::new();
+            let mut output = crate::output::Output::new(&mut stdout, &mut bytes);
+            output.set_layouts(
+                crate::output::OutputLayout::default(),
+                crate::output::OutputLayout::bounded(width),
+            );
+            crate::output::error::render(&mut output, failure.diagnostic()).unwrap();
+            let plain = crate::output::strip_ansi(&String::from_utf8(bytes).unwrap());
+            assert!(plain.contains("`data files`"));
+            assert!(!plain.contains("FILE-READ-SECRET"));
+            for line in plain.lines() {
+                assert!(
+                    unicode_width::UnicodeWidthStr::width(line) <= width.min(100)
+                        || line.trim() == "(`data files`)",
+                    "{width}: {line}"
+                );
+            }
+        }
+
         assert!(
             failure
                 .technical_source()

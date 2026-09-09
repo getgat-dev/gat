@@ -5,6 +5,9 @@
 //! `render`'s durable `Outcome` rendering.
 
 pub mod error;
+mod flow;
+mod layout;
+mod list;
 pub mod notices;
 pub mod progress;
 pub mod render;
@@ -12,13 +15,15 @@ mod rows;
 mod system;
 mod terminal;
 mod writer;
+
+pub use layout::OutputLayout;
 pub use writer::{Output, Stream, WriteFailure};
 
 pub(crate) use terminal::help_styles;
 
 /// Exercise the process adapter's ANSI stripping in renderer tests.
 #[cfg(test)]
-fn strip_ansi(text: &str) -> String {
+pub(crate) fn strip_ansi(text: &str) -> String {
     use std::io::Write;
     let mut output = anstream::StripStream::new(Vec::new());
     output.write_all(text.as_bytes()).unwrap();

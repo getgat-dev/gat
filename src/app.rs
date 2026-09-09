@@ -9,10 +9,9 @@
 //! `.git/info/exclude` first, which suppress routine sync output, how
 //! `gat sync`'s validation/fetch defaults are resolved -- lives, instead
 //! of being spread across process adapters and individual commands.
-//! Rendering an `Outcome` (and mapping process exit codes) is not this
-//! module's job: see `output::render` and `exit_result` below, which
-//! process adapters call after dispatch instead of this module printing
-//! or importing `ui`/`anstream` itself.
+//! Process adapters render an `Outcome` through `output::render` and obtain
+//! its completion status through `exit_code`. Dispatch never prints or imports
+//! `ui`/`anstream` itself.
 
 use crate::cli::{
     Cli, Command, HistoryArgs, MountAction, RemoteAction, SelectionArgs, SystemAction,
@@ -905,32 +904,16 @@ pub fn run(cli: Cli, context: &Context, progress: &dyn ProgressReporter) -> Resu
     dispatch()
 }
 
-/// Map a completed [`Outcome`] to a process-level result: the one place
-/// to decide whether an otherwise-successful command (dispatch returned
-/// `Ok`) should still make the process exit non-zero -- e.g. a
-/// `sync`/`pull`/`hook` that finished but left conflicts/missing objects
-/// behind. Kept separate from rendering: this never prints anything.
-/// `outcome.completion`'s structured
-/// [`gat_command::SyncCompletionStatus::Incomplete`] counts are
-/// passed directly to `error::map::app::sync_completion_conflict`, which
-/// authors the one Gat-owned summary text at its own rendering boundary
-/// -- this function never builds an intermediate `String` itself.
-pub fn exit_result(outcome: &Outcome) -> Result<()> {
+/// Exit status for a completed report, independent of diagnostic rendering.
+/// An incomplete outcome has already supplied its own explanation; it must not
+/// be turned into a second fatal diagnostic after rendering.
+#[must_use]
+pub fn exit_code(outcome: &Outcome) -> u8 {
     match outcome {
         Outcome::Pulled(outcome) | Outcome::Synced(outcome) | Outcome::Hooked(outcome) => {
-            if let gat_command::SyncCompletionStatus::Incomplete {
-                conflicts,
-                missing,
-                corrupted,
-            } = outcome.completion
-            {
-                return Err(crate::error::map::app::sync_completion_conflict(
-                    conflicts, missing, corrupted,
-                ));
-            }
-            Ok(())
+            u8::from(!outcome.completion.is_clean())
         }
-        _ => Ok(()),
+        _ => 0,
     }
 }
 
@@ -1505,12 +1488,8 @@ mod tests {
         assert!(err.diagnostic().summary().contains("--repair"));
     }
 
-    /// `exit_result` turns a sync/pull/hook outcome's structured
-    /// `completion` status directly into a `Failure`'s diagnostic (not
-    /// through an anonymous `bail!("{err}")` string), and leaves every
-    /// other outcome variant (including a clean sync) untouched.
     #[test]
-    fn exit_result_maps_unresolved_sync_outcome_to_a_conflict_diagnostic() {
+    fn incomplete_outcomes_exit_unsuccessfully_without_a_second_diagnostic() {
         let outcome = Outcome::Synced(gat_command::SyncOutcome {
             scope: gat_command::SelectionScope::Unrestricted,
             outcome: gat_engine::SyncOutcome::default(),
@@ -1525,17 +1504,20 @@ mod tests {
                 corrupted: 4,
             },
         });
-        let err = exit_result(&outcome).unwrap_err();
-        assert_eq!(err.exit_code(), 1);
-        assert_eq!(err.diagnostic().code(), ErrorCode::Conflict);
-        let summary = err.diagnostic().summary().to_string();
-        assert!(summary.contains("2 conflict(s)"));
-        assert!(summary.contains("3 missing object(s)"));
-        assert!(summary.contains("4 corrupted object(s)"));
+        assert_eq!(exit_code(&outcome), 1);
+        let Outcome::Synced(sync) = outcome else {
+            unreachable!()
+        };
+        let pulled = Outcome::Pulled(sync);
+        assert_eq!(exit_code(&pulled), 1);
+        let Outcome::Pulled(sync) = pulled else {
+            unreachable!()
+        };
+        assert_eq!(exit_code(&Outcome::Hooked(sync)), 1);
     }
 
     #[test]
-    fn exit_result_is_ok_for_a_clean_sync_outcome() {
+    fn clean_sync_exits_successfully() {
         let outcome = Outcome::Synced(gat_command::SyncOutcome {
             scope: gat_command::SelectionScope::Unrestricted,
             outcome: gat_engine::SyncOutcome::default(),
@@ -1546,6 +1528,6 @@ mod tests {
             shallow: false,
             completion: gat_command::SyncCompletionStatus::Clean,
         });
-        assert!(exit_result(&outcome).is_ok());
+        assert_eq!(exit_code(&outcome), 0);
     }
 }

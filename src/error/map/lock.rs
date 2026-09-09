@@ -70,10 +70,14 @@ fn lock_domain_diagnostic(err: &LockDomainError) -> Diagnostic {
                     UserLine::authored(": "),
                     UserLine::authored(malformed_row_problem(reason)),
                 ]))
-                .with_hint(
-                    "gat.lock has been hand-edited or corrupted; restore it from version \
-                         control, or run `gat system repair` if one is available.",
-                )
+                .with_hint(UserLine::compose([
+                    UserLine::authored(
+                        "gat.lock has been hand-edited or corrupted; restore it from version \
+                         control, or run ",
+                    ),
+                    UserLine::authored("`gat system repair`").unbroken(),
+                    UserLine::authored(" if one is available."),
+                ]))
         }
         LockDomainError::InvalidRowPath { line, path, .. } => {
             Diagnostic::new(ErrorCode::InvalidPath, "gat.lock contains an invalid path")

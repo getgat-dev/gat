@@ -49,8 +49,11 @@ impl From<RemoveError> for Failure {
                     "Materialized ownership cleanup failed; Git exclusions have not been updated.",
                 );
                 if cached {
-                    *failure.diagnostic = failure.diagnostic.with_hint(
-                        "Preserve the retained files before running gat sync: stale ownership may cause sync to delete them.");
+                    *failure.diagnostic = failure.diagnostic.with_hint(UserLine::compose([
+                        UserLine::authored("Preserve the retained files before running "),
+                        UserLine::authored("`gat sync`").unbroken(),
+                        UserLine::authored(": stale ownership may cause sync to delete them."),
+                    ]));
                 }
                 failure
             }
@@ -68,7 +71,7 @@ fn after_publication(mut failure: Failure, stage: &'static str) -> Failure {
     *failure.diagnostic = failure.diagnostic
         .with_detail("Removals were already published to gat.lock; the selected paths are no longer tracked.")
         .with_detail(stage)
-        .with_hint("Repeating the same gat rm does not resume cleanup for these paths. Inspect the remaining files and metadata before further cleanup.");
+        .with_hint(UserLine::compose([UserLine::authored("Repeating the same "), UserLine::authored("`gat rm`").unbroken(), UserLine::authored(" does not resume cleanup for these paths. Inspect the remaining files and metadata before further cleanup.")]));
     failure
 }
 

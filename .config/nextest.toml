@@ -11,6 +11,12 @@
 # test must fail visibly and get fixed, not get papered over as an
 # intermittently green test.
 retries = 0
+# Leak detection waits for captured output to reach EOF after the test exits.
+# Short drain deadlines produced false leak reports in subprocess-free I/O
+# tests under high parallelism. Allow scheduling headroom, but fail persistent
+# leaks rather than accepting nextest's default pass-with-warning result.
+# The CI profile inherits this policy; real-leak controls must fail in both.
+leak-timeout = { period = "1s", result = "fail" }
 
 [profile.default.slow-timeout]
 # Report (but do not kill) a test that runs longer than this. The

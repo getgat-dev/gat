@@ -144,28 +144,46 @@ pub struct Notice {
     pub note: Option<&'static str>,
 }
 
-/// The factual sentence shared, word-for-word, between a runtime notice
-/// and documentation wording -- one lifecycle wording decision
-/// tree, not two independently maintained copies. Only the wrapping
-/// around this sentence differs by renderer (plain-text prefix in a
-/// terminal notice vs. Markdown bold status + doc link in generated
-/// docs); both live in root.
+/// Lifecycle wording split around its optional replacement identity. Renderers
+/// can wrap prose while keeping the replacement intact, without owning a second
+/// copy of the wording decision. A note is authored registry prose in `suffix`.
+pub struct LifecycleReason<'a> {
+    pub prefix: &'static str,
+    pub replacement: Option<&'a str>,
+    pub suffix: &'a str,
+}
+
+#[must_use]
+pub const fn lifecycle_reason_parts<'a>(
+    kind: NoticeKind,
+    replacement: Option<&'a str>,
+    note: Option<&'a str>,
+) -> LifecycleReason<'a> {
+    let (prefix, replacement, suffix) = match kind {
+        NoticeKind::Experimental => ("its interface or behavior may change.", None, ""),
+        NoticeKind::Deprecated => match (replacement, note) {
+            (Some(replacement), _) => ("use `", Some(replacement), "` instead."),
+            (None, Some(note)) => ("", None, note),
+            (None, None) => ("retained for compatibility.", None, ""),
+        },
+    };
+    LifecycleReason {
+        prefix,
+        replacement,
+        suffix,
+    }
+}
+
+/// The same factual sentence used by terminal notices and documentation.
 #[must_use]
 pub fn lifecycle_reason(kind: NoticeKind, replacement: Option<&str>, note: Option<&str>) -> String {
-    match kind {
-        NoticeKind::Experimental => {
-            "its interface or behavior may change or be removed between releases.".to_string()
-        }
-        NoticeKind::Deprecated => match (replacement, note) {
-            (Some(replacement), _) => {
-                format!("this remains supported for compatibility. Use `{replacement}` instead.")
-            }
-            (None, Some(note)) => {
-                format!("this remains available for compatibility. {note}")
-            }
-            (None, None) => "this remains available for compatibility.".to_string(),
-        },
-    }
+    let reason = lifecycle_reason_parts(kind, replacement, note);
+    format!(
+        "{}{}{}",
+        reason.prefix,
+        reason.replacement.unwrap_or_default(),
+        reason.suffix
+    )
 }
 
 /// Builds the [`Notice`] a [`FeatureSpec`] produces at runtime, or `None`
@@ -258,7 +276,7 @@ mod tests {
         let spec = spec(Surface::Command("x"), Status::Experimental);
         let notice = notice_for(&spec).expect("produces a notice");
         let reason = lifecycle_reason(notice.kind, notice.replacement, notice.note);
-        assert!(reason.contains("may change or be removed"));
+        assert_eq!(reason, "its interface or behavior may change.");
     }
 
     #[test]
@@ -290,8 +308,8 @@ mod tests {
         );
         let notice = notice_for(&spec).unwrap();
         let reason = lifecycle_reason(notice.kind, notice.replacement, notice.note);
-        assert!(!reason.contains("Use `"));
-        assert!(reason.contains("remains available for compatibility"));
+        assert!(!reason.contains("use `"));
+        assert_eq!(reason, "retained for compatibility.");
     }
 
     #[test]

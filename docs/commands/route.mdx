@@ -5,7 +5,7 @@ tag: "Experimental"
 ---
 
 <Warning>
-`gat route` is **Experimental**: its interface or behavior may change or be removed between releases. See [Feature lifecycle](/references/feature-lifecycle).
+`gat route` is **Experimental**: its interface or behavior may change. See [Feature lifecycle](/references/feature-lifecycle).
 </Warning>
 
 Routes map tracked path prefixes to named remotes independently of mount ownership.
@@ -24,13 +24,13 @@ and [gat remote](/commands/remote) to manage the storage locations themselves.
 ## Usage
 
 ```text
-Usage: gat route <COMMAND>
+Usage: gat route [OPTIONS] <COMMAND>
 ```
 
 <Accordion title="All options" id="gat-route-options">
 
 ```text
-Usage: gat route <COMMAND>
+Usage: gat route [OPTIONS] <COMMAND>
 
 Commands:
   list    List all configured routes, plus a synthetic `*` row showing the
@@ -53,6 +53,9 @@ Commands:
   help    Print this message or the help of the given subcommand(s)
 
 Options:
+  -o, --full-output
+          Show all rows and complete details
+
   -h, --help
           Print help (see a summary with '-h')
 ```
@@ -100,6 +103,9 @@ Options:
           Write to the global config (`~/.gat/gat.yaml`), applying to every
           repository for this user
 
+  -o, --full-output
+          Show all rows and complete details
+
       --project
           Write to the project config (`<repo_root>/gat.yaml`), committed to git
           and shared with everyone who clones the repo. The default
@@ -129,15 +135,18 @@ List effective routes. The synthetic `*` row shows the default remote fallback.
 ### Usage
 
 ```text
-Usage: gat route list
+Usage: gat route list [OPTIONS]
 ```
 
 <Accordion title="All options" id="gat-route-list-options">
 
 ```text
-Usage: gat route list
+Usage: gat route list [OPTIONS]
 
 Options:
+  -o, --full-output
+          Show all rows and complete details
+
   -h, --help
           Print help (see a summary with '-h')
 ```
@@ -176,6 +185,9 @@ Options:
           Write to the global config (`~/.gat/gat.yaml`), applying to every
           repository for this user
 
+  -o, --full-output
+          Show all rows and complete details
+
       --project
           Write to the project config (`<repo_root>/gat.yaml`), committed to git
           and shared with everyone who clones the repo. The default
@@ -205,19 +217,22 @@ Show the route path, remote, and defining scope.
 ### Usage
 
 ```text
-Usage: gat route show <NAME>
+Usage: gat route show [OPTIONS] <NAME>
 ```
 
 <Accordion title="All options" id="gat-route-show-options">
 
 ```text
-Usage: gat route show <NAME>
+Usage: gat route show [OPTIONS] <NAME>
 
 Arguments:
   <NAME>
           Name of the route to inspect
 
 Options:
+  -o, --full-output
+          Show all rows and complete details
+
   -h, --help
           Print help (see a summary with '-h')
 ```
@@ -252,6 +267,9 @@ Arguments:
           Name of the route to update (its stable `routes:` config key)
 
 Options:
+  -o, --full-output
+          Show all rows and complete details
+
       --remote <REMOTE>
           New remote to route to (keeps the current remote if omitted). Must
           already be a named remote

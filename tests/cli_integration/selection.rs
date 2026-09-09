@@ -103,7 +103,7 @@ fn named_selection_reuse_default_and_inline_replacement() {
         1
     );
     assert!(rendered.starts_with(
-        "✓ Default selection: training\n  Chosen in: local  ·  Defined in: project\n\n"
+        "✓ Default selection: training\n  Chosen in: local · Defined in: project\n\n"
     ));
     assert!(stdout(&details).contains("Defined in: project"));
     assert!(

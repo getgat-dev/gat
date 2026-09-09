@@ -17,9 +17,12 @@
 //! metadata, optional list hints and statistics.
 //! Symbols: → action/changed, ✓ success, ! warning, ✗ error.
 
+use super::flow;
 pub use crate::output::rows::ListStatus as Status;
-use crate::output::{Output, WriteFailure};
+use crate::output::{Output, Stream, WriteFailure};
 use anstyle::{AnsiColor, Style};
+use std::borrow::Cow;
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::presentation::UserLine;
@@ -76,30 +79,18 @@ pub fn bold_red(word: &str) -> String {
 /// formatting entry
 /// point left here.
 pub fn action(output: &mut Output<'_>, line: &UserLine) -> Result<(), WriteFailure> {
-    output.stderr(format_args!(
-        "{} {}",
-        Status::Pending.styled(),
-        line.as_str()
-    ))
+    message(output, Stream::Stderr, Status::Pending, line)
 }
 
 /// Print a ✓ success line to stderr: a routine confirmation, not the
 /// command's actual stdout result.
 pub fn success(output: &mut Output<'_>, line: &UserLine) -> Result<(), WriteFailure> {
-    output.stderr(format_args!(
-        "{} {}",
-        Status::Success.styled(),
-        line.as_str()
-    ))
+    message(output, Stream::Stderr, Status::Success, line)
 }
 
 /// Print a ! warning line to stderr for a problem or partial result needing attention.
 pub fn caution(output: &mut Output<'_>, line: &UserLine) -> Result<(), WriteFailure> {
-    output.stderr(format_args!(
-        "{} {}",
-        Status::Warning.styled(),
-        line.as_str()
-    ))
+    message(output, Stream::Stderr, Status::Warning, line)
 }
 
 impl Status {
@@ -140,47 +131,204 @@ impl Status {
     }
 }
 
-/// Render a semantic heading: `<symbol> <bold label>: <summary>`.
-pub fn status_heading(status: Status, label: &UserLine, summary: &UserLine) -> String {
-    format!(
-        "{} {BOLD}{}{BOLD:#}: {}",
-        status.styled(),
-        label.as_str(),
-        summary.as_str()
-    )
+#[cfg(test)]
+pub fn success_heading_text(label: &UserLine, summary: &UserLine, width: usize) -> String {
+    let mut bytes = Vec::new();
+    let mut stderr = Vec::new();
+    let mut output = Output::new(&mut bytes, &mut stderr);
+    output.set_layouts(
+        super::OutputLayout::bounded(width),
+        super::OutputLayout::default(),
+    );
+    success_heading(&mut output, Stream::Stdout, label, summary).unwrap();
+    String::from_utf8(bytes)
+        .unwrap()
+        .trim_end_matches('\n')
+        .to_owned()
 }
 
-/// A `→`-prefixed heading for a list of pending/in-progress items, e.g.
-/// `→ Changes to commit: 5`.
-pub fn action_heading(label: &UserLine, summary: &UserLine) -> String {
-    status_heading(Status::Pending, label, summary)
+/// Separate adjacent semantic blocks with one empty physical line. Callers own
+/// report order and omit absent blocks; this helper owns separator formatting.
+pub fn section(output: &mut Output<'_>, stream: Stream) -> Result<(), WriteFailure> {
+    output.line(stream, format_args!(""))
 }
 
-/// A `✓`-prefixed heading for a list of healthy/complete items, e.g.
-/// `✓ Tracked files: 24`.
-pub fn success_heading(label: &UserLine, summary: &UserLine) -> String {
-    status_heading(Status::Success, label, summary)
+/// Hints form one optional block, independent of the number of visible rows.
+pub fn hints(
+    output: &mut Output<'_>,
+    stream: Stream,
+    hints: &[UserLine],
+) -> Result<(), WriteFailure> {
+    if !hints.is_empty() {
+        section(output, stream)?;
+    }
+    for hint in hints {
+        list_hint(output, stream, hint)?;
+    }
+    Ok(())
 }
 
-/// A `!`-prefixed heading for a list of items needing attention, e.g.
-/// `! Conflicts: 2`.
-pub fn caution_heading(label: &UserLine, summary: &UserLine) -> String {
-    status_heading(Status::Warning, label, summary)
+/// Required content retains normal contrast; only optional context is muted.
+#[derive(Clone, Copy)]
+pub enum Emphasis {
+    Normal,
+    Muted,
 }
 
-/// Render a generic semantic group heading without a `: summary`, e.g.
-/// `! Lock` or `✓ Cache`.
-pub fn status_group(status: Status, title: &UserLine) -> String {
-    let style = status.style();
-    format!(
-        "{style}{}{style:#} {BOLD}{}{BOLD:#}",
-        status.symbol(),
-        title.as_str()
-    )
+fn indentation(columns: usize, width: usize) -> String {
+    " ".repeat(if columns < width { columns } else { 0 })
+}
+
+/// Write a paragraph incrementally; no subsequent line is laid out after a
+/// write failure. Dim is reserved for optional context, never recovery steps.
+pub fn paragraph(
+    output: &mut Output<'_>,
+    stream: Stream,
+    text: &UserLine,
+    indent: usize,
+    emphasis: Emphasis,
+) -> Result<(), WriteFailure> {
+    let width = output.prose_width(stream);
+    let prefix = indentation(indent, width);
+    for line in flow::lines(&prefix, &prefix, text, width) {
+        match emphasis {
+            Emphasis::Muted => output.line(stream, format_args!("{DIM}{line}{DIM:#}"))?,
+            Emphasis::Normal => output.line(stream, format_args!("{line}"))?,
+        }
+    }
+    Ok(())
+}
+
+/// The flow engine omits padding for prefix-only lines. Body whitespace belongs
+/// to approved text and must survive even when it begins with spaces.
+const fn body_gap(line: &flow::PhysicalLine<'_>) -> &'static str {
+    if line.body.is_empty() { "" } else { " " }
+}
+
+fn message(
+    output: &mut Output<'_>,
+    stream: Stream,
+    status: Status,
+    text: &UserLine,
+) -> Result<(), WriteFailure> {
+    let prefix = format!("{} ", status.symbol());
+    for (index, line) in flow::lines(&prefix, "  ", text, output.prose_width(stream)).enumerate() {
+        if index == 0 {
+            output.line(
+                stream,
+                format_args!("{}{}{}", status.styled(), body_gap(&line), line.body),
+            )?;
+        } else {
+            output.line(stream, format_args!("{line}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Semantic output methods resolve width from the destination, never the environment.
+pub fn status_heading(
+    output: &mut Output<'_>,
+    stream: Stream,
+    status: Status,
+    label: &UserLine,
+    summary: &UserLine,
+) -> Result<(), WriteFailure> {
+    let width = output.prose_width(stream);
+    let prefix = format!("{} {}: ", status.symbol(), label.as_str());
+    if prefix.width() >= width {
+        let title = UserLine::compose([label.clone(), UserLine::authored(":")]);
+        status_group(output, stream, status, &title)?;
+        if summary.wrapping_words().next().is_some() {
+            paragraph(output, stream, summary, 2, Emphasis::Normal)?;
+        }
+        return Ok(());
+    }
+    for (index, line) in flow::lines(&prefix, "  ", summary, width).enumerate() {
+        if index == 0 {
+            output.line(
+                stream,
+                format_args!(
+                    "{} {BOLD}{}{BOLD:#}:{}{}",
+                    status.styled(),
+                    label.as_str(),
+                    body_gap(&line),
+                    line.body
+                ),
+            )?;
+        } else {
+            output.line(stream, format_args!("{line}"))?;
+        }
+    }
+    Ok(())
+}
+pub fn action_heading(
+    output: &mut Output<'_>,
+    stream: Stream,
+    label: &UserLine,
+    summary: &UserLine,
+) -> Result<(), WriteFailure> {
+    status_heading(output, stream, Status::Pending, label, summary)
+}
+pub fn success_heading(
+    output: &mut Output<'_>,
+    stream: Stream,
+    label: &UserLine,
+    summary: &UserLine,
+) -> Result<(), WriteFailure> {
+    status_heading(output, stream, Status::Success, label, summary)
+}
+pub fn caution_heading(
+    output: &mut Output<'_>,
+    stream: Stream,
+    label: &UserLine,
+    summary: &UserLine,
+) -> Result<(), WriteFailure> {
+    status_heading(output, stream, Status::Warning, label, summary)
+}
+pub fn status_group(
+    output: &mut Output<'_>,
+    stream: Stream,
+    status: Status,
+    title: &UserLine,
+) -> Result<(), WriteFailure> {
+    let prefix = format!("{} ", status.symbol());
+    for (index, line) in flow::lines(&prefix, "  ", title, output.prose_width(stream)).enumerate() {
+        if index == 0 {
+            output.line(
+                stream,
+                format_args!(
+                    "{}{}{BOLD}{}{BOLD:#}",
+                    status.styled(),
+                    body_gap(&line),
+                    line.body
+                ),
+            )?;
+        } else {
+            output.line(stream, format_args!("{BOLD}{line}{BOLD:#}"))?;
+        }
+    }
+    Ok(())
+}
+pub fn list_hint(
+    output: &mut Output<'_>,
+    stream: Stream,
+    text: &UserLine,
+) -> Result<(), WriteFailure> {
+    for line in flow::lines("hint: ", "      ", text, output.prose_width(stream)) {
+        output.line(stream, format_args!("{DIM}{line}{DIM:#}"))?;
+    }
+    Ok(())
+}
+pub fn list_footer(
+    output: &mut Output<'_>,
+    stream: Stream,
+    text: &UserLine,
+) -> Result<(), WriteFailure> {
+    paragraph(output, stream, text, 0, Emphasis::Muted)
 }
 
 /// One row of a rendered list: a status symbol, the primary
-/// path (never wrapped, never dimmed), and optional secondary metadata
+/// path (never wrapped or dimmed; clipped in bounded mode), and optional secondary metadata
 /// (begins after at least two spaces; always dimmed). Both `path` and
 /// `metadata` are already-approved [`UserLine`]s, not raw strings --
 /// the approved-line guarantee survives from the row model all the way
@@ -210,123 +358,195 @@ impl<'a> ListItem<'a> {
     }
 }
 
-/// Render a single item, padding `path` to `path_width` so metadata
-/// columns line up across every row that has one.
-fn render_item(item: &ListItem, path_width: usize) -> String {
-    let status = item.status.styled();
-    let path = item.path.as_str();
-    match &item.metadata {
-        Some(meta) => format!(
-            "{status}  {path}{}  {}",
-            " ".repeat(path_width.saturating_sub(path.width())),
-            dim(meta.as_str())
-        ),
-        None => format!("{status}  {path}"),
+/// Computed once per visible group; all status symbols occupy one column.
+struct RowColumns {
+    total: Option<usize>,
+    label: usize,
+    metadata: Option<usize>,
+}
+
+const STATUS_PREFIX_COLUMNS: usize = 3;
+const COLUMN_GAP: usize = 2;
+
+impl RowColumns {
+    fn measure<'a>(items: impl Iterator<Item = ListItem<'a>>, total: Option<usize>) -> Self {
+        let metadata = total.map(|width| {
+            if width < super::layout::MIN_TWO_COLUMN_WIDTH {
+                0
+            } else {
+                super::layout::MAX_METADATA_COLUMNS
+                    .min(width.saturating_sub(STATUS_PREFIX_COLUMNS) / 3)
+            }
+        });
+        // A one-column layout needs neither alignment nor a metadata scan.
+        if metadata == Some(0) {
+            return Self {
+                total,
+                label: 0,
+                metadata,
+            };
+        }
+        let (label, detail) = items.fold((0, 0), |(label, detail), item| {
+            (
+                label.max(item.path.as_str().width()),
+                detail.max(item.metadata.map_or(0, |text| text.as_str().width())),
+            )
+        });
+        let label = total.map_or(label, |width| {
+            let reserved = detail.min(metadata.unwrap_or(0));
+            let gap = if reserved > 0 { COLUMN_GAP } else { 0 };
+            label.min(width.saturating_sub(STATUS_PREFIX_COLUMNS + reserved + gap))
+        });
+        Self {
+            total,
+            label,
+            metadata,
+        }
+    }
+
+    fn render(&self, item: &ListItem<'_>) -> String {
+        if let Some(width) = self.total
+            && width <= STATUS_PREFIX_COLUMNS
+        {
+            return truncate("...", width).into_owned();
+        }
+        let metadata = item
+            .metadata
+            .filter(|_| self.metadata != Some(0))
+            .map(|text| clip(text.as_str(), self.metadata))
+            .filter(|text| !text.is_empty());
+        let label_width = self.total.map(|width| {
+            if metadata.is_some() {
+                self.label
+            } else {
+                width.saturating_sub(STATUS_PREFIX_COLUMNS)
+            }
+        });
+        let label = clip(item.path.as_str(), label_width);
+        let status = item.status.styled();
+        match metadata {
+            Some(metadata) => {
+                let padding = self.label.saturating_sub(label.width());
+                // Format padding and metadata style directly into the final allocation.
+                format!("{status}  {label}{:padding$}  {DIM}{metadata}{DIM:#}", "")
+            }
+            None => format!("{status}  {label}"),
+        }
     }
 }
 
-/// Render a full group of items, computing the path column width once so
-/// every row's metadata (if any) lines up. Formatting is lazy after that
-/// width pass, so callers can stop immediately on a write failure.
-pub fn list_items<'a>(
-    items: impl Iterator<Item = ListItem<'a>> + Clone,
-) -> impl Iterator<Item = String> {
-    let path_width = items
-        .clone()
-        .filter(|i| i.metadata.is_some())
-        .map(|i| i.path.as_str().width())
-        .max()
-        .unwrap_or(0);
-    items.map(move |i| render_item(&i, path_width))
+fn clip(text: &str, columns: Option<usize>) -> Cow<'_, str> {
+    columns.map_or_else(|| Cow::Borrowed(text), |width| truncate(text, width))
 }
 
-/// Render resource details with bold labels and full-contrast, unwrapped values.
-/// Align within the block; repeated labels preserve individual glob patterns.
-pub fn fields(fields: &[(UserLine, UserLine)]) -> Vec<String> {
-    let width = fields
+/// Clip approved, escaped text before adding ANSI styles. Never split a
+/// grapheme (including combining marks and joined emoji).
+pub(crate) fn truncate(text: &str, columns: usize) -> Cow<'_, str> {
+    if text.width() <= columns {
+        return Cow::Borrowed(text);
+    }
+    if columns <= 3 {
+        return Cow::Owned(".".repeat(columns));
+    }
+    let mut result = String::new();
+    let mut width = 0;
+    for grapheme in text.graphemes(true) {
+        let next = grapheme.width();
+        if width + next > columns - 3 {
+            break;
+        }
+        result.push_str(grapheme);
+        width += next;
+    }
+    result.push_str("...");
+    Cow::Owned(result)
+}
+
+/// Align only visible items. Formatting stays lazy so write failures stop work.
+pub fn list_items<'a>(
+    items: impl Iterator<Item = ListItem<'a>> + Clone,
+    columns: Option<usize>,
+) -> impl Iterator<Item = String> {
+    let layout = RowColumns::measure(items.clone(), columns);
+    items.map(move |item| layout.render(&item))
+}
+
+/// Align field values within a block; stack labels on narrow terminals.
+/// Protected values remain copyable even when wider than the soft limit.
+pub fn fields(
+    output: &mut Output<'_>,
+    stream: Stream,
+    fields: &[(UserLine, UserLine)],
+) -> Result<(), WriteFailure> {
+    let width = output.prose_width(stream);
+    let label_width = fields
         .iter()
         .map(|(label, _)| label.as_str().width())
         .max()
         .unwrap_or(0);
-    fields
-        .iter()
-        .map(|(label, value)| {
-            format!(
-                "  {BOLD}{}{BOLD:#}: {}{}",
+    let stacked = width < super::layout::MIN_TWO_COLUMN_WIDTH || label_width + 4 > width / 2;
+    let indent = indentation(2, width);
+    for (label, value) in fields {
+        if stacked {
+            let label = UserLine::compose([label.clone(), UserLine::authored(":")]);
+            for line in flow::lines(&indent, &indent, &label, width) {
+                output.line(stream, format_args!("{BOLD}{line}{BOLD:#}"))?;
+            }
+            paragraph(output, stream, value, 4, Emphasis::Normal)?;
+        } else {
+            let prefix = format!(
+                "  {}: {}",
                 label.as_str(),
-                " ".repeat(width.saturating_sub(label.as_str().width())),
-                value.as_str()
-            )
-        })
-        .collect()
+                " ".repeat(label_width - label.as_str().width())
+            );
+            let continuation = " ".repeat(prefix.width());
+            for (index, line) in flow::lines(&prefix, &continuation, value, width).enumerate() {
+                if index == 0 {
+                    let gap = if line.body.is_empty() {
+                        0
+                    } else {
+                        label_width - label.as_str().width() + 1
+                    };
+                    output.line(
+                        stream,
+                        format_args!(
+                            "  {BOLD}{}{BOLD:#}:{:gap$}{}",
+                            label.as_str(),
+                            "",
+                            line.body
+                        ),
+                    )?;
+                } else {
+                    output.line(stream, format_args!("{line}"))?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
-/// Optional context for a list, between its rows and footer on the same stream.
-/// The entire line is dim: required warnings and recovery instructions must
-/// use standalone normal-contrast messages or diagnostics instead.
-pub fn list_hint(text: &UserLine) -> String {
-    dim(&hint_text(text, wrap_width()))
+/// Optional context below rows; required recovery uses normal paragraphs.
+#[cfg(test)]
+pub fn list_hint_text(text: &UserLine, width: usize) -> String {
+    flow::lines("hint: ", "      ", text, width)
+        .map(|line| dim(&line.to_string()))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
+#[cfg(test)]
 fn hint_text(text: &UserLine, width: usize) -> String {
     wrap_user_line("hint: ", text, width)
 }
 
-/// Render a list footer: optional dim statistics below the items,
-/// e.g. `5 changes across 4 files`. Omit the footer entirely
-/// (don't call this) when there's nothing worth summarizing.
-pub fn list_footer(text: &UserLine) -> String {
-    dim(text.as_str())
-}
-
-/// Terminal width to wrap prose at: the actual terminal width, capped at
-/// 100 columns so lines stay readable on very wide monitors, and falling
-/// back to 100 when the width can't be determined (piped output, no tty).
-/// Only for human prose (error messages, hints) -- never for paths,
-/// hashes, or other machine-readable output, which must never be wrapped.
-pub fn wrap_width() -> usize {
-    terminal_size::terminal_size().map_or(100, |(terminal_size::Width(w), _)| (w as usize).min(100))
-}
-
-/// Word-wraps `text` to `width` columns with a hanging indent: the first
-/// line is prefixed with `prefix` (e.g. `"hint: "`) and every wrapped
-/// continuation line is indented to align under `text`'s first
-/// character instead of under `prefix`, so a multi-line hint reads as
-/// one visually distinct paragraph rather than looking like a second,
-/// unrelated line.
-pub fn wrap_with_hanging_indent(prefix: &str, text: &str, width: usize) -> String {
-    wrap_words(prefix, text.split_whitespace(), width)
-}
-
-/// Wrap approved prose while preserving dynamic identities, even with spaces.
+#[cfg(test)]
 pub fn wrap_user_line(prefix: &str, text: &UserLine, width: usize) -> String {
-    wrap_words(prefix, text.wrapping_words(), width)
+    flow::wrap(prefix, &" ".repeat(prefix.width()), text, width)
 }
 
-fn wrap_words<'a>(prefix: &str, words: impl Iterator<Item = &'a str>, width: usize) -> String {
-    let indent_width = prefix.width();
-    let indent = " ".repeat(indent_width);
-    let mut out = String::new();
-    let mut column = indent_width;
-    let mut has_word = false;
-    for word in words {
-        if has_word {
-            if column + 1 + word.width() > width {
-                out.push('\n');
-                out.push_str(&indent);
-                column = indent_width;
-            } else {
-                out.push(' ');
-                column += 1;
-            }
-        } else {
-            out.push_str(prefix);
-        }
-        out.push_str(word);
-        column += word.width();
-        has_word = true;
-    }
-    out
+#[cfg(test)]
+fn wrap_with_hanging_indent(prefix: &str, text: &'static str, width: usize) -> String {
+    wrap_user_line(prefix, &UserLine::authored(text), width)
 }
 
 #[cfg(test)]
@@ -334,8 +554,274 @@ mod tests {
     use super::*;
     use crate::output::strip_ansi as plain;
 
+    fn capture(width: usize, full: bool, render: impl FnOnce(&mut Output<'_>)) -> String {
+        let mut bytes = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut bytes, &mut stderr);
+        output.set_layouts(
+            super::super::OutputLayout::bounded(width),
+            super::super::OutputLayout::default(),
+        );
+        output.set_full_output(full);
+        render(&mut output);
+        plain(&String::from_utf8(bytes).unwrap())
+    }
+
+    #[test]
+    fn an_empty_heading_summary_does_not_create_an_extra_block_when_stacked() {
+        for width in [1, 8, 40, 100] {
+            let rendered = capture(width, false, |output| {
+                success_heading(
+                    output,
+                    Stream::Stdout,
+                    &UserLine::authored("Summary"),
+                    &UserLine::authored(""),
+                )
+                .unwrap();
+            });
+            assert!(!rendered.ends_with("\n\n"));
+            assert!(rendered.contains("Summary:"));
+        }
+    }
+
+    #[test]
+    fn durable_elements_share_width_and_keep_prose_in_full_mode() {
+        let body = UserLine::authored("A few files need care before the next sync can start.");
+        for width in [20, 39, 40, 80, 100, 140] {
+            let render = |output: &mut Output<'_>| {
+                super::success_heading(output, Stream::Stdout, &UserLine::authored("Sync"), &body)
+                    .unwrap();
+                super::list_hint(output, Stream::Stdout, &body).unwrap();
+                super::list_footer(output, Stream::Stdout, &body).unwrap();
+                super::fields(
+                    output,
+                    Stream::Stdout,
+                    &[(UserLine::authored("Note"), body.clone())],
+                )
+                .unwrap();
+            };
+            let compact = capture(width, false, render);
+            assert_eq!(compact, capture(width, true, render));
+            for line in compact.lines() {
+                assert!(line.width() <= width.min(100), "{width}: {line:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn fields_stack_below_minimum_and_align_continuation_values() {
+        let entries = [(
+            UserLine::authored("Note"),
+            UserLine::authored("A few files need care before the next sync can start."),
+        )];
+        let narrow = capture(39, false, |output| {
+            super::fields(output, Stream::Stdout, &entries).unwrap();
+        });
+        assert!(narrow.starts_with("  Note:\n    A few"));
+        assert!(narrow.lines().skip(1).all(|line| line.starts_with("    ")));
+        let wide = capture(40, false, |output| {
+            super::fields(output, Stream::Stdout, &entries).unwrap();
+        });
+        assert!(wide.starts_with("  Note: A few"));
+        assert!(
+            wide.lines()
+                .skip(1)
+                .all(|line| line.starts_with("        "))
+        );
+    }
+
+    #[test]
+    fn stream_widths_are_independent_and_zero_is_normalized() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr);
+        output.set_layouts(
+            super::super::OutputLayout::bounded(20),
+            super::super::OutputLayout::bounded(80),
+        );
+        let text = UserLine::authored("A few files need care before the next sync can start.");
+        super::list_hint(&mut output, Stream::Stdout, &text).unwrap();
+        super::list_hint(&mut output, Stream::Stderr, &text).unwrap();
+        assert!(plain(&String::from_utf8(stdout).unwrap()).lines().count() > 1);
+        assert_eq!(
+            plain(&String::from_utf8(stderr).unwrap()).lines().count(),
+            1
+        );
+        assert_eq!(super::super::OutputLayout::bounded(0).prose_width(), 1);
+    }
+
+    #[test]
+    fn field_values_preserve_spaces_and_escaped_controls() {
+        let value = UserLine::identifier("  日本語 file  \n\u{1b}");
+        for width in [1, 8, 39, 40, 100] {
+            let rendered = capture(width, false, |output| {
+                super::fields(
+                    output,
+                    Stream::Stdout,
+                    &[(UserLine::authored("Path"), value.clone())],
+                )
+                .unwrap();
+            });
+            assert!(rendered.contains(value.as_str()));
+            assert!(!rendered.contains('\u{1b}'));
+        }
+    }
+
+    #[test]
+    fn group_headings_preserve_protected_spaces_and_do_not_pad_empty_prefixes() {
+        for width in [1, 2, 8, 40, 100] {
+            let title = UserLine::identifier("  release  ");
+            let rendered = capture(width, false, |output| {
+                status_group(output, Stream::Stdout, Status::Success, &title).unwrap();
+            });
+            assert!(rendered.contains(title.as_str()));
+            if width <= 2 {
+                assert_eq!(rendered.lines().next(), Some("✓"));
+            }
+        }
+    }
+
+    #[test]
+    fn indentation_collapses_consistently_when_it_consumes_the_width() {
+        for width in [1, 2] {
+            let rendered = capture(width, false, |output| {
+                paragraph(
+                    output,
+                    Stream::Stdout,
+                    &UserLine::authored("a b"),
+                    2,
+                    Emphasis::Normal,
+                )
+                .unwrap();
+            });
+            assert_eq!(rendered, "a\nb\n");
+        }
+    }
+
+    #[test]
+    fn field_styling_targets_the_label_even_when_it_is_whitespace() {
+        let mut bytes = Vec::new();
+        super::fields(
+            &mut Output::new(&mut bytes, &mut Vec::new()),
+            Stream::Stdout,
+            &[(UserLine::identifier(" "), UserLine::authored("value"))],
+        )
+        .unwrap();
+        let rendered = String::from_utf8(bytes).unwrap();
+        assert_eq!(rendered, format!("  {BOLD} {BOLD:#}: value\n"));
+    }
+
+    fn fields(entries: &[(UserLine, UserLine)]) -> Vec<String> {
+        let mut bytes = Vec::new();
+        super::fields(
+            &mut Output::new(&mut bytes, &mut Vec::new()),
+            Stream::Stdout,
+            entries,
+        )
+        .unwrap();
+        String::from_utf8(bytes)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
     fn list_items(items: &[ListItem<'_>]) -> Vec<String> {
-        super::list_items(items.iter().cloned()).collect()
+        super::list_items(items.iter().cloned(), None).collect()
+    }
+
+    #[test]
+    fn uncut_text_is_borrowed_and_narrow_layout_skips_alignment() {
+        assert!(matches!(truncate("日本語", 6), Cow::Borrowed(_)));
+        assert!(matches!(clip("complete label", None), Cow::Borrowed(_)));
+        let path = UserLine::authored("data.bin");
+        let visits = std::cell::Cell::new(0);
+        let items = (0..10).map(|_| {
+            visits.set(visits.get() + 1);
+            ListItem::new(Status::Success, &path)
+        });
+        let mut lines = super::list_items(items, Some(39));
+        assert_eq!(visits.get(), 0);
+        assert_eq!(plain(&lines.next().unwrap()), "✓  data.bin");
+        assert_eq!(visits.get(), 1);
+    }
+
+    #[test]
+    fn every_status_symbol_has_the_width_reserved_by_row_layout() {
+        for status in [
+            Status::Pending,
+            Status::Success,
+            Status::Warning,
+            Status::Error,
+            Status::Added,
+            Status::Modified,
+            Status::Deleted,
+            Status::Renamed,
+            Status::Copied,
+            Status::Untracked,
+            Status::Ignored,
+            Status::Conflict,
+            Status::Skipped,
+        ] {
+            assert_eq!(status.symbol().width() + COLUMN_GAP, STATUS_PREFIX_COLUMNS);
+        }
+    }
+
+    #[test]
+    fn bounded_rows_fit_unicode_and_ansi_at_every_width() {
+        let path = UserLine::identifier("日本語/e\u{301}/👩‍💻/long-file-name.bin\n\t\u{1b}[31m");
+        let meta = UserLine::authored("new, cached (mount extremely-long-name)");
+        for width in 0..=150 {
+            let row = super::list_items(
+                std::iter::once(ListItem::with_metadata(Status::Added, &path, &meta)),
+                Some(width),
+            )
+            .next()
+            .unwrap();
+            let plain = plain(&row);
+            assert!(plain.width() <= width, "width {width}: {plain:?}");
+            assert!(!plain.contains(['\n', '\r', '\t', '\u{1b}']));
+        }
+        assert_eq!(truncate("e\u{301}abcdef", 4), "e\u{301}...");
+        assert_eq!(truncate("👩‍💻abcdef", 5), "👩‍💻...");
+    }
+
+    #[test]
+    fn two_column_layout_respects_its_minimum_width() {
+        let path = UserLine::authored("data.bin");
+        let detail = UserLine::authored("cached");
+        for (width, expected) in [(39, "✓  data.bin"), (40, "✓  data.bin  cached")] {
+            let line = super::list_items(
+                std::iter::once(ListItem::with_metadata(Status::Success, &path, &detail)),
+                Some(width),
+            )
+            .next()
+            .unwrap();
+            assert_eq!(plain(&line), expected);
+        }
+    }
+
+    #[test]
+    fn bounded_metadata_aligns_and_hidden_rows_do_not_affect_columns() {
+        let short = UserLine::authored("short");
+        let long = UserLine::authored("a-very-long-label-that-needs-truncation");
+        let new = UserLine::authored("new");
+        let cached = UserLine::authored("cached");
+        let items = [
+            ListItem::with_metadata(Status::Added, &short, &new),
+            ListItem::with_metadata(Status::Success, &long, &cached),
+        ];
+        let lines: Vec<_> = super::list_items(items.iter().cloned(), Some(40))
+            .map(|line| plain(&line))
+            .collect();
+        assert_eq!(
+            lines[0][..lines[0].find("new").unwrap()].width(),
+            lines[1][..lines[1].find("cached").unwrap()].width()
+        );
+        let only = super::list_items(items.iter().take(1).cloned(), Some(40))
+            .next()
+            .unwrap();
+        assert_eq!(plain(&only), "A  short  new");
     }
 
     #[test]
@@ -346,7 +832,7 @@ mod tests {
             visits.set(visits.get() + 1);
             ListItem::new(Status::Success, &path)
         });
-        let mut lines = super::list_items(items);
+        let mut lines = super::list_items(items, None);
         assert_eq!(visits.get(), 10); // Width pass only.
         assert!(lines.next().is_some());
         drop(lines); // A failed writer does not request another row.
@@ -449,9 +935,10 @@ mod tests {
 
     #[test]
     fn list_heading_keeps_symbol_and_label_when_ansi_stripped() {
-        let heading = success_heading(
+        let heading = success_heading_text(
             &UserLine::identifier("Tracked files"),
             &UserLine::number(24),
+            100,
         );
         assert_eq!(plain(&heading), "✓ Tracked files: 24");
     }
