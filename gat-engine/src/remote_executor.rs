@@ -1257,8 +1257,9 @@ mod tests {
             let current = Arc::new(AtomicUsize::new(0));
             let peak = Arc::new(AtomicUsize::new(0));
 
+            // Sequential windows in one session reuse the same remote identities.
+            let (_dir, remote_of) = remotes(&["a", "b", "c", "d", "e", "f", "g", "h"]);
             for window_index in 0..20 {
-                let (_dir, remote_of) = remotes(&["a", "b", "c", "d", "e", "f", "g", "h"]);
                 let total = remote_of.len();
                 let current = Arc::clone(&current);
                 let peak = Arc::clone(&peak);

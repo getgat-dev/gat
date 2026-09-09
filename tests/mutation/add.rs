@@ -2561,25 +2561,14 @@ mod tests {
             )
             .unwrap();
 
-            // Toggle `lock.shard_levels` back to flat before this
-            // iteration's race, so the concurrent `reshape_lock` call
-            // below always has an actual shape change to perform (not a
-            // no-op that would never touch the live path at all).
+            // Alternate directions so every race reshapes the live lock,
+            // without a second, serial reshape just to reset the fixture.
+            let target_depth = if i % 2 == 0 { "2" } else { "0" };
             gat_command::config(
                 &repo,
                 gat_command::ConfigRequest {
                     key: gat_core::config_keys::ConfigKey::LockShardLevels,
-                    action: gat_command::ConfigAction::Set(vec!["0".to_string()]),
-                    scope: gat_core::config::ConfigScope::Project,
-                },
-            )
-            .unwrap();
-            repo.reshape_lock().unwrap();
-            gat_command::config(
-                &repo,
-                gat_command::ConfigRequest {
-                    key: gat_core::config_keys::ConfigKey::LockShardLevels,
-                    action: gat_command::ConfigAction::Set(vec!["2".to_string()]),
+                    action: gat_command::ConfigAction::Set(vec![target_depth.to_string()]),
                     scope: gat_core::config::ConfigScope::Project,
                 },
             )

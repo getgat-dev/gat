@@ -336,28 +336,32 @@ fn remote_status_progress_reports_selection_resolution_and_remote_checks() {
 fn remote_status_position_equals_checked_count_and_is_never_doubled() {
     use gat_engine::ExecutionLimits;
 
-    for window in [1usize, 2, 3, 5] {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let _guard = rt.enter();
-        opendal::init_default_registry();
-        let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
-        let remote_dir = tempfile::tempdir().unwrap();
-        remote_add_with_default(
-            &repo,
-            "origin",
-            gat_io::remote_file_url_for_test(remote_dir.path()),
-        )
-        .unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    opendal::init_default_registry();
+    let tmp = test_repo();
+    let repo = Repo::at(tmp.path().to_path_buf());
+    let remote_dir = tempfile::tempdir().unwrap();
+    remote_add_with_default(
+        &repo,
+        "origin",
+        gat_io::remote_file_url_for_test(remote_dir.path()),
+    )
+    .unwrap();
 
+    // Grow one repository between cases; each operation still checks the
+    // original number of objects across three full windows and a tail.
+    let mut seeded = 0;
+    for window in [1usize, 2, 3, 5] {
         let count = window * 3 + 1;
         let mut paths = Vec::new();
-        for i in 0..count {
+        for i in seeded..count {
             let path = format!("obj-{i}.bin");
             std::fs::write(tmp.path().join(&path), format!("payload-{i}").as_bytes()).unwrap();
             paths.push(PathBuf::from(path));
         }
         add(&repo, &paths, &NoopProgress).unwrap();
+        seeded = count;
 
         let limits = ExecutionLimits::for_test(window, 10_000, 4096, 8, 4);
         let progress = RecordingProgress::new();

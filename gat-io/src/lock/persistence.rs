@@ -4271,18 +4271,22 @@ mod tests {
         // `shards` and `log2(shards)` are clearly distinguishable.
         let tmp = tempfile::tempdir().unwrap();
         let mut lock = Lock::default();
-        let rows = 2_000;
+        // Hundreds of shards already separate heap and linear-scan costs.
+        let rows = 256;
         for i in 0..rows {
             insert(&mut lock, &format!("data/f{i:05}.bin"), format!("{i:064x}"));
         }
         save(
             &lock,
             tmp.path(),
-            crate::lock::LockShardLevels::new(3).unwrap(),
+            crate::lock::LockShardLevels::new(1).unwrap(),
         )
         .unwrap();
         let shard_count = list_shard_files(tmp.path()).unwrap().len();
-        assert!(shard_count > 1, "fixture must actually be sharded");
+        assert!(
+            shard_count >= 128,
+            "fixture must distinguish heap and scan costs"
+        );
 
         let before = crate::lock::test_support::merge_head_comparisons();
         let mut kept = 0;

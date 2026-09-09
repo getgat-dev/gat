@@ -2340,19 +2340,21 @@ mod tests {
         // but through the large-file `ingest_file` path (safe/hybrid/mmap),
         // whose temp-file handling and finalization differ from the
         // streaming `ingest`.
+        let tmp = tempfile::tempdir().unwrap();
+        let srcs: Vec<(PathBuf, Vec<u8>)> = (0..8)
+            .map(|i| {
+                let content: Vec<u8> = (0..150_000usize)
+                    .map(|b| ((b + i * 37) % 251).to_le_bytes()[0])
+                    .collect();
+                let src = tmp.path().join(format!("src-{i}.bin"));
+                std::fs::write(&src, &content).unwrap();
+                (src, content)
+            })
+            .collect();
+        // Strategies share only immutable sources; each starts with an empty
+        // cache so all workers still exercise publication and deduplication.
         for strategy in IngestStrategy::ALL {
-            let tmp = tempfile::tempdir().unwrap();
-            let objects_dir = tmp.path().join("objects");
-            let srcs: Vec<(PathBuf, Vec<u8>)> = (0..8)
-                .map(|i| {
-                    let content: Vec<u8> = (0..150_000usize)
-                        .map(|b| ((b + i * 37) % 251).to_le_bytes()[0])
-                        .collect();
-                    let src = tmp.path().join(format!("src-{i}.bin"));
-                    std::fs::write(&src, &content).unwrap();
-                    (src, content)
-                })
-                .collect();
+            let objects_dir = tmp.path().join(format!("objects-{strategy:?}"));
             std::thread::scope(|s| {
                 for (src, content) in &srcs {
                     let objects_dir = &objects_dir;
@@ -2375,14 +2377,17 @@ mod tests {
         // concurrently, each through its own independently-created temp
         // file. Whichever wins the publish race, every thread must observe
         // the same correct oid and the final on-disk bytes must match it.
+        let tmp = tempfile::tempdir().unwrap();
+        let content: Vec<u8> = (0..250_000usize)
+            .map(|i| (i % 197).to_le_bytes()[0])
+            .collect();
+        let src = tmp.path().join("src.bin");
+        std::fs::write(&src, &content).unwrap();
+        let expected_oid = Oid::from_bytes(*(blake3::hash(&content)).as_bytes());
+        // Strategies share only immutable sources; each starts with an empty
+        // cache so all workers still exercise publication and deduplication.
         for strategy in IngestStrategy::ALL {
-            let tmp = tempfile::tempdir().unwrap();
-            let objects_dir = tmp.path().join("objects");
-            let content: Vec<u8> = (0..250_000usize)
-                .map(|i| (i % 197).to_le_bytes()[0])
-                .collect();
-            let src = tmp.path().join("src.bin");
-            std::fs::write(&src, &content).unwrap();
+            let objects_dir = tmp.path().join(format!("objects-{strategy:?}"));
             let oids: Vec<Oid> = std::thread::scope(|s| {
                 #[allow(
                     clippy::needless_collect,
@@ -2399,7 +2404,6 @@ mod tests {
                     .collect();
                 handles.into_iter().map(|h| h.join().unwrap()).collect()
             });
-            let expected_oid = Oid::from_bytes(*(blake3::hash(&content)).as_bytes());
             assert!(
                 oids.iter().all(|oid| *oid == expected_oid),
                 "strategy {strategy:?}"
@@ -2735,19 +2739,19 @@ mod tests {
     fn ingest_large_file_hashes_and_stores_correctly() {
         // Large enough to meaningfully exercise the mmap/rayon hashing
         // path in `ingest_file`, not just the small in-memory buffer path.
+        // Deterministic pseudo-random-ish content (not all-same-byte) so a
+        // hasher bug that only shows up on varied input would be caught.
+        let content: Vec<u8> = (0..8_000_000usize)
+            .map(|i| (i % 251).to_le_bytes()[0])
+            .collect();
+        let expected_oid = Oid::from_bytes(*(blake3::hash(&content)).as_bytes());
         for strategy in IngestStrategy::ALL {
             let tmp = tempfile::tempdir().unwrap();
             let objects_dir = tmp.path().join("objects");
             let src = tmp.path().join("large.bin");
-            // Deterministic pseudo-random-ish content (not all-same-byte) so a
-            // hasher bug that only shows up on varied input would be caught.
-            let content: Vec<u8> = (0..8_000_000usize)
-                .map(|i| (i % 251).to_le_bytes()[0])
-                .collect();
             std::fs::write(&src, &content).unwrap();
 
             let ingested = ingest_file(&objects_dir, &src, strategy, |_| {}).unwrap();
-            let expected_oid = Oid::from_bytes(*(blake3::hash(&content)).as_bytes());
             assert_eq!(ingested.oid, expected_oid, "strategy {strategy:?}");
             assert_eq!(ingested.size, content.len() as u64, "strategy {strategy:?}");
             let stored = std::fs::read(cache_path_oid(&objects_dir, &ingested.oid)).unwrap();
@@ -3057,12 +3061,15 @@ mod tests {
         fn verify_windows_yields_more_than_one_window_past_the_verify_window_bound() {
             let tmp = tempfile::tempdir().unwrap();
             let objects_dir = tmp.path().join("objects");
-            // More than one `VERIFY_WINDOW`, so `verify_windows` must call
+            // More than one `window_size`, so `verify_windows` must call
             // back more than once rather than internally collecting the
             // whole input before yielding a single combined result: each
             // window is fully verified/persisted and handed to
             // the caller before the next window is even looked up.
-            let count = VERIFY_WINDOW + 1;
+            // Exercise the production windowing logic with small real-file fixtures.
+            let window_size = 8;
+            let _window = crate::cache::object::test_support::with_verify_window(window_size);
+            let count = window_size + 1;
             let oids = write_objects(&objects_dir, count);
             let cache = CacheClient::open(objects_dir);
 
@@ -3072,7 +3079,7 @@ mod tests {
                 .verify_windows(&oids, |window_oids, statuses| -> Result<()> {
                     window_calls += 1;
                     assert_eq!(window_oids.len(), statuses.len());
-                    assert!(window_oids.len() <= VERIFY_WINDOW);
+                    assert!(window_oids.len() <= window_size);
                     seen += window_oids.len();
                     assert!(
                         statuses
@@ -3091,11 +3098,14 @@ mod tests {
         fn verify_windows_unmemoized_does_not_retain_verification_state_past_its_own_window() {
             let tmp = tempfile::tempdir().unwrap();
             let objects_dir = tmp.path().join("objects");
-            // More than one `VERIFY_WINDOW`, and every oid is distinct
+            // More than one `window_size`, and every oid is distinct
             // (already globally deduplicated, matching how `push`/`fetch`
             // call this), so nothing here can ever benefit from
             // cross-window memoization.
-            let count = VERIFY_WINDOW + 1;
+            // Exercise the production windowing logic with small real-file fixtures.
+            let window_size = 8;
+            let _window = crate::cache::object::test_support::with_verify_window(window_size);
+            let count = window_size + 1;
             let oids = write_objects(&objects_dir, count);
             let cache = CacheClient::open(objects_dir);
 
@@ -3114,7 +3124,7 @@ mod tests {
                 .unwrap();
 
             assert!(
-                max_memo_len <= VERIFY_WINDOW,
+                max_memo_len <= window_size,
                 "expected retained memo state to stay bounded by one window, got {max_memo_len}"
             );
             assert_eq!(
@@ -3129,16 +3139,20 @@ mod tests {
         fn memo_high_water_counter_stays_bounded_by_one_window_across_a_large_unmemoized_run() {
             let tmp = tempfile::tempdir().unwrap();
             let objects_dir = tmp.path().join("objects");
-            let count = VERIFY_WINDOW + 1;
+            // Exercise the production windowing logic with small real-file fixtures.
+            let window_size = 8;
+            let _window = crate::cache::object::test_support::with_verify_window(window_size);
+            let count = window_size + 1;
             let oids = write_objects(&objects_dir, count);
             let cache = CacheClient::open(objects_dir);
 
+            crate::cache::object::test_support::reset_memo_high_water();
             cache
                 .verify_windows_unmemoized(&oids, |_, _| -> Result<()> { Ok(()) })
                 .unwrap();
 
             assert!(
-                crate::cache::object::test_support::memo_high_water() <= VERIFY_WINDOW,
+                crate::cache::object::test_support::memo_high_water() <= window_size,
                 "expected the item-68 memo high-water counter to stay bounded by one window, \
                  got {}",
                 crate::cache::object::test_support::memo_high_water()
@@ -3151,13 +3165,16 @@ mod tests {
         fn verify_windows_unmemoized_panics_on_a_duplicate_more_than_one_window_apart() {
             let tmp = tempfile::tempdir().unwrap();
             let objects_dir = tmp.path().join("objects");
-            // Enough distinct objects to span more than one `VERIFY_WINDOW`,
+            // Enough distinct objects to span more than one `window_size`,
             // then repeat the very first oid at the very end -- more than
-            // `VERIFY_WINDOW` elements separate the two occurrences, so a
+            // `window_size` elements separate the two occurrences, so a
             // dedup check scoped to only the *current* window would never
             // observe both appearances together and would miss this
             // violation entirely.
-            let count = VERIFY_WINDOW + 1;
+            // Exercise the production windowing logic with small real-file fixtures.
+            let window_size = 8;
+            let _window = crate::cache::object::test_support::with_verify_window(window_size);
+            let count = window_size + 1;
             let mut oids = write_objects(&objects_dir, count);
             oids.push(oids[0]);
             let cache = CacheClient::open(objects_dir);

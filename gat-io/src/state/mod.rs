@@ -1873,9 +1873,10 @@ mod tests {
         let tmp = git_repo();
         let repo = Repo::at(tmp.path().to_path_buf());
         let mut store = StateStore::open(&repo).unwrap();
-        let rows = (0..sql_chunk_size(1) * 2 + 3)
-            .map(|i| entry(&format!("data/{i:05}.bin"), 1, 0))
-            .collect::<Vec<_>>();
+        // Query batching depends on input count, not distinct stored rows.
+        // Keep the full SQL bind boundary without seeding tens of thousands
+        // of unrelated rows; the final batch contributes a different shard.
+        let rows = vec![entry("data/a.bin", 1, 0)];
         seed_desired_shard(&mut store, sid("gat.lock/aa.tsv"), 1, rows.clone());
         seed_desired_shard(
             &mut store,
@@ -1884,8 +1885,13 @@ mod tests {
             vec![entry("z.bin", 2, 0)],
         );
         let z = gp("z.bin");
+        let missing = gp("missing.bin");
         let ids = store
-            .desired_shard_ids_for_paths(rows.iter().map(|entry| &entry.path).chain([&z]))
+            .desired_shard_ids_for_paths(
+                std::iter::once(&rows[0].path)
+                    .chain(std::iter::repeat_n(&missing, sql_chunk_size(1) * 2 + 3))
+                    .chain([&z]),
+            )
             .unwrap();
         assert_eq!(
             ids,

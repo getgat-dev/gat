@@ -1606,11 +1606,16 @@ mod add_snapshot_tests {
                 }],
             };
             LockStore::publish_repository(&layout, &lock, target).unwrap();
+            // One full 4096-row publication window plus a partial second
+            // window must still render the shared shard only once.
             let entries: Vec<_> = (0..)
-                .map(|index| GatPath::parse_canonical(&format!("data/{index}.bin")).unwrap())
-                .filter(|path| crate::lock::shard_id_for_path(path, target) == shard)
-                .take(8200)
+                .map(|index| format!("data/{index}.bin"))
+                // Generated ASCII paths are canonical by construction. Avoid
+                // parsing the roughly 255 rejected candidates per retained row.
+                .filter(|path| gat_core::lock::validated::shard_id_for_path(path, target) == shard)
+                .take(4097)
                 .map(|path| {
+                    let path = GatPath::parse_canonical(&path).unwrap();
                     PreparedMaterialization::new(
                         Entry {
                             path,
@@ -1629,7 +1634,7 @@ mod add_snapshot_tests {
                 1
             );
             mutation.record_published_materialized().unwrap();
-            assert_eq!(LockStore::load_all(tmp.path()).unwrap().entries.len(), 8201);
+            assert_eq!(LockStore::load_all(tmp.path()).unwrap().entries.len(), 4098);
         });
     }
 

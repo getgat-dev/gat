@@ -126,12 +126,10 @@ mod tests {
     use gat_io::StateStore;
     use std::path::Path;
 
-    fn ingest(repo: &Repo, content: impl std::io::Read) -> gat_io::Ingested {
-        repo.resolved_cache_root()
-            .writer()
-            .ingest(content)
-            .unwrap()
-            .0
+    // Desired-state reconciliation reads lock rows, never cache objects.
+    // Keep content-derived OIDs without creating an unused object/proof cache.
+    fn content_oid(content: &[u8]) -> gat_core::oid::Oid {
+        gat_core::oid::Oid::from_bytes(*blake3::hash(content).as_bytes())
     }
 
     fn refresh_with_threads(
@@ -161,8 +159,8 @@ mod tests {
     /// `refresh()` call observes it.
     fn track(repo: &Repo, path: &str, content: &[u8]) {
         let mut lock = gat_io::LockStore::load_repository(repo.layout()).unwrap();
-        let ingested = ingest(repo, content);
-        lock.upsert(GatPath::parse_canonical(path).unwrap(), ingested.oid);
+        let oid = content_oid(content);
+        lock.upsert(GatPath::parse_canonical(path).unwrap(), oid);
         repo.save_lock(&lock).unwrap();
     }
 
@@ -177,10 +175,10 @@ mod tests {
         refresh(&repo, &mut store).unwrap();
 
         // Change the shard's content directly (a new entry), independent
-        // of `track`'s own object-store ingestion plumbing.
+        // of the `track` helper's lock publication.
         let mut lock = gat_io::LockStore::load_repository(repo.layout()).unwrap();
-        let replacement = ingest(&repo, &b"updated"[..]);
-        lock.upsert(GatPath::parse_canonical("a.bin").unwrap(), replacement.oid);
+        let replacement_oid = content_oid(&b"updated"[..]);
+        lock.upsert(GatPath::parse_canonical("a.bin").unwrap(), replacement_oid);
         gat_io::LockStore::publish_repository(
             repo.layout(),
             &lock,
@@ -286,10 +284,10 @@ mod tests {
         let mut lock = Lock::default();
         for i in 0..48 {
             let content = format!("payload-{i}");
-            let ingested = ingest(&repo, content.as_bytes());
+            let oid = content_oid(content.as_bytes());
             lock.upsert(
                 GatPath::parse_canonical(&format!("file-{i}.bin")).unwrap(),
-                ingested.oid,
+                oid,
             );
         }
         gat_io::LockStore::publish_repository(
@@ -306,10 +304,10 @@ mod tests {
             gat_core::lock::LockShardLevels::new(2).unwrap()
         );
 
-        let replacement = ingest(&repo, &b"updated payload"[..]);
+        let replacement_oid = content_oid(&b"updated payload"[..]);
         lock.upsert(
             GatPath::parse_canonical("file-0.bin").unwrap(),
-            replacement.oid,
+            replacement_oid,
         );
         gat_io::LockStore::publish_repository(
             repo.layout(),
@@ -341,10 +339,10 @@ mod tests {
             // `refresh_correctly_reconciles_many_shards_at_once` does).
             for i in 0..24 {
                 let content = format!("payload-{i}");
-                let ingested = ingest(&repo, content.as_bytes());
+                let oid = content_oid(content.as_bytes());
                 lock.upsert(
                     GatPath::parse_canonical(&format!("dir/file-{i}.bin")).unwrap(),
-                    ingested.oid,
+                    oid,
                 );
             }
             gat_io::LockStore::publish_repository(
@@ -361,16 +359,10 @@ mod tests {
         for (lock, repo) in [(&mut lock_a, &repo_a), (&mut lock_b, &repo_b)] {
             lock.entries
                 .retain(|entry| !entry.path.as_str().ends_with("5.bin"));
-            let ingested = ingest(repo, &b"replaced"[..]);
-            lock.upsert(
-                GatPath::parse_canonical("dir/file-0.bin").unwrap(),
-                ingested.oid,
-            );
-            let ingested = ingest(repo, &b"another replacement"[..]);
-            lock.upsert(
-                GatPath::parse_canonical("dir/extra.bin").unwrap(),
-                ingested.oid,
-            );
+            let oid = content_oid(&b"replaced"[..]);
+            lock.upsert(GatPath::parse_canonical("dir/file-0.bin").unwrap(), oid);
+            let oid = content_oid(&b"another replacement"[..]);
+            lock.upsert(GatPath::parse_canonical("dir/extra.bin").unwrap(), oid);
             gat_io::LockStore::publish_repository(
                 repo.layout(),
                 lock,
@@ -530,8 +522,8 @@ mod tests {
         let tmp = git_repo();
         let repo = Repo::at(tmp.path().to_path_buf());
         let mut lock = gat_io::LockStore::load_repository(repo.layout()).unwrap();
-        let ingested = ingest(&repo, &b"hello"[..]);
-        lock.upsert(GatPath::parse_canonical("a.bin").unwrap(), ingested.oid);
+        let oid = content_oid(&b"hello"[..]);
+        lock.upsert(GatPath::parse_canonical("a.bin").unwrap(), oid);
         let mut store = StateStore::open(repo.layout()).unwrap();
         store
             .publish_desired_complete::<SyncError>(
@@ -557,8 +549,8 @@ mod tests {
         let tmp = git_repo();
         let repo = Repo::at(tmp.path().to_path_buf());
         let mut lock = gat_io::LockStore::load_repository(repo.layout()).unwrap();
-        let ingested = ingest(&repo, &b"hello"[..]);
-        lock.upsert(GatPath::parse_canonical("a.bin").unwrap(), ingested.oid);
+        let oid = content_oid(&b"hello"[..]);
+        lock.upsert(GatPath::parse_canonical("a.bin").unwrap(), oid);
         let mut store = StateStore::open(repo.layout()).unwrap();
         store
             .publish_desired_complete::<SyncError>(
@@ -587,17 +579,17 @@ mod tests {
         let tmp = git_repo();
         let repo = Repo::at(tmp.path().to_path_buf());
         let mut lock = gat_io::LockStore::load_repository(repo.layout()).unwrap();
-        let ingested = ingest(&repo, &b"before"[..]);
-        lock.upsert(GatPath::parse_canonical("a.bin").unwrap(), ingested.oid);
+        let oid = content_oid(&b"before"[..]);
+        lock.upsert(GatPath::parse_canonical("a.bin").unwrap(), oid);
         repo.save_lock(&lock).unwrap();
 
         // Precompute a still-valid, but different-length, rewrite of the
         // shard (an extra tracked path) so the hook below only has to
-        // write already-ingested bytes, not race real ingestion against
-        // the read itself.
+        // write the prepared lock bytes without doing fixture setup
+        // during the read itself.
         let mut rewritten = lock.clone();
-        let ingested2 = ingest(&repo, &b"after-rewrite-payload"[..]);
-        rewritten.upsert(GatPath::parse_canonical("b.bin").unwrap(), ingested2.oid);
+        let rewritten_oid = content_oid(&b"after-rewrite-payload"[..]);
+        rewritten.upsert(GatPath::parse_canonical("b.bin").unwrap(), rewritten_oid);
         rewritten.entries.sort_by(|a, b| a.path.cmp(&b.path));
         let rewritten_bytes = rewritten.to_string();
 
@@ -647,8 +639,8 @@ mod tests {
         let tmp = git_repo();
         let repo = Repo::at(tmp.path().to_path_buf());
         let mut lock = gat_io::LockStore::load_repository(repo.layout()).unwrap();
-        let ingested = ingest(&repo, &b"fresh-checkout"[..]);
-        lock.upsert(GatPath::parse_canonical("a.bin").unwrap(), ingested.oid);
+        let oid = content_oid(&b"fresh-checkout"[..]);
+        lock.upsert(GatPath::parse_canonical("a.bin").unwrap(), oid);
         repo.save_lock(&lock).unwrap();
 
         let mut store = StateStore::open(repo.layout()).unwrap();
@@ -674,8 +666,8 @@ mod tests {
         let tmp = git_repo();
         let repo = Repo::at(tmp.path().to_path_buf());
         let mut lock = gat_io::LockStore::load_repository(repo.layout()).unwrap();
-        let ingested = ingest(&repo, &b"hello"[..]);
-        lock.upsert(GatPath::parse_canonical("a.bin").unwrap(), ingested.oid);
+        let oid = content_oid(&b"hello"[..]);
+        lock.upsert(GatPath::parse_canonical("a.bin").unwrap(), oid);
         gat_io::LockStore::publish_repository(
             repo.layout(),
             &lock,
@@ -1007,10 +999,10 @@ mod tests {
         // `refresh()` call
         for i in 0..24 {
             let content = format!("payload-{i}");
-            let ingested = ingest(&repo, content.as_bytes());
+            let oid = content_oid(content.as_bytes());
             lock.upsert(
                 GatPath::parse_canonical(&format!("nested/file-{i}.bin")).unwrap(),
-                ingested.oid,
+                oid,
             );
         }
         gat_io::LockStore::publish_repository(
@@ -1027,18 +1019,18 @@ mod tests {
             .retain(|entry| !entry.path.as_str().ends_with("0.bin"));
         for i in 0..12 {
             let content = format!("replacement-{i}");
-            let ingested = ingest(&repo, content.as_bytes());
+            let oid = content_oid(content.as_bytes());
             lock.upsert(
                 GatPath::parse_canonical(&format!("nested/file-{}.bin", i * 3 + 1)).unwrap(),
-                ingested.oid,
+                oid,
             );
         }
         for i in 24..36 {
             let content = format!("new-{i}");
-            let ingested = ingest(&repo, content.as_bytes());
+            let oid = content_oid(content.as_bytes());
             lock.upsert(
                 GatPath::parse_canonical(&format!("nested/file-{i}.bin")).unwrap(),
-                ingested.oid,
+                oid,
             );
         }
         gat_io::LockStore::publish_repository(

@@ -30,31 +30,33 @@ fn explicit_repository_union_and_history_selection_match_for_both_targets() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let _guard = runtime.enter();
     for remote_target in [false, true] {
+        let storage = tempfile::tempdir().unwrap();
+        let current = test_repo();
+        let repo = Repository::at(current.path().to_path_buf());
+        let remote_name = if remote_target {
+            Some(use_remote(&repo, storage.path()))
+        } else {
+            use_shared_cache(&repo, storage.path());
+            None
+        };
+        let current_oid = track(&repo, current.path(), "current.bin", b"current");
+        let peer = test_repo();
+        let peer_repo = Repository::at(peer.path().to_path_buf());
+        let old = track(&peer_repo, peer.path(), "old.bin", b"old");
+        commit_all(peer.path(), "old");
+        untrack(&peer_repo, peer.path(), "old.bin");
+        let tip = track(&peer_repo, peer.path(), "tip.bin", b"tip");
+        commit_all(peer.path(), "tip");
+        let uncommitted = track(&peer_repo, peer.path(), "uncommitted.bin", b"uncommitted");
+        let second = test_repo();
+        let second_repo = Repository::at(second.path().to_path_buf());
+        let second_oid = track(&second_repo, second.path(), "second.bin", b"second");
+        commit_all(second.path(), "second");
+        let remote = remote_name.as_ref().map(|_| remote_for(&repo));
+        // Reuse the repository history, restoring the swept inventory before
+        // each selection so every mode starts with the same five objects.
         for mode in ["no-history", "tips", "all-history"] {
             let full_history = mode == "all-history";
-            let storage = tempfile::tempdir().unwrap();
-            let current = test_repo();
-            let repo = Repository::at(current.path().to_path_buf());
-            let remote_name = if remote_target {
-                Some(use_remote(&repo, storage.path()))
-            } else {
-                use_shared_cache(&repo, storage.path());
-                None
-            };
-            let current_oid = track(&repo, current.path(), "current.bin", b"current");
-            let peer = test_repo();
-            let peer_repo = Repository::at(peer.path().to_path_buf());
-            let old = track(&peer_repo, peer.path(), "old.bin", b"old");
-            commit_all(peer.path(), "old");
-            untrack(&peer_repo, peer.path(), "old.bin");
-            let tip = track(&peer_repo, peer.path(), "tip.bin", b"tip");
-            commit_all(peer.path(), "tip");
-            let uncommitted = track(&peer_repo, peer.path(), "uncommitted.bin", b"uncommitted");
-            let second = test_repo();
-            let second_repo = Repository::at(second.path().to_path_buf());
-            let second_oid = track(&second_repo, second.path(), "second.bin", b"second");
-            commit_all(second.path(), "second");
-            let remote = remote_name.as_ref().map(|_| remote_for(&repo));
             for (oid, bytes) in [
                 (current_oid, b"current".as_slice()),
                 (old, b"old"),

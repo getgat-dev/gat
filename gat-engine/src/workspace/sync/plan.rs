@@ -1446,45 +1446,43 @@ mod tests {
         // tree under `Validate`: a pre-existing conflicting
         // file must be reported as a conflict, not silently overwritten,
         // regardless of the materialization mode that wrote it.
-        for validation in [Validation::Validate, Validation::Validate] {
-            for link in ["copy", "hardlink", "symlink"] {
-                let tmp = git_repo();
-                let repo = Repo::at(tmp.path().to_path_buf());
-                repo.save_config(&gat_core::config::Config {
-                    cache: gat_core::config::CacheConfig {
-                        materialization_strategy: Some(link.parse().unwrap()),
-                        ..Default::default()
-                    },
+        let validation = Validation::Validate;
+        for link in ["copy", "hardlink", "symlink"] {
+            let tmp = git_repo();
+            let repo = Repo::at(tmp.path().to_path_buf());
+            repo.save_config(&gat_core::config::Config {
+                cache: gat_core::config::CacheConfig {
+                    materialization_strategy: Some(link.parse().unwrap()),
                     ..Default::default()
-                })
-                .unwrap();
-                let mut lock = gat_io::LockStore::load_repository(repo.layout()).unwrap();
-                let ingested = ingest(&repo, &b"desired content"[..]);
-                lock.upsert(GatPath::parse_canonical("a.bin").unwrap(), ingested.oid);
-                repo.save_lock(&lock).unwrap();
-                std::fs::write(tmp.path().join("a.bin"), b"pre-existing, different content")
-                    .unwrap();
+                },
+                ..Default::default()
+            })
+            .unwrap();
+            let mut lock = gat_io::LockStore::load_repository(repo.layout()).unwrap();
+            let ingested = ingest(&repo, &b"desired content"[..]);
+            lock.upsert(GatPath::parse_canonical("a.bin").unwrap(), ingested.oid);
+            repo.save_lock(&lock).unwrap();
+            std::fs::write(tmp.path().join("a.bin"), b"pre-existing, different content").unwrap();
 
-                let outcome = sync(
-                    &repo,
-                    &SyncOptions {
-                        validation,
-                        ..Default::default()
-                    },
-                )
-                .unwrap();
+            let outcome = sync(
+                &repo,
+                &SyncOptions {
+                    validation,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
 
-                assert_eq!(
-                    outcome.conflicts,
-                    vec!["a.bin".to_string()],
-                    "link={link} validation={validation:?}"
-                );
-                assert_eq!(
-                    std::fs::read(tmp.path().join("a.bin")).unwrap(),
-                    b"pre-existing, different content",
-                    "link={link} validation={validation:?}: existing file must not be overwritten"
-                );
-            }
+            assert_eq!(
+                outcome.conflicts,
+                vec!["a.bin".to_string()],
+                "link={link} validation={validation:?}"
+            );
+            assert_eq!(
+                std::fs::read(tmp.path().join("a.bin")).unwrap(),
+                b"pre-existing, different content",
+                "link={link} validation={validation:?}: existing file must not be overwritten"
+            );
         }
     }
 
