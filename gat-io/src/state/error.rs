@@ -97,9 +97,9 @@ pub enum StateStoreError {
         #[source]
         source: StateSqlError,
     },
-    /// `.gat/state/`, the database file's parent directory, could not be
-    /// created before opening the database inside it.
-    #[error("could not create `{}`", path.display())]
+    /// Local storage could not be prepared before opening the database.
+    /// `path` identifies the directory or its required self-ignore file.
+    #[error("could not prepare local state at `{}`", path.display())]
     DirectoryUnavailable {
         path: PathBuf,
         #[source]

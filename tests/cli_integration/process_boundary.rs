@@ -9,6 +9,33 @@ use crate::common::{
     init_repo, stderr, stdout,
 };
 
+#[test]
+fn first_local_config_command_and_next_process_repair_keep_git_clean() {
+    let temp = test_support::TestRepo::empty_git_repo();
+    let ignore = temp.path().join(".gat/.gitignore");
+    let exclude = temp.path().join(".git/info/exclude");
+    let before = std::fs::read(&exclude).unwrap();
+    assert!(!ignore.exists());
+    for _ in 0..2 {
+        let out = gat(
+            temp.path(),
+            &["config", "sync.auto_fetch", "false", "--local"],
+        );
+        assert_ok(&out, "writing local configuration before exclude sync");
+        assert_eq!(std::fs::read(&ignore).unwrap(), b"*\n");
+        assert_eq!(std::fs::read(&exclude).unwrap(), before);
+        assert!(
+            git(
+                temp.path(),
+                &["status", "--porcelain", "--untracked-files=all"]
+            )
+            .stdout
+            .is_empty()
+        );
+        std::fs::remove_file(&ignore).unwrap();
+    }
+}
+
 /// `Repo::discover()` is called directly from `main.rs` (not through any
 /// not-yet-migrated `commands::*` module), so this failure goes through
 /// `RepositoryError`'s own `From<RepositoryError> for Failure` (Section

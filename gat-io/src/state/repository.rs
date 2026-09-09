@@ -322,6 +322,9 @@ impl<'repo> DesiredStateSession<'repo> {
         on_progress: impl Fn(&GatPath, Option<u8>) + Sync,
         on_complete: impl Fn() + Sync,
     ) -> Result<Vec<PreparedMaterialization>, MaterializationPreparationError> {
+        if !files.is_empty() {
+            cache.prepare_write()?;
+        }
         let objects_dir = cache.objects_dir();
         let mut entries = Vec::with_capacity(files.len());
         for window in files.chunks(crate::cache::VERIFY_WINDOW) {
@@ -627,7 +630,7 @@ impl<'repo> DesiredMutationSession<'repo> {
     ) -> Result<(), DesiredPublicationError> {
         if self.shape_lock.can_publish_incrementally() {
             self.store.publish_prepared_add::<DesiredPublicationError>(
-                self.layout.root_path(),
+                self.layout,
                 &self.shape_lock,
                 &entries,
             )?;
@@ -732,7 +735,7 @@ impl<'repo> DesiredMutationSession<'repo> {
         }
 
         self.store.publish_desired_move::<DesiredPublicationError>(
-            self.layout.root_path(),
+            self.layout,
             &self.shape_lock,
             src,
             dst,
@@ -789,7 +792,7 @@ impl<'repo> DesiredMutationSession<'repo> {
         }
         self.store
             .publish_desired_removals::<DesiredPublicationError>(
-                self.layout.root_path(),
+                self.layout,
                 &self.shape_lock,
                 affected_paths,
                 &removals,
@@ -947,7 +950,7 @@ impl<'repo> MountMutationSession<'repo> {
                 total += window.len();
                 self.store
                     .publish_desired_removals::<DesiredPublicationError>(
-                        self.layout.root_path(),
+                        self.layout,
                         &self.shape_lock,
                         &window,
                         &[super::desired::DesiredRemoval::Exact(&window)],
@@ -1006,7 +1009,7 @@ impl<'repo> MountMutationSession<'repo> {
         }
 
         self.store.publish_desired_upsert_windows(
-            self.layout.root_path(),
+            self.layout,
             &self.shape_lock,
             &mut next_window,
             &mut result.imported,
@@ -1048,7 +1051,7 @@ pub fn record_materialized_for_test(
     if entries.is_empty() {
         return Ok(());
     }
-    let _guard = crate::atomic::RepoLock::acquire(&layout.sync_lock_path())?;
+    let _guard = crate::atomic::RepoLock::acquire_repository(layout)?;
     let rows = entries
         .iter()
         .cloned()
@@ -1388,7 +1391,7 @@ mod tests {
                 || {
                     let holder = scope.spawn(move || {
                         let guard =
-                            crate::atomic::RepoLock::acquire(&layout_ref.sync_lock_path()).unwrap();
+                            crate::atomic::RepoLock::acquire_repository(layout_ref).unwrap();
                         holder_acquired_tx.send(()).unwrap();
                         release_holder_rx.recv().unwrap();
                         drop(guard);

@@ -54,17 +54,20 @@ fn directory_entries(dir: &Path) -> Result<Vec<std::fs::DirEntry>, CacheEnumerat
 /// Enumerate the typed local object namespace in unspecified order and optionally
 /// delete objects selected by the caller. Physical fan-out paths, malformed
 /// leaves, directory cleanup, and proof-row removal remain internal.
-pub fn sweep_objects<E>(
-    objects_dir: &Path,
+pub(crate) fn sweep_objects<E>(
+    root: &super::root::CacheRootInner,
     dry_run: bool,
     mut decide: impl FnMut(Oid) -> Result<CacheSweepDecision, E>,
 ) -> Result<Result<CacheSweepStats, E>, CacheEnumerationError> {
+    let objects_dir = &root.objects_dir;
     let namespace = object_namespace_dir(objects_dir);
     if !namespace.exists() {
         return Ok(Ok(CacheSweepStats::default()));
     }
-    let state = (!dry_run).then(|| CacheState::open(objects_dir));
-    let mut removed = Vec::with_capacity(PROOF_REMOVAL_BATCH);
+    // Merely enumerating objects needs neither a writable proof database nor
+    // a removal buffer. Initialize them only when a deletion is selected.
+    let mut state = None;
+    let mut removed = Vec::new();
     let mut stats = CacheSweepStats::default();
 
     for l1 in directory_entries(&namespace)? {
@@ -114,6 +117,13 @@ pub fn sweep_objects<E>(
                         if dry_run {
                             l2_nonempty = true;
                         } else {
+                            if state.is_none() {
+                                let directory = root.prepare_directory().map_err(|error| {
+                                    CacheEnumerationError::io("prepare", error.path, error.source)
+                                })?;
+                                state = Some(CacheState::open_prepared(&directory));
+                                removed.reserve_exact(PROOF_REMOVAL_BATCH);
+                            }
                             let path = leaf.path();
                             std::fs::remove_file(&path).map_err(|source| {
                                 CacheEnumerationError::io("remove", path, source)
@@ -201,6 +211,7 @@ mod tests {
     #[test]
     fn sweep_removes_only_deleted_objects_and_empty_fanout_directories() {
         let temp = tempfile::tempdir().unwrap();
+        let root = super::super::root::CacheRootInner::new(temp.path().to_path_buf(), None);
         let kept = ingest(temp.path(), std::io::Cursor::new(b"kept"))
             .unwrap()
             .oid;
@@ -212,7 +223,7 @@ mod tests {
         let l1 = l2.parent().unwrap().to_path_buf();
         test_support::reset_remove_dir_attempt_count();
 
-        let stats = sweep_objects::<std::convert::Infallible>(temp.path(), false, |oid| {
+        let stats = sweep_objects::<std::convert::Infallible>(&root, false, |oid| {
             Ok(if oid == kept {
                 CacheSweepDecision::Keep
             } else {
@@ -233,26 +244,24 @@ mod tests {
     #[test]
     fn keep_only_and_dry_run_sweeps_attempt_no_directory_cleanup() {
         let temp = tempfile::tempdir().unwrap();
+        let root = super::super::root::CacheRootInner::new(temp.path().to_path_buf(), None);
         ingest(temp.path(), std::io::Cursor::new(b"kept")).unwrap();
         test_support::reset_remove_dir_attempt_count();
-        sweep_objects::<std::convert::Infallible>(temp.path(), false, |_| {
-            Ok(CacheSweepDecision::Keep)
-        })
-        .unwrap()
-        .unwrap();
+        sweep_objects::<std::convert::Infallible>(&root, false, |_| Ok(CacheSweepDecision::Keep))
+            .unwrap()
+            .unwrap();
         assert_eq!(test_support::remove_dir_attempt_count(), 0);
 
-        sweep_objects::<std::convert::Infallible>(temp.path(), true, |_| {
-            Ok(CacheSweepDecision::Delete)
-        })
-        .unwrap()
-        .unwrap();
+        sweep_objects::<std::convert::Infallible>(&root, true, |_| Ok(CacheSweepDecision::Delete))
+            .unwrap()
+            .unwrap();
         assert_eq!(test_support::remove_dir_attempt_count(), 0);
     }
 
     #[test]
     fn malformed_fanout_leaf_is_ignored() {
         let temp = tempfile::tempdir().unwrap();
+        let root = super::super::root::CacheRootInner::new(temp.path().to_path_buf(), None);
         let kept = ingest(temp.path(), std::io::Cursor::new(b"kept"))
             .unwrap()
             .oid;
@@ -262,7 +271,7 @@ mod tests {
         std::fs::write(&malformed, b"not a real object").unwrap();
         let mut visited = Vec::new();
 
-        sweep_objects::<std::convert::Infallible>(temp.path(), false, |oid| {
+        sweep_objects::<std::convert::Infallible>(&root, false, |oid| {
             visited.push(oid);
             Ok(CacheSweepDecision::Keep)
         })
@@ -277,6 +286,7 @@ mod tests {
     #[test]
     fn sweep_removes_deleted_proofs_and_preserves_kept_proofs() {
         let temp = tempfile::tempdir().unwrap();
+        let root = super::super::root::CacheRootInner::new(temp.path().to_path_buf(), None);
         let kept = ingest(temp.path(), std::io::Cursor::new(b"kept"))
             .unwrap()
             .oid;
@@ -290,7 +300,7 @@ mod tests {
             seed_cache_proof_for_test(temp.path(), &oid, &proof);
         }
 
-        sweep_objects::<std::convert::Infallible>(temp.path(), false, |oid| {
+        sweep_objects::<std::convert::Infallible>(&root, false, |oid| {
             Ok(if oid == kept {
                 CacheSweepDecision::Keep
             } else {
@@ -310,6 +320,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().unwrap();
+        let root = super::super::root::CacheRootInner::new(temp.path().to_path_buf(), None);
         let deleted = ingest(temp.path(), std::io::Cursor::new(b"deleted"))
             .unwrap()
             .oid;
@@ -323,11 +334,9 @@ mod tests {
             }
         }
 
-        sweep_objects::<std::convert::Infallible>(temp.path(), false, |_| {
-            Ok(CacheSweepDecision::Delete)
-        })
-        .unwrap()
-        .unwrap();
+        sweep_objects::<std::convert::Infallible>(&root, false, |_| Ok(CacheSweepDecision::Delete))
+            .unwrap()
+            .unwrap();
 
         assert!(!has_object_oid(temp.path(), &deleted));
         std::fs::set_permissions(&database, std::fs::Permissions::from_mode(original_mode))

@@ -413,6 +413,14 @@ impl ConfigStore {
         cfg: &Config,
     ) -> std::result::Result<(), ScopedConfigWriteError> {
         let path = layout.config_path_for_home(scope, global_config_dir)?;
+        if scope == ConfigScope::Local {
+            layout.local_directory().ensure().map_err(|error| {
+                ConfigWriteError::Write(crate::AtomicError::DirectoryUnavailable {
+                    path: error.path,
+                    source: error.source,
+                })
+            })?;
+        }
         Ok(Self::save_file(&path, cfg)?)
     }
 

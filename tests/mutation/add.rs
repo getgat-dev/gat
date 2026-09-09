@@ -2721,7 +2721,7 @@ mod tests {
                         }];
                         store
                             .publish_desired_upsert::<gat_io::DesiredPublicationError>(
-                                root,
+                                &io_layout,
                                 &shape_lock,
                                 &new_entries,
                             )

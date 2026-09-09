@@ -11,6 +11,36 @@ use crate::common::{assert_ok, commit_all, gat, init_repo};
 use crate::support::remote_url;
 
 #[test]
+fn relative_cache_override_is_self_ignoring_on_the_first_cache_command() {
+    let temp = test_support::TestRepo::empty_git_repo();
+    let exclude = temp.path().join(".git/info/exclude");
+    let before = std::fs::read(&exclude).unwrap();
+    let out = common::gat_with_env(
+        temp.path(),
+        &["system", "repair", "cache"],
+        &[("GAT_CACHE_DIR", Some(".gat/objects"))],
+    );
+    assert_ok(
+        &out,
+        "repairing a relative cache before any other local writes",
+    );
+    assert!(temp.path().join(".gat/objects/cache.sqlite3").is_file());
+    assert_eq!(
+        std::fs::read(temp.path().join(".gat/.gitignore")).unwrap(),
+        b"*\n"
+    );
+    assert_eq!(std::fs::read(exclude).unwrap(), before);
+    assert!(
+        common::git(
+            temp.path(),
+            &["status", "--porcelain", "--untracked-files=all"]
+        )
+        .stdout
+        .is_empty()
+    );
+}
+
+#[test]
 fn remote_add_interpolates_a_template_url_from_the_real_environment() {
     let tmp = init_repo();
     let dir = tmp.path();

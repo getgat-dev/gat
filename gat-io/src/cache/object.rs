@@ -32,9 +32,9 @@ use tempfile::NamedTempFile;
 /// (the `cache.sqlite3` proof store).
 #[derive(Debug, thiserror::Error)]
 pub enum CacheError {
-    /// `objects_dir` itself, or an object's fan-out parent directory,
-    /// could not be created/accessed -- "cache directory unavailable".
-    #[error("could not prepare the local object cache directory `{}`", path.display())]
+    /// Cache storage could not be prepared: the target directory, an object's
+    /// fan-out parent, or the repository's required self-ignore file failed.
+    #[error("could not prepare local cache storage at `{}`", path.display())]
     DirectoryUnavailable {
         path: PathBuf,
         #[source]
@@ -367,11 +367,11 @@ pub struct CacheObjectReader {
 
 /// Proof-free local object-presence capability.
 pub struct CachePresence {
-    root: Arc<crate::repository_layout::CacheRootInner>,
+    root: Arc<crate::cache::root::CacheRootInner>,
 }
 
 impl CachePresence {
-    pub(crate) const fn new(root: Arc<crate::repository_layout::CacheRootInner>) -> Self {
+    pub(crate) const fn new(root: Arc<crate::cache::root::CacheRootInner>) -> Self {
         Self { root }
     }
 
@@ -398,12 +398,13 @@ impl CachePresence {
 /// Cloneable, worker-safe cache writer that never opens the proof database.
 #[derive(Clone)]
 pub struct CacheWriter {
-    root: Arc<crate::repository_layout::CacheRootInner>,
+    root: Arc<crate::cache::root::CacheRootInner>,
 }
 
 impl CacheWriter {
     /// Starts an unpublished object. Dropping the handle discards its temporary file.
     pub fn begin_ingest(&self) -> Result<CacheIngest> {
+        self.root.prepare_write()?;
         ensure_cache_directory(&self.root.objects_dir)?;
         Ok(CacheIngest {
             root: Arc::clone(&self.root),
@@ -413,7 +414,7 @@ impl CacheWriter {
         })
     }
 
-    pub(crate) const fn new(root: Arc<crate::repository_layout::CacheRootInner>) -> Self {
+    pub(crate) const fn new(root: Arc<crate::cache::root::CacheRootInner>) -> Self {
         Self { root }
     }
 
@@ -421,6 +422,7 @@ impl CacheWriter {
         &self,
         reader: R,
     ) -> Result<(Ingested, Option<CachePublication>)> {
+        self.root.prepare_write()?;
         ingest_delta(&self.root.objects_dir, reader)
     }
 
@@ -436,6 +438,7 @@ impl CacheWriter {
         reader: R,
         size: u64,
     ) -> Result<(Ingested, Option<CachePublication>)> {
+        self.root.prepare_write()?;
         ingest_sized_delta(&self.root.objects_dir, reader, size)
     }
 
@@ -444,6 +447,7 @@ impl CacheWriter {
         expected: Oid,
         reader: R,
     ) -> Result<ExpectedIngest> {
+        self.root.prepare_write()?;
         ingest_expected_delta(&self.root.objects_dir, expected, reader)
     }
 }
@@ -484,7 +488,7 @@ impl CacheObjectReader {
 
 /// Incremental, proof-database-free ingest. All methods perform local work only.
 pub struct CacheIngest {
-    root: Arc<crate::repository_layout::CacheRootInner>,
+    root: Arc<crate::cache::root::CacheRootInner>,
     tmp: NamedTempFile,
     hasher: blake3::Hasher,
     size: u64,
@@ -563,7 +567,7 @@ impl Read for CacheObjectReader {
 ///   and one set-based proof persist per window and parallel filesystem
 ///   verification in between.
 pub struct CacheClient {
-    root: Arc<crate::repository_layout::CacheRootInner>,
+    root: Arc<crate::cache::root::CacheRootInner>,
     index: CacheState,
     memo: std::cell::RefCell<std::collections::HashMap<Oid, ObjectVerification>>,
     sizes: std::cell::RefCell<std::collections::HashMap<Oid, u64>>,
@@ -681,13 +685,17 @@ impl CacheClient {
     /// index falls back to hashing.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn open(objects_dir: PathBuf) -> Self {
-        Self::open_shared(Arc::new(crate::repository_layout::CacheRootInner {
+        Self::open_shared(Arc::new(crate::cache::root::CacheRootInner::new(
             objects_dir,
-        }))
+            None,
+        )))
     }
 
-    pub(crate) fn open_shared(root: Arc<crate::repository_layout::CacheRootInner>) -> Self {
-        let index = CacheState::open(&root.objects_dir);
+    pub(crate) fn open_shared(root: Arc<crate::cache::root::CacheRootInner>) -> Self {
+        let index = match root.prepare_existing_directory() {
+            Ok(Some(directory)) => CacheState::open_prepared(&directory),
+            Ok(None) | Err(_) => CacheState::disabled(),
+        };
         Self {
             root,
             index,
@@ -704,6 +712,10 @@ impl CacheClient {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn break_database_for_test(&self) {
         self.index.break_for_test();
+    }
+
+    pub(crate) fn prepare_write(&self) -> Result<()> {
+        self.root.prepare_write()
     }
 
     /// The directory this cache's objects are fanned out under -- used by
@@ -1507,7 +1519,7 @@ pub fn finalize_tmp(
     oid: Oid,
     size: u64,
 ) -> Result<Ingested> {
-    let session = CacheState::open(objects_dir);
+    let session = CacheState::open_for_test(objects_dir);
     finalize_tmp_in(objects_dir, tmp, oid, size, &session)
 }
 
@@ -2034,7 +2046,7 @@ mod tests {
         std::fs::create_dir_all(&objects_dir).unwrap();
         // Opening the proof database creates cache.sqlite3 lazily; force
         // that by opening it directly.
-        let _cache_state = CacheState::open(&objects_dir);
+        let _cache_state = CacheState::open_for_test(&objects_dir);
         assert!(
             objects_dir.join("cache.sqlite3").is_file(),
             "cache.sqlite3 must live at the objects_dir root"
@@ -2497,7 +2509,7 @@ mod tests {
             coherent_observation(&dest, || Ok::<(), crate::file_state::FileStateError>(()))
                 .unwrap();
         let proof = observed.proof;
-        let state = CacheState::open(&objects_dir);
+        let state = CacheState::open_for_test(&objects_dir);
         state.upsert(&oid, &proof).unwrap();
 
         // Corrupt the destination's bytes without changing its size or
@@ -2555,7 +2567,7 @@ mod tests {
 
         let dest = cache_path_oid(&objects_dir, &ingested.oid);
         let observed = observe_regular_file_no_follow(&dest).unwrap();
-        let state = CacheState::open(&objects_dir);
+        let state = CacheState::open_for_test(&objects_dir);
         let proof = state.lookup(&ingested.oid).unwrap();
         assert_eq!(proof, Some(observed));
     }
@@ -2578,7 +2590,7 @@ mod tests {
         let observed = observe_regular_file_no_follow(&dest)
             .expect("the freshly published destination must still be a regular file");
 
-        let state = CacheState::open(&objects_dir);
+        let state = CacheState::open_for_test(&objects_dir);
         let proof = state.lookup(&oid).unwrap();
         assert_eq!(
             proof,
@@ -2615,7 +2627,7 @@ mod tests {
         assert_eq!(ingested.oid, oid);
         assert_eq!(hash_file_call_count(), 0);
 
-        let state = CacheState::open(&objects_dir);
+        let state = CacheState::open_for_test(&objects_dir);
         let proof = state
             .lookup(&oid)
             .unwrap()
