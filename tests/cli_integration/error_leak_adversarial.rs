@@ -173,7 +173,7 @@ fn repair_failure_row_leaks_no_low_level_vocabulary_when_the_remote_object_is_mi
         .unwrap()
         .entries[0]
         .oid;
-    let cache_root = RepositoryLayout::at(dir.to_path_buf()).resolve_cache_root(None, None);
+    let cache_root = RepositoryLayout::at(dir.to_path_buf()).resolve_cache_root(None);
     let obj_path = cache_root.object_path_for_test(&oid);
     #[cfg(unix)]
     {
@@ -244,7 +244,10 @@ fn gc_fails_closed_and_leaks_nothing_when_an_explicit_peer_is_missing() {
     let add_out = common::gat_with_env(
         peer.path(),
         &["add", "peer.bin"],
-        &[("GAT_CACHE_DIR", Some(shared_cache.path().to_str().unwrap()))],
+        &[(
+            "GAT_CACHE_LOCATION",
+            Some(shared_cache.path().to_str().unwrap()),
+        )],
     );
     assert_ok(&add_out, "gat add (peer, shared cache)");
 
@@ -254,7 +257,10 @@ fn gc_fails_closed_and_leaks_nothing_when_an_explicit_peer_is_missing() {
     let add_main = common::gat_with_env(
         main_dir,
         &["add", "main.bin"],
-        &[("GAT_CACHE_DIR", Some(shared_cache.path().to_str().unwrap()))],
+        &[(
+            "GAT_CACHE_LOCATION",
+            Some(shared_cache.path().to_str().unwrap()),
+        )],
     );
     assert_ok(&add_main, "gat add (main, shared cache)");
     commit_all(main_dir, "add main.bin");
@@ -271,7 +277,10 @@ fn gc_fails_closed_and_leaks_nothing_when_an_explicit_peer_is_missing() {
     let out = common::gat_with_env(
         main_dir,
         &["gc", "--repository", peer_path.to_str().unwrap()],
-        &[("GAT_CACHE_DIR", Some(shared_cache.path().to_str().unwrap()))],
+        &[(
+            "GAT_CACHE_LOCATION",
+            Some(shared_cache.path().to_str().unwrap()),
+        )],
     );
     assert!(
         !out.status.success(),
@@ -342,7 +351,10 @@ fn gc_repository_path_containing_a_literal_newline_never_forges_an_extra_rendere
     let add_out = common::gat_with_env(
         &peer_dir,
         &["add", "peer.bin"],
-        &[("GAT_CACHE_DIR", Some(shared_cache.path().to_str().unwrap()))],
+        &[(
+            "GAT_CACHE_LOCATION",
+            Some(shared_cache.path().to_str().unwrap()),
+        )],
     );
     assert_ok(&add_out, "gat add (peer, shared cache)");
     // Corrupt the peer's own `gat.lock` so this repository fails
@@ -362,7 +374,10 @@ fn gc_repository_path_containing_a_literal_newline_never_forges_an_extra_rendere
     let add_main = common::gat_with_env(
         main_dir,
         &["add", "main.bin"],
-        &[("GAT_CACHE_DIR", Some(shared_cache.path().to_str().unwrap()))],
+        &[(
+            "GAT_CACHE_LOCATION",
+            Some(shared_cache.path().to_str().unwrap()),
+        )],
     );
     assert_ok(&add_main, "gat add (main, shared cache)");
     commit_all(main_dir, "add main.bin");
@@ -370,7 +385,10 @@ fn gc_repository_path_containing_a_literal_newline_never_forges_an_extra_rendere
     let out = common::gat_with_env(
         main_dir,
         &["gc", "--repository", peer_dir.to_str().unwrap()],
-        &[("GAT_CACHE_DIR", Some(shared_cache.path().to_str().unwrap()))],
+        &[(
+            "GAT_CACHE_LOCATION",
+            Some(shared_cache.path().to_str().unwrap()),
+        )],
     );
     assert!(
         !out.status.success(),
@@ -427,7 +445,10 @@ fn gc_repository_path_containing_raw_control_characters_is_always_escaped() {
     let add_out = common::gat_with_env(
         &peer_dir,
         &["add", "peer.bin"],
-        &[("GAT_CACHE_DIR", Some(shared_cache.path().to_str().unwrap()))],
+        &[(
+            "GAT_CACHE_LOCATION",
+            Some(shared_cache.path().to_str().unwrap()),
+        )],
     );
     assert_ok(&add_out, "gat add (peer, shared cache)");
 
@@ -437,7 +458,10 @@ fn gc_repository_path_containing_raw_control_characters_is_always_escaped() {
     let add_main = common::gat_with_env(
         main_dir,
         &["add", "main.bin"],
-        &[("GAT_CACHE_DIR", Some(shared_cache.path().to_str().unwrap()))],
+        &[(
+            "GAT_CACHE_LOCATION",
+            Some(shared_cache.path().to_str().unwrap()),
+        )],
     );
     assert_ok(&add_main, "gat add (main, shared cache)");
     commit_all(main_dir, "add main.bin");
@@ -454,7 +478,10 @@ fn gc_repository_path_containing_raw_control_characters_is_always_escaped() {
     let out = common::gat_with_env(
         main_dir,
         &["gc", "--repository", peer_dir.to_str().unwrap()],
-        &[("GAT_CACHE_DIR", Some(shared_cache.path().to_str().unwrap()))],
+        &[(
+            "GAT_CACHE_LOCATION",
+            Some(shared_cache.path().to_str().unwrap()),
+        )],
     );
     assert!(
         !out.status.success(),

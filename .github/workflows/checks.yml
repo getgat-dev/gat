@@ -68,11 +68,9 @@ jobs:
           esac
       - name: Lint Unix installers
         if: runner.os == 'Linux'
-        run: shellcheck docs/install.sh tools/test-installers.sh tools/check-linux-release.sh tools/test-linux-release.sh
-      - name: Linux release ABI check fixtures
-        run: bash tools/check-linux-release.sh --self-test
+        run: shellcheck docs/install.sh tools/check/test-installers.sh tools/check/test-linux-release.sh
       - name: Unix installer fixtures
-        run: bash tools/test-installers.sh "$INSTALLER_SHELL"
+        run: bash tools/check/test-installers.sh "$INSTALLER_SHELL"
       # Enable once the v0.1.0 release and its assets are publicly downloadable.
       # - name: Install v0.1.0 over HTTPS and smoke-test the binary
       #   env:
@@ -114,14 +112,14 @@ jobs:
           Save-Module -Name PSScriptAnalyzer -RequiredVersion 1.25.0 -Path $env:RUNNER_TEMP -ErrorAction Stop
           Import-Module (Join-Path $env:RUNNER_TEMP 'PSScriptAnalyzer/1.25.0/PSScriptAnalyzer.psd1')
           $diagnostics = @(Invoke-ScriptAnalyzer -Path docs/install.ps1)
-          $diagnostics += @(Invoke-ScriptAnalyzer -Path tools/test-installers.ps1)
-          $diagnostics += @(Invoke-ScriptAnalyzer -Path tools/test-installer-network.ps1)
+          $diagnostics += @(Invoke-ScriptAnalyzer -Path tools/check/test-installers.ps1)
+          $diagnostics += @(Invoke-ScriptAnalyzer -Path tools/check/test-installer-network.ps1)
           if ($diagnostics.Count -gt 0) {
             $diagnostics | Format-Table -Wrap
             throw 'Installer static analysis failed'
           }
       - name: PowerShell installer fixtures
-        run: ./tools/test-installers.ps1
+        run: ./tools/check/test-installers.ps1
       # Enable once the v0.1.0 release and its assets are publicly downloadable.
       # - name: Install v0.1.0 over HTTPS and smoke-test the binary
       #   env:
@@ -142,18 +140,10 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - name: Test-hygiene script self-tests
-        run: ./tools/check-test-hygiene.sh --self-test
-      - name: Test-hygiene source checks
-        run: ./tools/check-test-hygiene.sh
-      - name: Error-architecture script self-tests
-        run: ./tools/check-error-architecture.sh --self-test
-      - name: Error-architecture source checks
-        run: ./tools/check-error-architecture.sh
-      - name: Workspace-boundary script self-tests
-        run: ./tools/check-workspace-boundary.sh --self-test
-      - name: Workspace-boundary checks
-        run: ./tools/check-workspace-boundary.sh
+      - name: Checker tests
+        run: cargo test --locked -p gat-check
+      - name: Repository policy checks
+        run: cargo run --quiet --locked -p gat-check -- all
 
   test:
     name: test (${{ matrix.os }})
@@ -198,7 +188,7 @@ jobs:
       - run: cargo check -p gat-io --lib --no-default-features --locked
       - run: cargo check -p gat-engine --lib --no-default-features --locked
       - run: cargo check -p gat-command --lib --no-default-features --locked
-      - run: cargo check -p gat-tools --all-targets --all-features --locked
+      - run: cargo check -p gat-docs -p gat-bench -p gat-check --all-targets --all-features --locked
 
   msrv:
     name: msrv

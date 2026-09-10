@@ -613,7 +613,7 @@ pub fn plan(repo: &Repo, selection: &Selection, validation: Validation) -> Resul
     // opens its own `CacheClient` rather than requiring an operation to
     // exist. Callers driven by `sync_from_snapshot` route through the
     // operation's single `Operation::cache` instead.
-    let cache_root = repo.resolved_cache_root();
+    let cache_root = repo.resolved_cache_root()?;
     let cache = cache_root.open_client();
     plan_with_store(
         repo,
@@ -1092,6 +1092,7 @@ mod tests {
 
     fn ingest(repo: &Repo, content: impl std::io::Read) -> gat_io::Ingested {
         repo.resolved_cache_root()
+            .unwrap()
             .writer()
             .ingest(content)
             .unwrap()
@@ -1138,7 +1139,12 @@ mod tests {
         let result = file_status_without_prior(
             layout.worktree_client(),
             &layout
-                .resolve_cache_root(Some(dir.path().as_os_str()), None)
+                .resolve_cache_root(Some(
+                    &gat_core::cache_location::CacheLocation::try_from_path(
+                        std::path::PathBuf::from(dir.path().as_os_str()),
+                    )
+                    .expect("nonempty fixture cache path"),
+                ))
                 .open_client(),
             &GatPath::parse_canonical("f.bin").unwrap(),
             &expected_oid,
@@ -1202,7 +1208,9 @@ mod tests {
             .map(|levels| gat_core::lock::LockShardLevels::new(levels).expect("valid shard depth"))
         {
             let tmp = git_repo();
-            let repo = Repo::at(tmp.path().to_path_buf());
+            let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+                .unwrap()
+                .repository_at(tmp.path().to_path_buf());
             let (path_a, path_b) = shard_reordered_paths(levels);
 
             let entry_a = track(&repo, &path_a, b"content-a");
@@ -1237,7 +1245,9 @@ mod tests {
     #[test]
     fn validated_plan_over_an_unmodified_stat_proven_file_never_hex_encodes_its_oid() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
 
@@ -1267,7 +1277,9 @@ mod tests {
         use gat_io::cache_proof_test_support as test_support;
 
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"desired content");
         // A worktree file that differs from the desired content forces the
         // `FileStatus::Differs` branch, which composes
@@ -1306,7 +1318,9 @@ mod tests {
         use gat_io::cache_proof_test_support as test_support;
 
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         for i in 0..16 {
             track(
                 &repo,
@@ -1343,7 +1357,9 @@ mod tests {
     #[test]
     fn local_modification_is_reported_even_when_gat_lock_did_not_change() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         repo.save_config(&gat_core::config::Config {
             cache: gat_core::config::CacheConfig {
                 materialization_strategy: Some("copy".parse().unwrap()),
@@ -1379,7 +1395,9 @@ mod tests {
     #[test]
     fn validate_reports_local_modification_via_size_change_when_lock_is_unchanged() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         repo.save_config(&gat_core::config::Config {
             cache: gat_core::config::CacheConfig {
                 materialization_strategy: Some("copy".parse().unwrap()),
@@ -1409,7 +1427,9 @@ mod tests {
     #[test]
     fn locally_modified_file_is_left_untouched_and_reported() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         repo.save_config(&gat_core::config::Config {
             cache: gat_core::config::CacheConfig {
                 materialization_strategy: Some("copy".parse().unwrap()),
@@ -1449,7 +1469,9 @@ mod tests {
         let validation = Validation::Validate;
         for link in ["copy", "hardlink", "symlink"] {
             let tmp = git_repo();
-            let repo = Repo::at(tmp.path().to_path_buf());
+            let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+                .unwrap()
+                .repository_at(tmp.path().to_path_buf());
             repo.save_config(&gat_core::config::Config {
                 cache: gat_core::config::CacheConfig {
                     materialization_strategy: Some(link.parse().unwrap()),
@@ -1489,7 +1511,9 @@ mod tests {
     #[test]
     fn missing_cache_object_is_reported_and_leaves_no_file() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut lock = Lock::default();
         lock.upsert(
             GatPath::parse_canonical("a.bin").unwrap(),
@@ -1512,7 +1536,9 @@ mod tests {
     #[test]
     fn partial_path_sync_only_touches_the_given_subtree() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "data/a.bin", b"a");
         track(&repo, "other.bin", b"b");
 
@@ -1533,7 +1559,9 @@ mod tests {
     #[test]
     fn include_glob_restricts_sync_to_matching_paths() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "models/a.onnx", b"a");
         track(&repo, "models/b.bin", b"b");
 
@@ -1554,7 +1582,9 @@ mod tests {
     #[test]
     fn exclude_glob_leaves_previously_materialized_excluded_files_untouched_on_removal() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"a");
         track(&repo, "tests/b.bin", b"b");
         sync(&repo, &SyncOptions::default()).unwrap();
@@ -1585,7 +1615,9 @@ mod tests {
     #[test]
     fn invalid_lock_file_is_a_hard_error() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("gat.lock"), "not a gat lock\n").unwrap();
 
         assert!(sync(&repo, &SyncOptions::default()).is_err());
@@ -1598,7 +1630,9 @@ mod tests {
     #[test]
     fn malformed_row_mid_scan_fails_the_whole_plan_instead_of_a_partial_result() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"first");
         let entry_z = track(&repo, "z.bin", b"last");
         sync(&repo, &SyncOptions::default()).unwrap();
@@ -1628,7 +1662,9 @@ mod tests {
     #[test]
     fn corrupted_cache_object_is_reported_distinctly_from_a_plain_conflict() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         repo.save_config(&gat_core::config::Config {
             cache: gat_core::config::CacheConfig {
                 materialization_strategy: Some("copy".parse().unwrap()),
@@ -1645,7 +1681,7 @@ mod tests {
         // Corrupt the cache object gat would replace the file with, while
         // keeping its size unchanged so a `Size` check alone wouldn't
         // catch it -- only `Hash` re-hashing does.
-        let cache_root = repo.resolved_cache_root();
+        let cache_root = repo.resolved_cache_root().unwrap();
         let obj = cache_root.object_path_for_test(&world.oid);
         cache_root
             .make_object_writable_for_test(&world.oid)
@@ -1678,7 +1714,9 @@ mod tests {
     #[test]
     fn validate_detects_size_preserving_cache_corruption() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         repo.save_config(&gat_core::config::Config {
             cache: gat_core::config::CacheConfig {
                 materialization_strategy: Some("copy".parse().unwrap()),
@@ -1692,7 +1730,7 @@ mod tests {
         std::fs::write(tmp.path().join("a.bin"), b"locally edited").unwrap();
 
         let world = track(&repo, "a.bin", b"world");
-        let cache_root = repo.resolved_cache_root();
+        let cache_root = repo.resolved_cache_root().unwrap();
         let obj = cache_root.object_path_for_test(&world.oid);
         cache_root
             .make_object_writable_for_test(&world.oid)
@@ -1721,7 +1759,9 @@ mod tests {
     #[test]
     fn corrupted_missing_object_is_still_reported_as_missing() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         repo.save_config(&gat_core::config::Config {
             cache: gat_core::config::CacheConfig {
                 materialization_strategy: Some("copy".parse().unwrap()),
@@ -1762,7 +1802,9 @@ mod tests {
     #[test]
     fn trust_state_treats_deleted_matching_file_as_unchanged() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         sync(
             &repo,
@@ -1791,7 +1833,9 @@ mod tests {
         // every mode fails so the pre-existing file is never silently destroyed.
         for link in ["hardlink", "symlink", "copy"] {
             let tmp = git_repo();
-            let repo = Repo::at(tmp.path().to_path_buf());
+            let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+                .unwrap()
+                .repository_at(tmp.path().to_path_buf());
             repo.save_config(&gat_core::config::Config {
                 cache: gat_core::config::CacheConfig {
                     materialization_strategy: Some(link.parse().unwrap()),
@@ -1842,7 +1886,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let entry = track(&repo, "blocked/a.bin", b"hello");
         record_materialized(&repo, std::slice::from_ref(&entry)).unwrap();
         let blocked = tmp.path().join("blocked");
@@ -1875,7 +1921,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let entry = track(&repo, "blocked/a.bin", b"hello");
         record_materialized(&repo, std::slice::from_ref(&entry)).unwrap();
 
@@ -1921,7 +1969,9 @@ mod tests {
     #[cfg(unix)]
     fn desired_only_action_resolves_a_windows_drive_like_gat_path_below_root() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "C:/foo", b"hello");
 
         let outcome = sync(&repo, &SyncOptions::default()).unwrap();
@@ -1939,7 +1989,9 @@ mod tests {
     #[test]
     fn desired_only_path_between_two_materialized_rows_does_not_panic() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
 
         // Materialized state left over from a previous branch: a.bin,
         // c.bin, d.bin.
@@ -2002,7 +2054,7 @@ mod tests {
     ) -> crate::workspace::sync::SyncOutcome {
         let cfg = repo.load_config().unwrap();
         let desired_revision = {
-            let _guard = gat_io::RepoLock::acquire_repository(repo.layout()).unwrap();
+            let _guard = repo.acquire_configuration_lock().unwrap();
             crate::repository_state::current_desired_revision(repo).unwrap()
         };
         let snapshot =
@@ -2027,7 +2079,9 @@ mod tests {
     #[test]
     fn merge_buffer_never_exceeds_one_bounded_batch_across_many_rows() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut limits = crate::limits::ExecutionLimits::tiny();
         let merge_window = 4;
         limits.sync.merge_window = std::num::NonZeroUsize::new(merge_window).unwrap();
@@ -2068,7 +2122,9 @@ mod tests {
     #[test]
     fn rematerialize_keeps_the_cache_verification_memo_bounded_across_many_unique_oids() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let verify_window = 4;
         let _guard = gat_io::cache_object_test_support::with_verify_window(verify_window);
         let mut limits = crate::limits::ExecutionLimits::tiny();
@@ -2123,7 +2179,9 @@ mod tests {
         use gat_io::cache_proof_test_support as cache_state_test_support;
 
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let verify_window = 8;
         let _guard = gat_io::cache_object_test_support::with_verify_window(verify_window);
         let mut limits = crate::limits::ExecutionLimits::tiny();
@@ -2178,7 +2236,9 @@ mod tests {
         use gat_io::cache_proof_test_support as cache_state_test_support;
 
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let merge_window = 4;
         let mut limits = crate::limits::ExecutionLimits::tiny();
         limits.sync.merge_window = std::num::NonZeroUsize::new(merge_window).unwrap();
@@ -2236,7 +2296,9 @@ mod tests {
         use gat_io::cache_proof_test_support as cache_state_test_support;
 
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let merge_window = 4;
         let mut limits = crate::limits::ExecutionLimits::tiny();
         limits.sync.merge_window = std::num::NonZeroUsize::new(merge_window).unwrap();
@@ -2293,7 +2355,9 @@ mod tests {
         use gat_io::cache_proof_test_support as cache_state_test_support;
 
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let merge_window = 4;
         let mut limits = crate::limits::ExecutionLimits::tiny();
         limits.sync.merge_window = std::num::NonZeroUsize::new(merge_window).unwrap();
@@ -2332,7 +2396,9 @@ mod tests {
         use gat_io::cache_proof_test_support as cache_state_test_support;
 
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let merge_window = 4;
         let mut limits = crate::limits::ExecutionLimits::tiny();
         limits.sync.merge_window = std::num::NonZeroUsize::new(merge_window).unwrap();
@@ -2394,7 +2460,9 @@ mod tests {
     #[test]
     fn dry_run_rematerialize_keeps_the_merge_buffer_bounded_across_many_rows() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut limits = crate::limits::ExecutionLimits::tiny();
         let merge_window = 4;
         limits.sync.merge_window = std::num::NonZeroUsize::new(merge_window).unwrap();
@@ -2449,7 +2517,9 @@ mod tests {
     #[test]
     fn dry_run_rematerialize_counts_match_a_subsequent_real_run() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut limits = crate::limits::ExecutionLimits::tiny();
         let merge_window = 4;
         limits.sync.merge_window = std::num::NonZeroUsize::new(merge_window).unwrap();

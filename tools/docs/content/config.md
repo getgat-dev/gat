@@ -32,3 +32,33 @@ See [Config inheritance](/concepts/config-inheritance) for scope rules and
 Output includes headings and source information. It is intended for people,
 not as a serialized configuration format.
 </Note>
+
+Environment overrides use `GAT_` followed by the uppercase setting path, replacing
+each dot with `_`. For example, `network.request_concurrency` becomes
+`GAT_NETWORK_REQUEST_CONCURRENCY`. The configuration reference lists every
+supported name. Overrides apply above global, project, and local files for one
+invocation; explicit command options take precedence where available.
+
+```sh
+export GAT_NETWORK_REQUEST_CONCURRENCY=64
+export GAT_NETWORK_READINESS_TIMEOUT_SECONDS=15
+export GAT_GIT_IGNORE_PATTERNS='["*.bin", "artifacts,legacy/**", "space name/**"]'
+export GAT_CACHE_MATERIALIZATION_STRATEGY='["reflink", "copy"]'
+```
+
+List overrides are JSON arrays of strings. Commas and spaces inside strings are
+preserved. `[]` explicitly empties an allowed list; an empty environment string
+is invalid. Remove a variable to restore file inheritance. Boolean values must
+be `true` or `false`. Timeouts accept whole seconds from 1 through 86400;
+concurrency accepts counts from 1 through 65535.
+
+Only general settings accept overrides. Named remotes, routes, mounts, selections,
+and default remote/selection choices remain file configuration managed by their
+commands. `${NAME}` in a remote URL is explicit template interpolation, not a
+resource override. Gat captures template variables once per invocation too.
+
+`gat config` writes only the selected file scope. It reports when an environment
+variable or higher file scope still overrides the saved value. Unknown environment
+names are ignored; invalid supported overrides fail before repository work.
+`GAT_CACHE_DIR` and `GAT_CONNECT_TIMEOUT` have been removed; use
+`GAT_CACHE_LOCATION` and `GAT_NETWORK_READINESS_TIMEOUT_SECONDS`.

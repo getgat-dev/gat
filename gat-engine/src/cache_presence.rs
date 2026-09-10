@@ -13,10 +13,16 @@ pub struct CachePresenceSession {
 }
 
 impl CachePresenceSession {
-    pub(crate) fn new(repo: &crate::Repository) -> Self {
-        let cache_root = repo.resolved_cache_root();
-        Self {
+    pub(crate) fn new(repo: &crate::Repository) -> Result<Self, crate::RepositoryError> {
+        let cache_root = repo.resolved_cache_root()?;
+        Ok(Self {
             cache: cache_root.presence(),
+        })
+    }
+
+    pub(crate) fn from_config(repo: &crate::Repository, config: &gat_core::config::Config) -> Self {
+        Self {
+            cache: repo.resolved_cache_root_from(config).presence(),
         }
     }
 
@@ -37,10 +43,12 @@ mod tests {
     #[test]
     fn presence_checks_do_not_open_the_cache_proof_database() {
         let tmp = crate::test_harness::test_repo();
-        let repo = crate::Repository::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let before = gat_io::cache_proof_test_support::snapshot().cache_db_opens;
 
-        let session = CachePresenceSession::new(&repo);
+        let session = CachePresenceSession::new(&repo).unwrap();
         assert!(!session.contains(&Oid::from_hex(&"0".repeat(64)).unwrap()));
 
         let after = gat_io::cache_proof_test_support::snapshot().cache_db_opens;

@@ -9,9 +9,9 @@ fi
 binary="$1"
 target="$2"
 glibc_baseline="$3"
-repo_dir="$(cd "$(dirname "$0")/.." && pwd)"
+repo_dir="$(cd "$(dirname "$0")/../.." && pwd)"
 # Validate direct local invocations with the same ABI gate used by the workflow.
-bash "$repo_dir/tools/check-linux-release.sh" "$binary" "$target" "$glibc_baseline"
+cargo run --quiet --locked --manifest-path "$repo_dir/tools/check/Cargo.toml" -- release "$binary" "$target" "$glibc_baseline"
 libc="${target##*-}"
 # Put all shared state in one owned directory: candidate, wrapper, and fixtures.
 # The container only needs this directory, not write access to the checkout.
@@ -22,7 +22,7 @@ trap 'rm -rf "$workdir"' EXIT
 mkdir -p "$workdir/bin" "$workdir/tmp"
 cp "$binary" "$workdir/candidate"
 # The runtime image needs no build context or candidate bytes.
-docker build --target "$libc" --iidfile "$workdir/image" - < "$repo_dir/tools/release-runtime.Dockerfile"
+docker build --target "$libc" --iidfile "$workdir/image" - < "$repo_dir/tools/check/release-runtime.Dockerfile"
 export GAT_RELEASE_IMAGE GAT_RELEASE_WORKDIR
 GAT_RELEASE_IMAGE="$(cat "$workdir/image")"
 GAT_RELEASE_WORKDIR="$workdir"
@@ -40,7 +40,7 @@ exec docker run --rm --user "$(id -u):$(id -g)" \
   --volume "$GAT_RELEASE_WORKDIR:$GAT_RELEASE_WORKDIR" \
   --volume "$GAT_RELEASE_WORKDIR/candidate:/usr/local/bin/gat:ro" \
   --workdir "$PWD" \
-  --env HOME --env GIT_CONFIG_GLOBAL --env GIT_CONFIG_SYSTEM --env GAT_CACHE_DIR \
+  --env HOME --env GIT_CONFIG_GLOBAL --env GIT_CONFIG_SYSTEM --env GAT_CACHE_LOCATION \
   --env TMPDIR --env NO_COLOR \
   "$GAT_RELEASE_IMAGE" gat "$@"
 WRAPPER

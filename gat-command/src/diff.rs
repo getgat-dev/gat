@@ -4,7 +4,7 @@ use super::selection::{self, ResolvedSelection};
 use gat_core::git::GitRevisionSpec;
 use gat_core::progress::{ProgressOperation, ProgressReporter, ProgressSpec, with_progress_typed};
 use gat_core::selection::Selection;
-use gat_engine::{ChangedRow, CompareError, Repository, Unchanged};
+use gat_engine::{CompareError, Repository, Unchanged};
 
 #[derive(Clone, Debug)]
 pub struct DiffRequest {
@@ -47,6 +47,8 @@ pub enum DiffOutcome {
 #[derive(Debug, thiserror::Error)]
 pub enum DiffError {
     #[error(transparent)]
+    Snapshot(#[from] gat_engine::RepoSnapshotError),
+    #[error(transparent)]
     Repository(#[from] gat_engine::RepositoryError),
     #[error(transparent)]
     Compare(#[from] CompareError),
@@ -63,28 +65,30 @@ pub fn diff(
         selection,
     } = request;
 
-    let config = repo.load_config()?;
+    let (config, scope, rows) = match &to {
+        DiffTarget::WorkingTree => {
+            let current = repo.comparisons().current(progress)?;
+            let ResolvedSelection { selection, scope } =
+                selection::resolve(selection.as_ref(), current.config())?;
+            let rows = current.revision_with_current(&from, &selection, Unchanged::Drop)?;
+            (current.config().clone(), scope, rows)
+        }
+        DiffTarget::Revision(revision) => {
+            let config = repo.load_config()?;
+            let ResolvedSelection { selection, scope } =
+                selection::resolve(selection.as_ref(), &config)?;
+            let rows = with_progress_typed(
+                progress,
+                ProgressSpec::indeterminate(ProgressOperation::LoadingState),
+                |_| {
+                    repo.comparisons()
+                        .revisions(&from, revision, &selection, Unchanged::Drop)
+                },
+            )?;
+            (config, scope, rows)
+        }
+    };
     let ownership = gat_engine::MountOwnership::new(&config.mounts);
-    let ResolvedSelection { selection, scope } = selection::resolve(selection.as_ref(), &config)?;
-    let rows = with_progress_typed(
-        progress,
-        ProgressSpec::indeterminate(ProgressOperation::LoadingState),
-        |_| -> Result<Vec<ChangedRow>, DiffError> {
-            match &to {
-                DiffTarget::Revision(revision) => Ok(repo.comparisons().revisions(
-                    &from,
-                    revision,
-                    &selection,
-                    Unchanged::Drop,
-                )?),
-                DiffTarget::WorkingTree => Ok(repo.comparisons().revision_with_current(
-                    &from,
-                    &selection,
-                    Unchanged::Drop,
-                )?),
-            }
-        },
-    )?;
 
     let changes = rows.len();
     if changes == 0 {

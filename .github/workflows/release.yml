@@ -15,9 +15,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/release.yml
-      - tools/check-linux-release.sh
-      - tools/test-linux-release.sh
-      - tools/release-runtime.Dockerfile
+      - tools/check/**
       - tests/cli_integration/release_artifact.rs
   workflow_dispatch:
 
@@ -203,11 +201,11 @@ jobs:
           bin="$workdir/$STAGING/gat"
           chmod +x "$bin"
           if [ "$RUNNER_OS" = Linux ]; then
-            bash tools/check-linux-release.sh "$bin" "$TARGET" "$GLIBC_VERSION"
+            cargo run --quiet --locked -p gat-check -- release "$bin" "$TARGET" "$GLIBC_VERSION"
           fi
           GAT_TEST_BIN="$bin" cargo test --locked --test cli_integration release_artifact_
           if [ "$RUNNER_OS" = Linux ]; then
-            bash tools/test-linux-release.sh "$bin" "$TARGET" "$GLIBC_VERSION"
+            bash tools/check/test-linux-release.sh "$bin" "$TARGET" "$GLIBC_VERSION"
           fi
 
       - name: Release-acceptance test packaged binary (Windows)

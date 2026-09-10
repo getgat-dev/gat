@@ -1,0 +1,13 @@
+[package]
+name = "gat-check"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+
+[dependencies]
+proc-macro2 = { version = "1", features = ["span-locations"] }
+syn = { version = "2", features = ["full", "visit"] }
+serde_json = "1"
+
+[lints]
+workspace = true

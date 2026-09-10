@@ -149,7 +149,6 @@ impl Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::Repository as Repo;
 
     /// Purely mechanical: constructing a snapshot from a loaded config must
     /// not perform resource initialization beyond resolving the values
@@ -158,7 +157,9 @@ mod tests {
     fn construction_resolves_cache_location_and_materialization_strategy_exactly_once() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let config = repo.load_config().unwrap();
 
         let before_loc = crate::test_support::cache_location_resolutions();

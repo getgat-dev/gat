@@ -25,6 +25,56 @@ impl From<crate::remote_executor::LocalTransferError> for ReceiveError {
     }
 }
 
+/// Exactly one representation owns the received body at any point.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "One body moves through the already-boxed network future; boxing the ingest adds a per-object allocation"
+)]
+enum ReceiveBody {
+    Buffered(Vec<u8>),
+    Streaming(CacheIngest),
+}
+
+impl ReceiveBody {
+    fn try_buffer(&mut self, bytes: Vec<u8>) -> Result<(), Vec<u8>> {
+        match self {
+            Self::Buffered(tiny)
+                if bytes.len() <= gat_io::TRANSFER_CHUNK_SIZE.saturating_sub(tiny.len()) =>
+            {
+                if tiny.is_empty() {
+                    *tiny = bytes;
+                } else {
+                    tiny.extend_from_slice(&bytes);
+                }
+                Ok(())
+            }
+            _ => Err(bytes),
+        }
+    }
+
+    // Called on the local worker: crossing the threshold transfers the prefix
+    // into the ingest once, and later chunks reuse the same ingest.
+    fn append(self, cache: &CacheWriter, bytes: &[u8]) -> Result<Self, CacheError> {
+        let mut ingest = match self {
+            Self::Buffered(prefix) => {
+                let mut ingest = cache.begin_ingest()?;
+                ingest.append(&prefix)?;
+                ingest
+            }
+            Self::Streaming(ingest) => ingest,
+        };
+        ingest.append(bytes)?;
+        Ok(Self::Streaming(ingest))
+    }
+
+    fn finish(self, cache: &CacheWriter, oid: Oid) -> Result<ExpectedIngest, CacheError> {
+        match self {
+            Self::Buffered(bytes) => cache.ingest_expected(oid, std::io::Cursor::new(bytes)),
+            Self::Streaming(ingest) => ingest.finish(oid),
+        }
+    }
+}
+
 pub(super) async fn receive(
     executor: &RemoteExecutor,
     client: RemoteClient,
@@ -65,29 +115,25 @@ async fn receive_network(
         .map_err(|()| ReceiveError::Cancelled)?
         .map_err(ReceiveError::Remote)?;
     // Select the tiny path from actual bytes, without metadata discovery.
-    let mut tiny = Vec::new();
-    let mut ingest = None;
+    let mut body = ReceiveBody::Buffered(Vec::new());
     let mut next = executor
         .cancellable(reader.next())
         .await
         .map_err(|()| ReceiveError::Cancelled)?
         .map_err(ReceiveError::Remote)?;
     while let Some(bytes) = next {
-        if ingest.is_none() && tiny.len() + bytes.len() <= gat_io::TRANSFER_CHUNK_SIZE {
-            if tiny.is_empty() {
-                tiny = bytes;
-            } else {
-                tiny.extend_from_slice(&bytes);
+        let bytes = match body.try_buffer(bytes) {
+            Ok(()) => {
+                next = executor
+                    .cancellable(reader.next())
+                    .await
+                    .map_err(|()| ReceiveError::Cancelled)?
+                    .map_err(ReceiveError::Remote)?;
+                continue;
             }
-            next = executor
-                .cancellable(reader.next())
-                .await
-                .map_err(|()| ReceiveError::Cancelled)?
-                .map_err(ReceiveError::Remote)?;
-            continue;
-        }
+            Err(bytes) => bytes,
+        };
         let writer = cache.clone();
-        let prefix = std::mem::take(&mut tiny);
         let (read, appended) = RemoteExecutor::overlap_transfer(
             async {
                 executor
@@ -98,26 +144,18 @@ async fn receive_network(
             },
             async {
                 executor
-                    .local_transfer(move || {
-                        let mut ingest = match ingest {
-                            Some(ingest) => ingest,
-                            None => writer.begin_ingest()?,
-                        };
-                        ingest.append(&prefix)?;
-                        ingest.append(&bytes)?;
-                        Ok::<_, CacheError>(ingest)
-                    })
+                    .local_transfer(move || body.append(&writer, &bytes))
                     .await
                     .map_err(ReceiveError::from)?
                     .map_err(ReceiveError::Cache)
             },
         )
         .await?;
-        ingest = Some(appended);
+        body = appended;
         next = read;
     }
     drop(reader);
-    publish_received(executor, cache, oid, tiny, ingest).await
+    publish_received(executor, cache, oid, body).await
 }
 
 // Keep the completed body owned through cancellation-aware local admission and
@@ -126,17 +164,10 @@ async fn publish_received(
     executor: &RemoteExecutor,
     cache: CacheWriter,
     oid: Oid,
-    tiny: Vec<u8>,
-    ingest: Option<CacheIngest>,
+    body: ReceiveBody,
 ) -> Result<Option<CachePublication>, ReceiveError> {
     let result = executor
-        .local_transfer(move || {
-            match ingest {
-                Some(ingest) => ingest.finish(oid),
-                None => cache.ingest_expected(oid, std::io::Cursor::new(tiny)),
-            }
-            .map_err(ReceiveError::Cache)
-        })
+        .local_transfer(move || body.finish(&cache, oid).map_err(ReceiveError::Cache))
         .await
         .map_err(ReceiveError::from)??;
     received_result(result)
@@ -154,6 +185,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn received_body_preserves_bytes_across_the_buffer_to_stream_transition() {
+        for size in [
+            0,
+            gat_io::TRANSFER_CHUNK_SIZE - 1,
+            gat_io::TRANSFER_CHUNK_SIZE,
+            gat_io::TRANSFER_CHUNK_SIZE + 1,
+            3 * gat_io::TRANSFER_CHUNK_SIZE + 17,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let cache =
+                gat_io::RepositoryLayout::at(dir.path().to_owned()).resolve_cache_root(None);
+            let writer = cache.writer();
+            let bytes: Vec<u8> = (0..=250).cycle().take(size).collect();
+            let oid = Oid::from_bytes(*blake3::hash(&bytes).as_bytes());
+            let mut body = ReceiveBody::Buffered(Vec::new());
+            let mut received = 0;
+            for chunk in bytes.chunks(gat_io::TRANSFER_CHUNK_SIZE) {
+                received += chunk.len();
+                if let Err(chunk) = body.try_buffer(chunk.to_vec()) {
+                    body = body.append(&writer, &chunk).unwrap();
+                }
+                assert_eq!(
+                    matches!(body, ReceiveBody::Buffered(_)),
+                    received <= gat_io::TRANSFER_CHUNK_SIZE,
+                );
+                if received <= gat_io::TRANSFER_CHUNK_SIZE {
+                    assert!(!cache.display_path().exists());
+                }
+            }
+            assert!(matches!(
+                body.finish(&writer, oid).unwrap(),
+                ExpectedIngest::Published { .. }
+            ));
+            assert_eq!(
+                cache.open_client().verify(&oid).unwrap(),
+                gat_io::ObjectVerification::Valid
+            );
+        }
+    }
+
+    #[test]
     fn file_receive_uses_one_worker_and_a_file_specific_reservation() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _entered = runtime.enter();
@@ -161,8 +233,7 @@ mod tests {
             crate::remote_session::test_support::open_handles_on_current_runtime(&["remote"]);
         let client = handles[0].client().clone();
         let tmp = tempfile::tempdir().unwrap();
-        let cache =
-            gat_io::RepositoryLayout::at(tmp.path().to_owned()).resolve_cache_root(None, None);
+        let cache = gat_io::RepositoryLayout::at(tmp.path().to_owned()).resolve_cache_root(None);
         let executor = RemoteExecutor::new(crate::limits::ExecutionLimits::tiny().remote);
         assert!(client.download_buffer_bytes() > gat_io::TRANSFER_CHUNK_SIZE);
         assert!(client.download_buffer_bytes() < gat_io::DOWNLOAD_BUFFER_BYTES);
@@ -172,7 +243,7 @@ mod tests {
             gat_io::TRANSFER_CHUNK_SIZE + 1,
             3 * gat_io::TRANSFER_CHUNK_SIZE + 17,
         ] {
-            let bytes = vec![42; size];
+            let bytes: Vec<u8> = (0..=250).cycle().take(size).collect();
             let oid = Oid::from_bytes(*blake3::hash(&bytes).as_bytes());
             client.write(&gat_io::object_key_oid(&oid), bytes).unwrap();
             assert!(
@@ -206,7 +277,7 @@ mod tests {
         );
         let tmp = tempfile::tempdir().unwrap();
         let layout = gat_io::RepositoryLayout::at(tmp.path().to_path_buf());
-        let cache = layout.resolve_cache_root(None, None);
+        let cache = layout.resolve_cache_root(None);
         let bytes = vec![42; 2 * gat_io::TRANSFER_CHUNK_SIZE];
         let oid = Oid::from_bytes(*blake3::hash(&bytes).as_bytes());
         runtime.block_on(async {
@@ -269,7 +340,7 @@ mod tests {
                 for queued in [false, true] {
                     let tmp = tempfile::tempdir().unwrap();
                     let layout = gat_io::RepositoryLayout::at(tmp.path().to_path_buf());
-                    let cache = layout.resolve_cache_root(None, None);
+                    let cache = layout.resolve_cache_root(None);
                     let executor =
                         RemoteExecutor::new(crate::limits::ExecutionLimits::tiny().remote);
                     let bytes = vec![
@@ -281,13 +352,13 @@ mod tests {
                         }
                     ];
                     let oid = Oid::from_bytes(*blake3::hash(&bytes).as_bytes());
-                    let (tiny, ingest) = if streaming {
+                    let body = if streaming {
                         let mut ingest = cache.writer().begin_ingest().unwrap();
                         ingest.append(&bytes).unwrap();
                         assert_eq!(std::fs::read_dir(cache.display_path()).unwrap().count(), 1);
-                        (Vec::new(), Some(ingest))
+                        ReceiveBody::Streaming(ingest)
                     } else {
-                        (bytes, None)
+                        ReceiveBody::Buffered(bytes)
                     };
                     let (started, running) = tokio::sync::oneshot::channel();
                     let (release, released) = std::sync::mpsc::channel();
@@ -296,8 +367,7 @@ mod tests {
                         released.recv().unwrap();
                     });
                     running.await.unwrap();
-                    let publication =
-                        publish_received(&executor, cache.writer(), oid, tiny, ingest);
+                    let publication = publish_received(&executor, cache.writer(), oid, body);
                     tokio::pin!(publication);
                     if queued {
                         assert!(futures::poll!(&mut publication).is_pending());
@@ -337,7 +407,7 @@ mod tests {
         let client = handles[0].client().clone();
         let tmp = tempfile::tempdir().unwrap();
         let layout = gat_io::RepositoryLayout::at(tmp.path().to_path_buf());
-        let cache = layout.resolve_cache_root(None, None);
+        let cache = layout.resolve_cache_root(None);
         let executor = RemoteExecutor::new(crate::limits::ExecutionLimits::tiny().remote);
         let bytes = vec![42; 3 * gat_io::TRANSFER_CHUNK_SIZE + 17];
         let oid = Oid::from_bytes(*blake3::hash(&bytes).as_bytes());
@@ -374,7 +444,7 @@ mod tests {
             crate::remote_session::test_support::open_handles_on_current_runtime(&["remote"]);
         let tmp = tempfile::tempdir().unwrap();
         let layout = gat_io::RepositoryLayout::at(tmp.path().to_path_buf());
-        let cache = layout.resolve_cache_root(None, None);
+        let cache = layout.resolve_cache_root(None);
         let executor = RemoteExecutor::new(crate::limits::ExecutionLimits::tiny().remote);
         executor.cancellation().cancel();
         // No object exists remotely: opening it would report a remote failure.

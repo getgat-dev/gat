@@ -303,7 +303,7 @@ pub(crate) fn sync(repo: &Repo, opts: &SyncOptions) -> Result<SyncOutcome> {
         .expect("observe test desired revision");
     let snapshot = crate::snapshot::Snapshot::new(repo.snapshot_input(cfg, desired_revision))
         .expect("build test operation snapshot");
-    let session = crate::session::Session::new();
+    let session = crate::session::Session::for_test();
     let mut operation = crate::operation::Operation::new(repo, snapshot, session);
     sync_from_snapshot(&mut operation, opts, None)
 }
@@ -705,7 +705,12 @@ mod tests {
 
     fn track(repo: &Repo, path: &str, content: &[u8]) -> Entry {
         let mut lock = gat_io::LockStore::load_repository(repo.layout()).unwrap();
-        let (ingested, _) = repo.resolved_cache_root().writer().ingest(content).unwrap();
+        let (ingested, _) = repo
+            .resolved_cache_root()
+            .unwrap()
+            .writer()
+            .ingest(content)
+            .unwrap();
         let oid = ingested.oid;
         lock.upsert(GatPath::parse_canonical(path).unwrap(), ingested.oid);
         repo.save_lock(&lock).unwrap();
@@ -724,7 +729,9 @@ mod tests {
     #[test]
     fn sync_dry_run_never_creates_the_materialized_state_database() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
 
         let outcome = sync(
@@ -755,7 +762,9 @@ mod tests {
     #[test]
     fn sync_dry_run_reads_but_never_mutates_an_existing_materialized_state_database() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         sync(&repo, &trust_state_opts()).unwrap();
         let database = tmp.path().join(".gat/state/state.sqlite3");
@@ -792,7 +801,9 @@ mod tests {
     #[test]
     fn repeated_sync_is_a_no_op() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         sync(&repo, &trust_state_opts()).unwrap();
 
@@ -817,7 +828,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
 
@@ -865,7 +878,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
 
@@ -908,7 +923,9 @@ mod tests {
     #[test]
     fn trust_state_is_downgraded_to_validate_while_validation_required_is_set() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
 
@@ -945,7 +962,9 @@ mod tests {
     #[test]
     fn a_full_validated_sync_clears_the_validation_required_flag() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
 
@@ -979,7 +998,9 @@ mod tests {
     #[test]
     fn clean_sync_records_an_exclude_fingerprint_matching_current_desired_state() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
 
         sync(&repo, &trust_state_opts()).unwrap();
@@ -1019,7 +1040,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
 
         sync(&repo, &trust_state_opts()).unwrap();
@@ -1050,7 +1073,9 @@ mod tests {
     #[test]
     fn sync_regenerates_excludes_after_ignore_patterns_change_alone() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "data/a.bin", b"hello");
         sync(&repo, &trust_state_opts()).unwrap();
         let before = std::fs::read_to_string(tmp.path().join(".git/info/exclude")).unwrap();
@@ -1079,7 +1104,9 @@ mod tests {
     #[test]
     fn sync_rewrites_info_exclude_after_it_was_deleted_between_clean_syncs() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         sync(&repo, &trust_state_opts()).unwrap();
         let exclude_path = tmp.path().join(".git/info/exclude");
@@ -1100,7 +1127,9 @@ mod tests {
     #[test]
     fn sync_repairs_an_externally_modified_managed_block() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         sync(&repo, &trust_state_opts()).unwrap();
         let exclude_path = tmp.path().join(".git/info/exclude");
@@ -1119,7 +1148,11 @@ mod tests {
     #[test]
     fn concurrent_sync_attempts_do_not_corrupt_state() {
         let tmp = git_repo();
-        let repo = std::sync::Arc::new(Repo::at(tmp.path().to_path_buf()));
+        let repo = std::sync::Arc::new(
+            crate::Invocation::from_pairs([] as [(&str, &str); 0])
+                .unwrap()
+                .repository_at(tmp.path().to_path_buf()),
+        );
         for i in 0..20 {
             track(
                 &repo,
@@ -1218,13 +1251,16 @@ mod tests {
     #[test]
     fn fresh_sync_beyond_one_dirty_chunk_materializes_every_path() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut limits = crate::limits::ExecutionLimits::tiny();
         let dirty_window = 3;
         limits.sync.dirty_window = std::num::NonZeroUsize::new(dirty_window).unwrap();
         let count = dirty_window * 2 + 1;
         let ingested = repo
             .resolved_cache_root()
+            .unwrap()
             .writer()
             .ingest(&b"data"[..])
             .unwrap()
@@ -1276,7 +1312,7 @@ mod tests {
     ) -> SyncOutcome {
         let cfg = repo.load_config().unwrap();
         let desired_revision = {
-            let _guard = gat_io::RepoLock::acquire_repository(repo.layout()).unwrap();
+            let _guard = repo.acquire_configuration_lock().unwrap();
             crate::repository_state::current_desired_revision(repo).unwrap()
         };
         let snapshot =
@@ -1301,7 +1337,9 @@ mod tests {
     #[test]
     fn sync_dirty_window_and_merge_window_tune_independently_under_trust_state() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut limits = crate::limits::ExecutionLimits::tiny();
         limits.sync.dirty_window = std::num::NonZeroUsize::new(3).unwrap();
         limits.sync.merge_window = std::num::NonZeroUsize::new(11).unwrap();
@@ -1313,7 +1351,7 @@ mod tests {
         // distinguish the two resources.
         let count = limits.sync.dirty_window.get() * 4 + 1;
         let mut lock = gat_io::LockStore::load_repository(repo.layout()).unwrap();
-        for (i, oid) in ingest_many_test_files(&repo.resolved_cache_root(), count) {
+        for (i, oid) in ingest_many_test_files(&repo.resolved_cache_root().unwrap(), count) {
             lock.upsert(
                 GatPath::parse_canonical(&format!("file-{i:06}.bin")).unwrap(),
                 oid,
@@ -1341,12 +1379,14 @@ mod tests {
     #[test]
     fn sync_dirty_window_high_water_never_exceeds_the_configured_window() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut limits = crate::limits::ExecutionLimits::tiny();
         limits.sync.dirty_window = std::num::NonZeroUsize::new(4).unwrap();
         let count = limits.sync.dirty_window.get() * 5 + 1;
         let mut lock = gat_io::LockStore::load_repository(repo.layout()).unwrap();
-        for (i, oid) in ingest_many_test_files(&repo.resolved_cache_root(), count) {
+        for (i, oid) in ingest_many_test_files(&repo.resolved_cache_root().unwrap(), count) {
             lock.upsert(
                 GatPath::parse_canonical(&format!("file-{i:06}.bin")).unwrap(),
                 oid,
@@ -1372,13 +1412,15 @@ mod tests {
     #[test]
     fn sync_dirty_window_and_merge_window_tune_independently_under_validate() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut limits = crate::limits::ExecutionLimits::tiny();
         limits.sync.dirty_window = std::num::NonZeroUsize::new(11).unwrap();
         limits.sync.merge_window = std::num::NonZeroUsize::new(3).unwrap();
         let count = limits.sync.merge_window.get() * 4 + 1;
         let mut lock = gat_io::LockStore::load_repository(repo.layout()).unwrap();
-        for (i, oid) in ingest_many_test_files(&repo.resolved_cache_root(), count) {
+        for (i, oid) in ingest_many_test_files(&repo.resolved_cache_root().unwrap(), count) {
             lock.upsert(
                 GatPath::parse_canonical(&format!("file-{i:06}.bin")).unwrap(),
                 oid,
@@ -1410,13 +1452,16 @@ mod tests {
     #[test]
     fn fresh_validated_sync_beyond_one_merge_batch_materializes_every_path() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut limits = crate::limits::ExecutionLimits::tiny();
         let merge_window = 3;
         limits.sync.merge_window = std::num::NonZeroUsize::new(merge_window).unwrap();
         let count = merge_window * 2 + 1;
         let ingested = repo
             .resolved_cache_root()
+            .unwrap()
             .writer()
             .ingest(&b"data"[..])
             .unwrap()

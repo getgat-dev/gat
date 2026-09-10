@@ -2,7 +2,6 @@
 
 use crate::excludes;
 use crate::repository::Repository;
-use gat_io::RepoLock;
 use gat_io::{
     CacheDatabaseHealth, CacheDatabaseUnreadable, LockStore, PreparedReshapeStatus,
     ReshapeRecoveryChoice, ReshapeTransactionKind,
@@ -283,7 +282,9 @@ impl MaintenanceService<'_> {
     }
 
     pub fn repair_lock(&self, request: &LockRepairRequest) -> Result<LockRepair, MaintenanceError> {
-        let _guard = RepoLock::acquire_repository(self.repo.layout())
+        let _guard = self
+            .repo
+            .acquire_configuration_lock()
             .map_err(|source| MaintenanceError::new(MaintenanceErrorKind::Lock, source))?;
         let state = self.inspect_lock()?;
         match build_lock_repair_plan(state, request) {
@@ -302,7 +303,9 @@ impl MaintenanceService<'_> {
     }
 
     pub fn clean_lock(&self) -> Result<LockClean, MaintenanceError> {
-        let _guard = RepoLock::acquire_repository(self.repo.layout())
+        let _guard = self
+            .repo
+            .acquire_configuration_lock()
             .map_err(|source| MaintenanceError::new(MaintenanceErrorKind::Lock, source))?;
         let state = self.inspect_lock()?;
         let removable = removable_transaction_count(&state);
@@ -332,7 +335,9 @@ impl MaintenanceService<'_> {
     }
 
     pub fn repair_state(&self) -> Result<StateRepair, MaintenanceError> {
-        let _guard = RepoLock::acquire_repository(self.repo.layout())
+        let _guard = self
+            .repo
+            .acquire_configuration_lock()
             .map_err(|source| MaintenanceError::new(MaintenanceErrorKind::State, source))?;
         let db = self.inspect_state_db()?;
         if let StateDbState::NewerVersion(version) = db {
@@ -349,7 +354,9 @@ impl MaintenanceService<'_> {
     }
 
     pub fn clean_state(&self) -> Result<StateClean, MaintenanceError> {
-        let _guard = RepoLock::acquire_repository(self.repo.layout())
+        let _guard = self
+            .repo
+            .acquire_configuration_lock()
             .map_err(|source| MaintenanceError::new(MaintenanceErrorKind::State, source))?;
         let removed = remove_stale_sidecars(self.repo.layout())
             .map_err(|source| MaintenanceError::new(MaintenanceErrorKind::State, source))?;
@@ -725,7 +732,9 @@ mod tests {
 
     fn tracked_repo() -> (tempfile::TempDir, Repository) {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = Repository::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let lock = Lock {
             entries: vec![
                 Entry {
@@ -1066,7 +1075,7 @@ mod tests {
         let (tmp, repo) = tracked_repo();
         let transaction = simulated_txn(tmp.path(), &repo, LockShardLevels::new(2).unwrap());
         fs::rename(transaction.join("new"), tmp.path().join("gat.lock")).unwrap();
-        let guard = RepoLock::acquire_repository(repo.layout()).unwrap();
+        let guard = repo.acquire_configuration_lock().unwrap();
         let root = tmp.path().to_path_buf();
         let progressed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let progressed_writer = progressed.clone();
@@ -1074,7 +1083,9 @@ mod tests {
         let (attempted_tx, attempted_rx) = std::sync::mpsc::channel::<()>();
         let handle = std::thread::spawn(move || {
             start_rx.recv().unwrap();
-            let repo = Repository::at(root);
+            let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+                .unwrap()
+                .repository_at(root);
             let report = repo.maintenance().clean_lock().unwrap();
             progressed_writer.store(true, std::sync::atomic::Ordering::SeqCst);
             report
@@ -1102,7 +1113,9 @@ mod tests {
     #[test]
     fn repair_state_refuses_to_rewrite_a_newer_schema_database() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = Repository::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let db_path = tmp.path().join(".gat/state/state.sqlite3");
         fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let version = gat_io::state_current_schema_version_for_test() + 1;
@@ -1118,7 +1131,9 @@ mod tests {
     #[test]
     fn failed_state_rebuild_preserves_the_live_database_and_removes_its_temp_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = Repository::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let db_path = tmp.path().join(".gat/state/state.sqlite3");
         fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let version = gat_io::state_current_schema_version_for_test() - 1;
@@ -1137,7 +1152,9 @@ mod tests {
     #[test]
     fn inspect_state_reports_a_wrong_filesystem_type_as_unreadable() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = Repository::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         fs::create_dir_all(tmp.path().join(".gat/state/state.sqlite3")).unwrap();
 
         let report = repo.maintenance().inspect_state().unwrap();
@@ -1148,7 +1165,9 @@ mod tests {
     #[test]
     fn repair_state_leaves_an_already_healthy_database_untouched() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = Repository::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut store = StateStore::open(repo.layout()).unwrap();
         crate::workspace::sync::refresh_desired_index(&repo, &mut store).unwrap();
         drop(store);
@@ -1169,7 +1188,9 @@ mod tests {
     #[test]
     fn destructive_state_rebuild_marks_provenance_for_validation() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = Repository::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
 
         let report = repo.maintenance().repair_state().unwrap();
 
@@ -1187,11 +1208,13 @@ mod tests {
     #[test]
     fn clean_state_serializes_with_a_concurrent_repo_lock_holder() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = Repository::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let db_path = tmp.path().join(".gat/state/state.sqlite3");
         fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         gat_io::state_create_stale_sidecar_for_test(repo.layout()).unwrap();
-        let guard = RepoLock::acquire_repository(repo.layout()).unwrap();
+        let guard = repo.acquire_configuration_lock().unwrap();
         let root = tmp.path().to_path_buf();
         let progressed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let progressed_writer = progressed.clone();
@@ -1199,7 +1222,9 @@ mod tests {
         let (attempted_tx, attempted_rx) = std::sync::mpsc::channel::<()>();
         let handle = std::thread::spawn(move || {
             start_rx.recv().unwrap();
-            let repo = Repository::at(root);
+            let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+                .unwrap()
+                .repository_at(root);
             let report = repo.maintenance().clean_state().unwrap();
             progressed_writer.store(true, std::sync::atomic::Ordering::SeqCst);
             report

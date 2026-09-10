@@ -1,6 +1,6 @@
 use gat_command::{AddRequest, ConfigAction, ConfigRequest, RemoveRequest, add, config, remove};
 use gat_core::config::ConfigScope;
-use gat_core::config_keys::ConfigKey;
+use gat_core::config_keys::SettingKey;
 use gat_core::path_scope::normalize_path_scope;
 use gat_core::progress::{
     ActivityBackend, NoopProgress, ProgressActivity, ProgressOperation, ProgressReporter,
@@ -18,7 +18,9 @@ pub fn repository() -> (tempfile::TempDir, Repository) {
         temp.path(),
         &["commit", "-q", "--allow-empty", "-m", "initial"],
     );
-    let repo = Repository::at(temp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(temp.path().to_path_buf());
     (temp, repo)
 }
 
@@ -67,11 +69,11 @@ pub fn remove_paths(repo: &Repository, paths: &[PathBuf]) {
 pub fn set_lock_shard_levels(repo: &Repository, levels: u8) {
     config(
         repo,
-        ConfigRequest {
-            key: ConfigKey::LockShardLevels,
-            action: ConfigAction::Set(vec![levels.to_string()]),
-            scope: ConfigScope::Project,
-        },
+        ConfigRequest::new(
+            SettingKey::LockShardLevels,
+            ConfigAction::Set(vec![levels.to_string()]),
+            ConfigScope::Project,
+        ),
     )
     .unwrap();
 }

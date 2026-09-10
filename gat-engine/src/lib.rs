@@ -62,34 +62,34 @@
 //! ```
 //!
 //! ```compile_fail
-//! let repository = gat_engine::Repository::at(std::path::PathBuf::from("."));
+//! let repository = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0]).unwrap().repository_at(std::path::PathBuf::from("."));
 //! let _ = gat_io::StateStore::open(&repository);
 //! ```
 //!
 //! ```compile_fail
-//! let repository = gat_engine::Repository::at(std::path::PathBuf::from("."));
+//! let repository = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0]).unwrap().repository_at(std::path::PathBuf::from("."));
 //! let _: &gat_io::RepositoryLayout = &repository;
 //! ```
 //!
 //! ```compile_fail
-//! let repository = gat_engine::Repository::at(std::path::PathBuf::from("."));
+//! let repository = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0]).unwrap().repository_at(std::path::PathBuf::from("."));
 //! let _ = repository.materialized_db_path();
 //! ```
 //!
 //! ```compile_fail
-//! let repository = gat_engine::Repository::at(std::path::PathBuf::from("."));
+//! let repository = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0]).unwrap().repository_at(std::path::PathBuf::from("."));
 //! let _ = repository.sync_lock_path();
 //! ```
 //!
 //! The command-facing repository façade does not expose its physical root.
 //!
 //! ```compile_fail
-//! let repository = gat_engine::Repository::at(std::path::PathBuf::from("."));
+//! let repository = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0]).unwrap().repository_at(std::path::PathBuf::from("."));
 //! let _ = repository.root();
 //! ```
 //!
 //! ```compile_fail
-//! let repository = gat_engine::Repository::at(std::path::PathBuf::from("."));
+//! let repository = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0]).unwrap().repository_at(std::path::PathBuf::from("."));
 //! let _ = repository.config_path_for(gat_core::config::ConfigScope::Project);
 //! ```
 //!
@@ -97,7 +97,7 @@
 //! remote outcomes, while operations resolve typed catalogs and sessions.
 //!
 //! ```compile_fail
-//! let repository = gat_engine::Repository::at(std::path::PathBuf::from("."));
+//! let repository = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0]).unwrap().repository_at(std::path::PathBuf::from("."));
 //! let _ = repository.remote_url_named(None);
 //! ```
 //!
@@ -159,7 +159,8 @@ mod worktree;
 
 pub use cache_presence::CachePresenceSession;
 pub use compare::{
-    ChangedRow, CompareError, CompareErrorKind, ComparisonService, RowChange, Unchanged,
+    ChangedRow, CompareError, CompareErrorKind, ComparisonService, CurrentComparison, RowChange,
+    Unchanged,
 };
 pub use config_file::{
     ConfigFileLoadError, ConfigFileSaveError, load as load_config_file, save as save_config_file,
@@ -194,18 +195,15 @@ pub use maintenance::{
 };
 pub use merge_driver::{MergeDriverError, MergeStage, merge_driver};
 pub use mount::{
-    LockedMount, MountAdd, MountMutationOutcome, MountRemove, MountRowSource, MountService,
-    MountSourceError, MountSourceErrorKind, MountSourceLocation, MountUpdate, MountWorkflowError,
-    PreparedMountSource,
+    MountMutationOutcome, MountRowSource, MountService, MountSourceError, MountSourceErrorKind,
+    MountSourceLocation, MountWorkflowError, PreparedMountSource,
 };
 pub use operation::Operation;
 pub use path_policy::{
     EffectivePathPolicy, MountOwnership, PathPolicyError, ResolvedRemote,
     UnknownRemoteOverrideError,
 };
-pub use remote_catalog::{
-    RemoteCatalog, RemoteCatalogError, RemoteId, RemoteUrlValidationError, validate_remote_url,
-};
+pub use remote_catalog::{RemoteCatalog, RemoteCatalogError, RemoteId, RemoteUrlValidationError};
 pub use remote_open::{RemoteOpenError, RemoteOpenFailureKind};
 pub use remote_session::RemoteSessionError;
 pub use repo_snapshot::{
@@ -394,8 +392,10 @@ pub mod test_support {
     /// Cross-layer tests use this instead of turning the presentation-only
     /// cache location back into an operational path.
     #[must_use]
+    /// # Panics
+    /// Panics when the fixture configuration cannot be loaded.
     pub fn cache_root(repo: &crate::Repository) -> gat_io::CacheRoot {
-        repo.resolved_cache_root()
+        repo.resolved_cache_root().unwrap()
     }
 
     pub fn record_cache_location_resolution() {
@@ -444,3 +444,11 @@ pub mod test_support {
 }
 
 pub use gat_io::{AddExclusion, AddExclusionReason};
+
+mod invocation;
+pub use invocation::{EnvironmentName, InputValueReason, Invocation, InvocationInputError};
+
+mod resources;
+pub use resources::*;
+
+pub(crate) use mount::{LockedMount, MountAdd, MountRemove, MountUpdate};

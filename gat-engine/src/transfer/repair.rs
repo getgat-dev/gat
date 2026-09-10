@@ -155,8 +155,7 @@ const fn remote_kind(source: &RemoteError) -> RepairRemoteFailureKind {
         RemoteError::Unavailable { .. } | RemoteError::ReadinessTimedOut { .. } => {
             RepairRemoteFailureKind::Unavailable
         }
-        RemoteError::InvalidConnectTimeout
-        | RemoteError::MalformedUrl { .. }
+        RemoteError::MalformedUrl { .. }
         | RemoteError::UnsupportedScheme { .. }
         | RemoteError::InvalidFileRemotePath { .. }
         | RemoteError::DisallowedScheme

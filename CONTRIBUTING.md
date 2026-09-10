@@ -60,7 +60,7 @@ semantic validation, `gat-core/src/config_keys.rs`, and the `gat config`
 handler when the key is directly settable. Then run the same three tasks.
 
 Command descriptions and examples live in
-[command_docs.rs](tools/docs/command_docs.rs); authored explanations live in
+[command_docs.rs](tools/docs/src/command_docs.rs); authored explanations live in
 [tools/docs/content](tools/docs/content). Start with [How Gat works](docs/concepts/how-gat-works.mdx)
 for the user-facing model these pages explain.
 
@@ -90,12 +90,14 @@ locking representations as convenience APIs.
 When changing workspace manifests or cross-layer behavior, run:
 
 ```sh
-task lint:workspace-boundary:selftest lint:workspace-boundary
+task test:checks lint:architecture
 ```
 
 The boundary policy also requires that engine code avoid buffered file I/O
 and ambient environment lookup, remote clients be opened by the
 operation-scoped session, and command code avoid physical filesystem work.
+These boundaries also cover async filesystem APIs and process spawning.
+Keep production output free of `dbg!` calls.
 
 ## Errors and user-visible output
 
@@ -133,19 +135,26 @@ Keep tests deterministic and isolated:
   to hide flakes.
 - Do not mutate the process environment in parallel unit tests; inject values
   or set them only on a spawned child process.
-- Use `file://` remotes instead of real network services.
+- Pass explicit paths or use child-process `current_dir`; do not change the
+  process-wide working directory.
+- Use `file://` remotes instead of real network services. Bind local fixture
+  servers to IPv4/IPv6 loopback port zero, rather than wildcard interfaces.
 - Prefer fixture-owned or thread-local test state over mutable process
   globals.
 - Keep shared integration fixtures in `tests/common`, `test-support-git`, or
   `test-support-gat` as appropriate.
 
-`task lint:test-hygiene` enforces these rules across the workspace.
+`task lint:test-hygiene` checks direct isolation-sensitive operations across the
+workspace. Pure URL/path test data needs no annotation. `task lint:architecture`
+checks dependency and source ownership; `task test:checks` tests the checker.
+See [the checker guide](tools/check/README.md) for coverage and limitations.
 
 ## Code and documentation
 
 Follow existing Rust style and preserve cross-platform behavior and the
 `Cargo.toml` MSRV. Every workspace package must inherit the shared lint
-policy from the root `Cargo.toml` with `[lints] workspace = true`.
+policy from the root `Cargo.toml` with `[lints] workspace = true`, and declare
+the same `rust-version` as the application.
 `task lint` checks all workspace packages, including developer tools.
 Comments should explain non-obvious intent or invariants,
 not restate code. Rustdoc should document contracts and meaningful errors,

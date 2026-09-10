@@ -43,9 +43,6 @@ pub use gc::{
     GcEngineError, GcError, GcFailure, GcFailureKind, GcOutcome, GcRepositoryFailureKind,
     GcRepositoryIssue, GcRequest, gc, gc_with_lifecycle_observer,
 };
-#[cfg(any(test, feature = "test-support"))]
-#[doc(hidden)]
-pub use init::init_with_cache_resolution;
 pub use init::{
     InitConfigOutcome, InitError, InitGitIntegrationOutcome, InitHooksOutcome, InitOutcome,
     InitRequest, init,
@@ -64,7 +61,7 @@ pub use push::{
     PushError, PushOutcome, PushRequest, PushSkip, PushSkipReason, PushSource, push,
     push_with_desired_operation,
 };
-pub use remote::{RemoteError, RemoteOutcome, RemoteRecord, RemoteRequest, remote};
+pub use remote::{RemoteDefault, RemoteError, RemoteOutcome, RemoteRecord, RemoteRequest, remote};
 pub use remote_status::{
     MissingRemoteConfigError, MissingRemoteObject, RemoteStatusError, RemoteStatusOutcome,
     RemoteStatusRequest, remote_status, remote_status_with_desired_operation,
@@ -79,8 +76,8 @@ pub use route::{
     DefaultRemoteRoute, RouteDetails, RouteError, RouteOutcome, RouteRecord, RouteRequest, route,
 };
 pub use saved_selection::{
-    SavedSelectionError, SelectionOutcome, SelectionRecord, SelectionRequest, named_selection,
-    saved_selection,
+    SavedSelectionError, SelectionDefault, SelectionOutcome, SelectionRecord, SelectionRequest,
+    named_selection, saved_selection,
 };
 pub use selection::SelectionScope;
 pub use status::{

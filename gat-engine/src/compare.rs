@@ -37,6 +37,7 @@ use std::collections::BTreeMap;
 /// Semantic stage at which a repository comparison failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CompareErrorKind {
+    Acquisition(crate::RepoSnapshotErrorKind),
     Repository,
     GitIndex,
     Revision(GitRevisionSpec),
@@ -75,6 +76,7 @@ impl CompareError {
 impl std::fmt::Display for CompareError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let stage = match self.kind {
+            CompareErrorKind::Acquisition(_) => "capture coherent local state",
             CompareErrorKind::Repository => "open the Git repository",
             CompareErrorKind::GitIndex => "read the Git index",
             CompareErrorKind::Revision(_) => "resolve a Git revision",
@@ -647,16 +649,86 @@ pub struct ComparisonService<'repo> {
     repo: &'repo Repository,
 }
 
+/// One pinned local generation for selection, ownership, cache location and rows.
+pub struct CurrentComparison<'repo> {
+    repo: &'repo Repository,
+    config: gat_core::config::Config,
+    store: StateStore,
+    levels: LockShardLevels,
+}
+
+impl CurrentComparison<'_> {
+    #[must_use]
+    pub const fn config(&self) -> &gat_core::config::Config {
+        &self.config
+    }
+
+    #[must_use]
+    pub fn cache_presence(&self) -> crate::CachePresenceSession {
+        crate::CachePresenceSession::from_config(self.repo, &self.config)
+    }
+
+    pub fn staged_with_current(
+        &self,
+        selection: &Selection,
+        unchanged: Unchanged,
+    ) -> Result<Vec<ChangedRow>> {
+        let reader = GitReader::open(self.repo.layout())
+            .map_err(|source| CompareError::new(CompareErrorKind::Repository, source))?;
+        compare_snapshot_with_repo(
+            &reader.staged_lock_snapshot()?,
+            &self.store,
+            self.levels,
+            selection,
+            unchanged,
+        )
+    }
+
+    pub fn revision_with_current(
+        &self,
+        from: &GitRevisionSpec,
+        selection: &Selection,
+        unchanged: Unchanged,
+    ) -> Result<Vec<ChangedRow>> {
+        let reader = GitReader::open(self.repo.layout())
+            .map_err(|source| CompareError::new(CompareErrorKind::Repository, source))?;
+        compare_snapshot_with_repo(
+            &reader.lock_snapshot_at(from)?,
+            &self.store,
+            self.levels,
+            selection,
+            unchanged,
+        )
+    }
+}
+
 impl<'repo> ComparisonService<'repo> {
     pub(crate) const fn new(repo: &'repo Repository) -> Self {
         Self { repo }
     }
 
+    /// Recover and pin a local generation before resolving selection or ownership.
+    pub fn current(
+        &self,
+        progress: &dyn gat_core::progress::ProgressReporter,
+    ) -> std::result::Result<CurrentComparison<'repo>, crate::RepoSnapshotError> {
+        let (config, store, refreshed) =
+            crate::repo_snapshot::recover_and_pin_state(self.repo, progress)?;
+        Ok(CurrentComparison {
+            repo: self.repo,
+            config,
+            store,
+            levels: refreshed.shard_levels,
+        })
+    }
+
     fn current_state(&self) -> Result<(StateStore, LockShardLevels)> {
-        let mut store = StateStore::open(self.repo.layout())?;
-        let refreshed =
-            crate::workspace::sync::desired_index::refresh_pinned(self.repo, &mut store)?;
-        Ok((store, refreshed.shard_levels))
+        let current = self
+            .current(&gat_core::progress::NoopProgress)
+            .map_err(|source| {
+                CompareError::new(CompareErrorKind::Acquisition(source.kind()), source)
+            })?;
+        Ok((current.store, current.levels))
     }
 
     /// Compares the staged desired snapshot with current desired state.
@@ -861,6 +933,7 @@ mod tests {
             let content = std::fs::read(root.join(path)).unwrap();
             let (ingested, _) = repo
                 .resolved_cache_root()
+                .unwrap()
                 .writer()
                 .ingest(content.as_slice())
                 .unwrap();
@@ -890,7 +963,9 @@ mod tests {
     #[test]
     fn revision_failure_exposes_only_semantic_context_and_retains_technical_source() {
         let tmp = crate::test_harness::test_repo();
-        let repo = Repository::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let revision = GitRevisionSpec::from("revision-that-does-not-exist");
 
         let err = repo
@@ -921,7 +996,9 @@ mod tests {
 
         let tmp = test_repo();
         let root = tmp.path().to_path_buf();
-        let repo = Repository::at(root.clone());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(root.clone());
         let mut lock = Lock::default();
         lock.upsert(gp("file.bin"), Oid::from_hex(&"1".repeat(64)).unwrap());
         gat_io::LockStore::publish_repository(repo.layout(), &lock, LockShardLevels::FLAT).unwrap();
@@ -1188,13 +1265,14 @@ mod tests {
     /// `BTreeMap` first), while a scoped comparison must do the opposite.
     #[test]
     fn full_and_scoped_current_comparison_use_disjoint_access_plans() {
-        use crate::repository::Repository as Repo;
         use crate::test_harness::{commit_all, git, test_repo};
         use std::path::PathBuf;
 
         let tmp = test_repo();
         let root = tmp.path().to_path_buf();
-        let repo = Repo::at(root.clone());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(root.clone());
         let mut config = repo
             .load_config_scoped(gat_core::config::ConfigScope::Project)
             .unwrap();
@@ -1281,13 +1359,14 @@ mod tests {
     /// `with_current_shard_groups`.
     #[test]
     fn full_flat_comparison_streams_instead_of_buffering_the_whole_shard() {
-        use crate::repository::Repository as Repo;
         use crate::test_harness::{commit_all, git, test_repo};
         use std::path::PathBuf;
 
         let tmp = test_repo();
         let root = tmp.path().to_path_buf();
-        let repo = Repo::at(root.clone());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(root.clone());
         let paths: Vec<PathBuf> = (0..12)
             .map(|i| {
                 let rel = PathBuf::from(format!("f{i:03}.bin"));
@@ -1341,13 +1420,14 @@ mod tests {
     /// shard blob is parsed per side (two total), not more.
     #[test]
     fn full_flat_persisted_comparison_streams_both_shards_instead_of_buffering_them() {
-        use crate::repository::Repository as Repo;
         use crate::test_harness::{commit_all, test_repo};
         use std::path::PathBuf;
 
         let tmp = test_repo();
         let root = tmp.path().to_path_buf();
-        let repo = Repo::at(root.clone());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(root.clone());
         let paths: Vec<PathBuf> = (0..12)
             .map(|i| {
                 let rel = PathBuf::from(format!("f{i:03}.bin"));
@@ -1470,13 +1550,14 @@ mod tests {
     /// fast path turning "not `path`-ordered" into a new hard failure.
     #[test]
     fn unsorted_flat_lock_compares_correctly_via_the_compatibility_fallback() {
-        use crate::repository::Repository as Repo;
         use crate::test_harness::{commit_all, test_repo};
         use gat_core::lock::VERSION;
 
         let tmp = test_repo();
         let root = tmp.path().to_path_buf();
-        let repo = Repo::at(root.clone());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(root.clone());
 
         // Deliberately out of order: "z.bin" before "a.bin".
         std::fs::write(
@@ -1554,5 +1635,47 @@ mod tests {
             "expected z.bin to be reported modified, got {:?}",
             rows[0].change
         );
+    }
+}
+
+#[cfg(test)]
+mod coherent_context_tests {
+    use super::*;
+    use gat_core::config::Config;
+    use gat_core::progress::NoopProgress;
+
+    #[test]
+    fn current_context_keeps_configuration_and_rows_and_does_not_reload_for_cache() {
+        let directory = crate::test_harness::git_repo();
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(directory.path().to_path_buf());
+        let mut original = Config::default();
+        original.sync.auto_fetch = Some(true);
+        repo.save_config(&original).unwrap();
+        let entry = Entry {
+            path: GatPath::parse_canonical("original.bin").unwrap(),
+            oid: Oid::from_hex(&"a".repeat(64)).unwrap(),
+        };
+        repo.save_lock(&gat_core::lock::Lock {
+            entries: vec![entry.clone()],
+        })
+        .unwrap();
+        let before = crate::test_support::config_loads();
+        let current = repo.comparisons().current(&NoopProgress).unwrap();
+        assert_eq!(crate::test_support::config_loads() - before, 1);
+        repo.save_config(&Config::default()).unwrap();
+        repo.save_lock(&gat_core::lock::Lock::default()).unwrap();
+        let mut writer = StateStore::open(repo.layout()).unwrap();
+        crate::workspace::sync::refresh_desired_index(&repo, &mut writer).unwrap();
+        assert_eq!(current.config(), &original);
+        let rows = current
+            .staged_with_current(&Selection::root(), Unchanged::Keep)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, entry.path);
+        let before = crate::test_support::config_loads();
+        assert!(!current.cache_presence().contains(&entry.oid));
+        assert_eq!(crate::test_support::config_loads(), before);
     }
 }

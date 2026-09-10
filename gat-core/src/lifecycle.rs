@@ -83,7 +83,7 @@ pub enum Surface<'a> {
         value: &'a str,
     },
     /// A config key.
-    ConfigKey(&'a str),
+    SettingKey(&'a str),
     /// A config key's deprecated serialized alias, e.g.
     /// `ConfigAlias { canonical: "git.ignore_patterns", alias:
     /// "git.exclude_patterns" }`.

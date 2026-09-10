@@ -53,7 +53,9 @@ fn add(repo: &Repo, paths: &[std::path::PathBuf]) {
 #[test]
 fn status_dispatches_to_status_outcome() {
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let context = Context::new(repo);
     let cli = parse(&["status"]);
 
@@ -71,7 +73,11 @@ fn remote_dispatch_converts_cli_values_to_a_typed_command_outcome() {
     let tmp = test_repo();
     let remote = tempfile::tempdir().unwrap();
     let url = test_support_git::file_remote_url(remote.path());
-    let context = Context::new(Repo::at(tmp.path().to_path_buf()));
+    let context = Context::new(
+        gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf()),
+    );
 
     let outcome = app::run(
         parse(&["remote", "add", "origin", &url]),
@@ -97,7 +103,11 @@ fn route_dispatch_normalizes_cli_values_once_into_a_typed_command_request() {
     let remote = tempfile::tempdir().unwrap();
     let url = test_support_git::file_remote_url(remote.path());
     let root = tmp.path().to_path_buf();
-    let context = Context::new(Repo::at(root.clone()));
+    let context = Context::new(
+        gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(root.clone()),
+    );
     app::run(
         parse(&["remote", "add", "archive", &url]),
         &context,
@@ -139,7 +149,9 @@ fn route_dispatch_normalizes_cli_values_once_into_a_typed_command_request() {
         "route add should reuse the selected scope from its layer snapshot"
     );
     assert!(
-        Repo::at(root)
+        gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(root)
             .load_config_scoped(ConfigScope::Local)
             .unwrap()
             .routes
@@ -151,7 +163,11 @@ fn route_dispatch_normalizes_cli_values_once_into_a_typed_command_request() {
 #[test]
 fn config_dispatch_converts_cli_values_to_a_typed_command_outcome() {
     let tmp = test_repo();
-    let context = Context::new(Repo::at(tmp.path().to_path_buf()));
+    let context = Context::new(
+        gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf()),
+    );
 
     let outcome = app::run(
         parse(&["config", "sync.auto_fetch", "true"]),
@@ -171,12 +187,18 @@ fn config_dispatch_converts_cli_values_to_a_typed_command_outcome() {
 fn mount_dispatch_converts_cli_values_and_uses_typed_outcomes() {
     let source = test_repo();
     std::fs::write(source.path().join("model.bin"), b"payload").unwrap();
-    let source_repo = Repo::at(source.path().to_path_buf());
+    let source_repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(source.path().to_path_buf());
     add(&source_repo, &[std::path::PathBuf::from("model.bin")]);
     commit_all(source.path(), "track source snapshot");
 
     let destination = test_repo();
-    let context = Context::new(Repo::at(destination.path().to_path_buf()));
+    let context = Context::new(
+        gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(destination.path().to_path_buf()),
+    );
     let source_location = source.path().to_string_lossy().into_owned();
     let config_loads_before = gat_engine::test_support::config_loads();
     let outcome = app::run(
@@ -290,7 +312,9 @@ fn mount_dispatch_converts_cli_values_and_uses_typed_outcomes() {
 fn diff_dispatches_with_semantic_revision_targets() {
     let tmp = test_repo();
     std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     add(&repo, &[std::path::PathBuf::from("big.bin")]);
     commit_all(tmp.path(), "track big.bin");
     let context = Context::new(repo);
@@ -316,7 +340,9 @@ fn diff_dispatches_with_semantic_revision_targets() {
 fn add_then_status_round_trips_through_dispatch() {
     let tmp = test_repo();
     std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let context = Context::new(repo);
 
     let add_result = app::run(parse(&["add", "big.bin"]), &context, &NoopProgress);
@@ -344,7 +370,9 @@ fn add_then_status_round_trips_through_dispatch() {
 #[test]
 fn sync_trust_state_flag_overrides_unset_config() {
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let context = Context::new(repo);
 
     let result = app::run(parse(&["sync", "--trust-state"]), &context, &NoopProgress);
@@ -357,7 +385,9 @@ fn sync_trust_state_flag_overrides_unset_config() {
 #[test]
 fn clean_sync_has_a_successful_exit_code() {
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let context = Context::new(repo);
 
     let result = app::run(parse(&["sync"]), &context, &NoopProgress);
@@ -375,7 +405,9 @@ fn clean_sync_has_a_successful_exit_code() {
 #[test]
 fn dispatch_propagates_command_errors() {
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let context = Context::new(repo);
 
     let result = app::run(
@@ -397,7 +429,9 @@ fn dispatch_propagates_command_errors() {
 #[test]
 fn sync_dry_run_rejects_explicit_fetch() {
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let context = Context::new(repo);
 
     let result = app::run(
@@ -420,7 +454,9 @@ fn sync_dry_run_rejects_explicit_fetch() {
 #[test]
 fn sync_dry_run_rejects_explicit_repair() {
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let context = Context::new(repo);
 
     let result = app::run(
@@ -446,7 +482,9 @@ fn sync_dry_run_rejects_explicit_repair() {
 #[test]
 fn status_history_flag_without_remote_is_rejected() {
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let context = Context::new(repo);
 
     let result = app::run(parse(&["status", "--rev", "HEAD"]), &context, &NoopProgress);
@@ -472,7 +510,9 @@ fn status_history_flag_without_remote_is_rejected() {
 #[test]
 fn status_history_flag_diagnostic_has_an_actionable_hint() {
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let context = Context::new(repo);
 
     let result = app::run(parse(&["status", "--branches"]), &context, &NoopProgress);
@@ -493,7 +533,9 @@ fn status_history_flag_diagnostic_has_an_actionable_hint() {
 #[test]
 fn sync_dry_run_suppresses_auto_fetch() {
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     gat_command::config(
         &repo,
         gat_command::ConfigRequest::from_raw(
@@ -521,7 +563,9 @@ fn sync_dry_run_suppresses_auto_fetch() {
 #[test]
 fn status_command_is_reachable_without_app_run() {
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let outcome = gat_command::status(
         &repo,
         StatusRequest {
@@ -542,7 +586,9 @@ fn gc_dispatch_returns_an_experimental_notice() {
     use gat::lifecycle::NoticeKind;
 
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let context = Context::new(repo);
 
     let result = app::run(parse(&["gc", "--dry-run"]), &context, &NoopProgress);
@@ -559,7 +605,9 @@ fn gc_dispatch_returns_an_experimental_notice() {
 #[test]
 fn status_dispatch_returns_no_notices() {
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let context = Context::new(repo);
 
     let result = app::run(parse(&["status"]), &context, &NoopProgress);
@@ -576,7 +624,9 @@ fn config_ingest_strategy_hybrid_and_safe_notices() {
     use gat::lifecycle::NoticeKind;
 
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let context = Context::new(repo);
 
     let result = app::run(
@@ -605,7 +655,9 @@ fn config_git_exclude_patterns_alias_produces_deprecation_notice() {
     use gat::lifecycle::NoticeKind;
 
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let context = Context::new(repo);
 
     let result = app::run(
@@ -623,7 +675,9 @@ fn config_git_exclude_patterns_alias_produces_deprecation_notice() {
 #[test]
 fn gc_no_history_overrides_conservative_default() {
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let path = tmp.path().join("asset.bin");
     std::fs::write(&path, b"old").unwrap();
     add(&repo, &["asset.bin".into()]);
@@ -650,7 +704,9 @@ fn status_and_transfers_default_to_current_state() {
     let _guard = runtime.enter();
     let tmp = test_repo();
     let remote = tempfile::tempdir().unwrap();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     std::fs::write(tmp.path().join("asset.bin"), b"current").unwrap();
     add(&repo, &["asset.bin".into()]);
     let context = Context::new(repo);
@@ -688,7 +744,11 @@ fn status_and_transfers_default_to_current_state() {
 #[test]
 fn local_mutation_dispatch_recovers_and_loads_config_once() {
     let tmp = test_repo();
-    let context = Context::new(Repo::at(tmp.path().to_path_buf()));
+    let context = Context::new(
+        gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf()),
+    );
     std::fs::write(tmp.path().join("a.bin"), b"content").unwrap();
     add(&context.repo, &[std::path::PathBuf::from("a.bin")]);
     for args in [vec!["mv", "a.bin", "b.bin"], vec!["rm", "--cached", "."]] {

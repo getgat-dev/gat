@@ -35,7 +35,7 @@ macro_rules! command {
 pub const COMMAND_DOCS: &[CommandDoc] = &[
     CommandDoc {
         path: "selection",
-        overview: include_str!("content/selection.md"),
+        overview: include_str!("../content/selection.md"),
         examples: &[],
     },
     command!(
@@ -127,7 +127,7 @@ pub const COMMAND_DOCS: &[CommandDoc] = &[
     ),
     command!(
         "init",
-        include_str!("content/init.md"),
+        include_str!("../content/init.md"),
         [
             example!(
                 "Default setup",
@@ -148,7 +148,7 @@ pub const COMMAND_DOCS: &[CommandDoc] = &[
     ),
     command!(
         "add",
-        include_str!("content/add.md"),
+        include_str!("../content/add.md"),
         [
             example!(
                 "One file",
@@ -174,7 +174,7 @@ pub const COMMAND_DOCS: &[CommandDoc] = &[
     ),
     command!(
         "rm",
-        include_str!("content/rm.md"),
+        include_str!("../content/rm.md"),
         [
             example!(
                 "Delete file",
@@ -195,7 +195,7 @@ pub const COMMAND_DOCS: &[CommandDoc] = &[
     ),
     CommandDoc {
         path: "remote",
-        overview: include_str!("content/remote.md"),
+        overview: include_str!("../content/remote.md"),
         examples: &[],
     },
     command!(
@@ -273,7 +273,7 @@ pub const COMMAND_DOCS: &[CommandDoc] = &[
     ),
     command!(
         "config",
-        include_str!("content/config.md"),
+        include_str!("../content/config.md"),
         [
             example!(
                 "Read",
@@ -305,9 +305,9 @@ pub const COMMAND_DOCS: &[CommandDoc] = &[
     command!(
         "status",
         concat!(
-            include_str!("content/status.md"),
+            include_str!("../content/status.md"),
             "\n",
-            include_str!("content/selection-defaults.md")
+            include_str!("../content/selection-defaults.md")
         ),
         [
             example!(
@@ -345,9 +345,9 @@ pub const COMMAND_DOCS: &[CommandDoc] = &[
     command!(
         "diff",
         concat!(
-            include_str!("content/diff.md"),
+            include_str!("../content/diff.md"),
             "\n",
-            include_str!("content/selection-defaults.md")
+            include_str!("../content/selection-defaults.md")
         ),
         [
             example!(
@@ -370,9 +370,9 @@ pub const COMMAND_DOCS: &[CommandDoc] = &[
     command!(
         "ls-files",
         concat!(
-            include_str!("content/ls-files.md"),
+            include_str!("../content/ls-files.md"),
             "\n",
-            include_str!("content/selection-defaults.md")
+            include_str!("../content/selection-defaults.md")
         ),
         [
             example!(
@@ -400,9 +400,9 @@ pub const COMMAND_DOCS: &[CommandDoc] = &[
     command!(
         "push",
         concat!(
-            include_str!("content/push.md"),
+            include_str!("../content/push.md"),
             "\n",
-            include_str!("content/selection-defaults.md")
+            include_str!("../content/selection-defaults.md")
         ),
         [
             example!(
@@ -425,9 +425,9 @@ pub const COMMAND_DOCS: &[CommandDoc] = &[
     command!(
         "fetch",
         concat!(
-            include_str!("content/fetch.md"),
+            include_str!("../content/fetch.md"),
             "\n",
-            include_str!("content/selection-defaults.md")
+            include_str!("../content/selection-defaults.md")
         ),
         [
             example!(
@@ -450,9 +450,9 @@ pub const COMMAND_DOCS: &[CommandDoc] = &[
     command!(
         "pull",
         concat!(
-            include_str!("content/pull.md"),
+            include_str!("../content/pull.md"),
             "\n",
-            include_str!("content/selection-defaults.md")
+            include_str!("../content/selection-defaults.md")
         ),
         [
             example!(
@@ -474,7 +474,7 @@ pub const COMMAND_DOCS: &[CommandDoc] = &[
     ),
     command!(
         "gc",
-        include_str!("content/gc.md"),
+        include_str!("../content/gc.md"),
         [
             example!(
                 "No history",
@@ -503,9 +503,9 @@ pub const COMMAND_DOCS: &[CommandDoc] = &[
     command!(
         "sync",
         concat!(
-            include_str!("content/sync.md"),
+            include_str!("../content/sync.md"),
             "\n",
-            include_str!("content/selection-defaults.md")
+            include_str!("../content/selection-defaults.md")
         ),
         [
             example!(
@@ -537,7 +537,7 @@ pub const COMMAND_DOCS: &[CommandDoc] = &[
     ),
     CommandDoc {
         path: "system",
-        overview: include_str!("content/system.md"),
+        overview: include_str!("../content/system.md"),
         examples: &[],
     },
     command!(
@@ -595,7 +595,7 @@ pub const COMMAND_DOCS: &[CommandDoc] = &[
     ),
     command!(
         "mv",
-        include_str!("content/mv.md"),
+        include_str!("../content/mv.md"),
         [
             example!(
                 "Rename",
@@ -611,7 +611,7 @@ pub const COMMAND_DOCS: &[CommandDoc] = &[
     ),
     CommandDoc {
         path: "mount",
-        overview: include_str!("content/mount.md"),
+        overview: include_str!("../content/mount.md"),
         examples: &[],
     },
     command!(
@@ -725,7 +725,7 @@ pub const COMMAND_DOCS: &[CommandDoc] = &[
     ),
     CommandDoc {
         path: "route",
-        overview: include_str!("content/route.md"),
+        overview: include_str!("../content/route.md"),
         examples: &[],
     },
     command!(

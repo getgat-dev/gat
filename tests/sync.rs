@@ -65,7 +65,9 @@ fn sync_finishes_progress_when_reconciliation_fails_mid_run() {
     use std::os::unix::fs::symlink;
 
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let outside = tempfile::tempdir().unwrap();
     symlink(outside.path(), tmp.path().join("link")).unwrap();
     let ingested = cache_root(&repo)
@@ -111,8 +113,10 @@ fn repair_then_rematerialize_reuses_one_snapshot_and_rematerializes_once() {
     let _guard = runtime.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
-    repo.save_config(&Config {
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
+    repo.write_config_fixture(&Config {
         cache: gat_core::config::CacheConfig {
             materialization_strategy: Some("copy".parse().unwrap()),
             ..Default::default()
@@ -153,7 +157,7 @@ fn repair_then_rematerialize_reuses_one_snapshot_and_rematerializes_once() {
     std::fs::write(&object, b"corrupted").unwrap();
     let mut config = repo.load_config_scoped(ConfigScope::Project).unwrap();
     config.cache.materialization_strategy = Some("symlink".parse().unwrap());
-    repo.save_config_scoped(&config, ConfigScope::Project)
+    repo.write_scoped_config_fixture(&config, ConfigScope::Project)
         .unwrap();
 
     let config_loads_before = gat_engine::test_support::config_loads();
@@ -186,7 +190,9 @@ fn repair_then_rematerialize_reuses_one_snapshot_and_rematerializes_once() {
 #[test]
 fn many_paths_resolve_snapshot_policy_once() {
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let paths: Vec<PathBuf> = (0..50)
         .map(|index| {
             let path = PathBuf::from(format!("file{index}.bin"));
@@ -239,8 +245,10 @@ fn hook_fetch_sync_and_repair_share_one_operation() {
     let _guard = runtime.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
-    repo.save_config(&Config {
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
+    repo.write_config_fixture(&Config {
         cache: gat_core::config::CacheConfig {
             materialization_strategy: Some("copy".parse().unwrap()),
             ..Default::default()
@@ -306,8 +314,10 @@ fn hook_fetch_sync_and_repair_share_one_operation() {
 #[test]
 fn hook_never_rematerializes_after_strategy_change() {
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
-    repo.save_config(&Config {
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
+    repo.write_config_fixture(&Config {
         cache: gat_core::config::CacheConfig {
             materialization_strategy: Some("copy".parse().unwrap()),
             ..Default::default()
@@ -322,7 +332,7 @@ fn hook_never_rematerializes_after_strategy_change() {
 
     let mut config = repo.load_config_scoped(ConfigScope::Project).unwrap();
     config.cache.materialization_strategy = Some("symlink".parse().unwrap());
-    repo.save_config_scoped(&config, ConfigScope::Project)
+    repo.write_scoped_config_fixture(&config, ConfigScope::Project)
         .unwrap();
     let outcome = gat_command::hook(&repo, gat_command::HookRequest, &NoopProgress).unwrap();
 
@@ -338,12 +348,14 @@ fn hook_never_rematerializes_after_strategy_change() {
 #[test]
 fn reshape_and_reconciliation_share_one_progress_task() {
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
     add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
     let mut config = repo.load_config_scoped(ConfigScope::Project).unwrap();
     config.lock.shard_levels = Some(LockShardLevels::new(2).unwrap());
-    repo.save_config_scoped(&config, ConfigScope::Project)
+    repo.write_scoped_config_fixture(&config, ConfigScope::Project)
         .unwrap();
 
     let progress = RecordingProgress::new();

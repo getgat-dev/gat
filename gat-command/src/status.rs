@@ -64,6 +64,8 @@ pub enum StatusOutcome {
 #[derive(Debug, thiserror::Error)]
 pub enum StatusError {
     #[error(transparent)]
+    Snapshot(#[from] gat_engine::RepoSnapshotError),
+    #[error(transparent)]
     Repository(#[from] gat_engine::RepositoryError),
     #[error(transparent)]
     Compare(#[from] CompareError),
@@ -74,19 +76,12 @@ pub fn status(
     request: StatusRequest,
     progress: &dyn ProgressReporter,
 ) -> Result<StatusOutcome, StatusError> {
-    let config = repo.load_config()?;
+    let current = repo.comparisons().current(progress)?;
+    let config = current.config();
     let ownership = gat_engine::MountOwnership::new(&config.mounts);
     let ResolvedSelection { selection, scope } =
-        selection::resolve(request.selection.as_ref(), &config)?;
-    let rows_by_path = with_progress_typed(
-        progress,
-        ProgressSpec::indeterminate(ProgressOperation::LoadingState),
-        |_| -> Result<Vec<ChangedRow>, StatusError> {
-            Ok(repo
-                .comparisons()
-                .staged_with_current(&selection, Unchanged::Keep)?)
-        },
-    )?;
+        selection::resolve(request.selection.as_ref(), config)?;
+    let rows_by_path = current.staged_with_current(&selection, Unchanged::Keep)?;
 
     if rows_by_path.is_empty() {
         return Ok(if scope == super::SelectionScope::Unrestricted {
@@ -96,7 +91,7 @@ pub fn status(
         });
     }
 
-    let cache = repo.cache_presence();
+    let cache = current.cache_presence();
     let changes = std::sync::atomic::AtomicUsize::new(0);
     let rows = with_progress_typed(
         progress,

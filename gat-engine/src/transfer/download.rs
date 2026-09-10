@@ -204,8 +204,7 @@ const fn remote_kind(source: &RemoteError) -> DownloadRemoteFailureKind {
         RemoteError::Unavailable { .. } | RemoteError::ReadinessTimedOut { .. } => {
             DownloadRemoteFailureKind::Unavailable
         }
-        RemoteError::InvalidConnectTimeout
-        | RemoteError::MalformedUrl { .. }
+        RemoteError::MalformedUrl { .. }
         | RemoteError::UnsupportedScheme { .. }
         | RemoteError::InvalidFileRemotePath { .. }
         | RemoteError::DisallowedScheme

@@ -251,14 +251,14 @@ mod recovery_tests {
 
     #[test]
     fn unreadable_recovery_journal_requires_repair_without_rendering_its_source() {
-        for snapshot in [false, true] {
+        for context in 0..3 {
             let error = MountWorkflowError::ReadJournal {
                 source: Box::new(std::io::Error::other("SENTINEL_JOURNAL")),
             };
-            let failure: Failure = if snapshot {
-                gat_engine::RepoSnapshotError::from(error).into()
-            } else {
-                error.into()
+            let failure: Failure = match context {
+                0 => error.into(),
+                1 => gat_engine::RepoSnapshotError::from(error).into(),
+                _ => gat_engine::RepositoryError::PendingMountRecovery(Box::new(error)).into(),
             };
             assert_eq!(failure.diagnostic().code(), ErrorCode::RepairRequired);
             assert!(!format!("{:?}", failure.diagnostic()).contains("SENTINEL"));

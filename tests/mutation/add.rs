@@ -144,7 +144,9 @@ mod tests {
     #[test]
     fn add_reports_loading_and_preparation_before_hashing() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
         let progress = RecordingProgress::new();
 
@@ -198,7 +200,9 @@ mod tests {
     #[test]
     fn large_file_percent_activity_updates_never_move_the_hashing_position() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let big = vec![
             0u8;
             usize::try_from(LARGE_FILE_PROGRESS_THRESHOLD + 1)
@@ -238,7 +242,9 @@ mod tests {
     #[test]
     fn add_applying_changes_task_covers_publish_materialize_and_excludes() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
         let progress = RecordingProgress::new();
 
@@ -263,7 +269,9 @@ mod tests {
     #[test]
     fn add_mixing_a_directory_and_a_file_never_has_more_than_one_active_progress_task() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir(tmp.path().join("dir")).unwrap();
         std::fs::write(tmp.path().join("dir/nested.bin"), b"payload-1").unwrap();
         std::fs::write(tmp.path().join("a.bin"), b"payload-2").unwrap();
@@ -286,7 +294,9 @@ mod tests {
     fn add_hashing_progress_is_cumulative_across_windows_and_selectors() {
         for explicit in [false, true] {
             let tmp = test_repo();
-            let repo = Repo::at(tmp.path().to_path_buf());
+            let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+                .unwrap()
+                .repository_at(tmp.path().to_path_buf());
             std::fs::create_dir(tmp.path().join("data")).unwrap();
             let paths: Vec<_> = (0..7)
                 .map(|index| {
@@ -331,7 +341,9 @@ mod tests {
     #[test]
     fn add_bare_glob_is_covered_by_a_discovering_files_task() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir(tmp.path().join("dir")).unwrap();
         std::fs::write(tmp.path().join("dir/one.bin"), b"payload-1").unwrap();
         std::fs::write(tmp.path().join("dir/two.bin"), b"payload-2").unwrap();
@@ -370,7 +382,9 @@ mod tests {
     #[test]
     fn add_pending_file_then_failing_glob_never_overlaps_progress_tasks() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
         let progress = RecordingProgress::new();
 
@@ -403,7 +417,9 @@ mod tests {
     #[test]
     fn add_file_then_status_shows_cached() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
         let lock = gat_io::LockStore::load_repository(&layout(tmp.path())).unwrap();
@@ -430,7 +446,9 @@ mod tests {
     #[test]
     fn add_succeeds_when_the_proof_db_fails_after_opening_successfully() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
 
         cache_root(&repo).break_database_for_test();
@@ -451,7 +469,9 @@ mod tests {
     #[test]
     fn add_records_a_materialized_stat_a_fresh_stat_still_proves_unchanged() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let path = tmp.path().join("big.bin");
         std::fs::write(&path, b"payload").unwrap();
         add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
@@ -479,7 +499,9 @@ mod tests {
     #[test]
     fn add_seeds_the_desired_mirror_without_a_separate_refresh() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
 
@@ -515,7 +537,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let file = tmp.path().join("big.bin");
         std::fs::write(&file, b"payload").unwrap();
         add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
@@ -550,7 +574,9 @@ mod tests {
     #[test]
     fn add_repeated_on_an_unchanged_file_calls_hash_file_zero_times() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let file = tmp.path().join("big.bin");
         std::fs::write(&file, b"payload").unwrap();
         add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
@@ -570,7 +596,9 @@ mod tests {
     #[test]
     fn partition_reusable_large_unchanged_set_matches_single_threaded_and_default_pools() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let files: Vec<String> = (0..64).map(|i| format!("bulk/file-{i}.bin")).collect();
         std::fs::create_dir_all(tmp.path().join("bulk")).unwrap();
         for file in &files {
@@ -590,7 +618,9 @@ mod tests {
     #[test]
     fn partition_reusable_mixed_classification_matches_single_threaded_and_default_pools() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let tracked = ["stat.bin", "verify.bin", "changed.bin"];
         for file in tracked {
             std::fs::write(tmp.path().join(file), format!("payload:{file}")).unwrap();
@@ -633,7 +663,9 @@ mod tests {
             use std::os::unix::fs::symlink;
 
             let tmp = test_repo();
-            let repo = Repo::at(tmp.path().to_path_buf());
+            let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+                .unwrap()
+                .repository_at(tmp.path().to_path_buf());
             let outside = tempfile::tempdir().unwrap();
             symlink(outside.path(), tmp.path().join("bad-a")).unwrap();
             symlink(outside.path(), tmp.path().join("bad-b")).unwrap();
@@ -685,7 +717,9 @@ mod tests {
     #[test]
     fn add_dir_reuses_unchanged_files_and_only_hashes_new_ones() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("dir")).unwrap();
         std::fs::write(tmp.path().join("dir/old.bin"), b"old payload").unwrap();
         add(&repo, &[PathBuf::from("dir")], &NoopProgress).unwrap();
@@ -714,12 +748,16 @@ mod tests {
         use crate::common::RecordingProgress;
 
         let tmp_a = test_repo();
-        let repo_a = Repo::at(tmp_a.path().to_path_buf());
+        let repo_a = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp_a.path().to_path_buf());
         std::fs::write(tmp_a.path().join("big.bin"), b"payload").unwrap();
         let outcome_a = add(&repo_a, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
 
         let tmp_b = test_repo();
-        let repo_b = Repo::at(tmp_b.path().to_path_buf());
+        let repo_b = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp_b.path().to_path_buf());
         std::fs::write(tmp_b.path().join("big.bin"), b"payload").unwrap();
         let outcome_b = add(
             &repo_b,
@@ -734,7 +772,9 @@ mod tests {
     #[test]
     fn add_directory_writes_one_entry_per_file() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir(tmp.path().join("data")).unwrap();
         std::fs::write(tmp.path().join("data/a.bin"), b"a").unwrap();
         std::fs::write(tmp.path().join("data/b.bin"), b"b").unwrap();
@@ -751,7 +791,9 @@ mod tests {
     #[test]
     fn add_normalizes_a_dot_slash_and_trailing_slash_directory_argument() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir(tmp.path().join("data")).unwrap();
         std::fs::write(tmp.path().join("data/a.bin"), b"a").unwrap();
         add(&repo, &[PathBuf::from("./data/")], &NoopProgress).unwrap();
@@ -763,7 +805,9 @@ mod tests {
     #[test]
     fn add_glob_pattern_expands_and_tracks_matches() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.psd"), b"a").unwrap();
         std::fs::write(tmp.path().join("b.psd"), b"b").unwrap();
         add(&repo, &[PathBuf::from("*.psd")], &NoopProgress).unwrap();
@@ -776,7 +820,9 @@ mod tests {
     #[test]
     fn add_glob_tracks_files_without_creating_entries_for_matching_directories() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir(tmp.path().join("directory.psd")).unwrap();
         std::fs::write(tmp.path().join("file.psd"), b"file").unwrap();
 
@@ -798,7 +844,9 @@ mod tests {
     #[test]
     fn add_glob_explains_a_new_gitignored_match_without_force() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join(".gitignore"), "*.psd\n").unwrap();
         std::fs::write(tmp.path().join("a.psd"), b"a").unwrap();
         let outcome = add(&repo, &[PathBuf::from("*.psd")], &NoopProgress).unwrap();
@@ -819,7 +867,9 @@ mod tests {
     #[test]
     fn add_glob_force_includes_a_new_gitignored_match() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join(".gitignore"), "*.psd\n").unwrap();
         std::fs::write(tmp.path().join("a.psd"), b"a").unwrap();
         let outcome = add_with_options(
@@ -843,7 +893,9 @@ mod tests {
     #[test]
     fn add_glob_reuses_an_existing_gat_tracked_match_despite_gats_own_managed_exclude_block() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.psd"), b"a").unwrap();
         add(&repo, &[PathBuf::from("*.psd")], &NoopProgress).unwrap();
 
@@ -854,7 +906,9 @@ mod tests {
     #[test]
     fn add_glob_is_non_recursive_unless_double_star_is_used() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("data/deep")).unwrap();
         std::fs::write(tmp.path().join("a.bin"), b"a").unwrap();
         std::fs::write(tmp.path().join("data/a.bin"), b"a").unwrap();
@@ -900,7 +954,9 @@ mod tests {
     #[test]
     fn add_glob_normalizes_backslashes_and_mixed_separators() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("data/deep")).unwrap();
         std::fs::write(tmp.path().join("data/deep/a.bin"), b"a").unwrap();
 
@@ -917,7 +973,9 @@ mod tests {
     #[test]
     fn add_file_with_spaces_in_name() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("my file.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("my file.bin")], &NoopProgress).unwrap();
         let lock = gat_io::LockStore::load_repository(&layout(tmp.path())).unwrap();
@@ -927,7 +985,9 @@ mod tests {
     #[test]
     fn add_file_with_unicode_name() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("café☕.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("café☕.bin")], &NoopProgress).unwrap();
         let lock = gat_io::LockStore::load_repository(&layout(tmp.path())).unwrap();
@@ -937,7 +997,9 @@ mod tests {
     #[test]
     fn add_literal_filename_containing_glob_metacharacters() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("file[1].bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("file[1].bin")], &NoopProgress).unwrap();
         let lock = gat_io::LockStore::load_repository(&layout(tmp.path())).unwrap();
@@ -958,7 +1020,9 @@ mod tests {
     #[test]
     fn add_directory_with_glob_metacharacters_in_its_name_is_treated_literally() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("a[b]")).unwrap();
         std::fs::write(tmp.path().join("a[b]/wanted.bin"), b"a").unwrap();
         // A sibling directory an unescaped-glob interpretation of `a[b]`
@@ -980,7 +1044,9 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let path = PathBuf::from(OsString::from_vec(b"invalid-\xFF-utf8".to_vec()));
         let err = add(&repo, &[path], &NoopProgress).unwrap_err();
         let msg = err.to_string();
@@ -990,14 +1056,18 @@ mod tests {
     #[test]
     fn add_rejects_absolute_path_outside_repo() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         assert!(add(&repo, &[tmp.path().join("big.bin")], &NoopProgress).is_err());
     }
 
     #[test]
     fn add_rejects_rooted_scope_without_adding_the_repo() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
 
         assert!(add(&repo, &[PathBuf::from("/")], &NoopProgress).is_err());
@@ -1012,7 +1082,9 @@ mod tests {
     #[test]
     fn add_rejects_rooted_and_unc_inputs_consistently() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         for input in [r"\\server\share", "//server/share"] {
             assert!(add(&repo, &[PathBuf::from(input)], &NoopProgress).is_err());
         }
@@ -1034,7 +1106,9 @@ mod tests {
     #[test]
     fn add_accepts_a_windows_drive_like_leading_segment() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("C:foo"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("C:foo")], &NoopProgress).unwrap();
         assert_eq!(
@@ -1049,7 +1123,9 @@ mod tests {
     #[test]
     fn add_rejects_path_with_parent_dir_traversal() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         assert!(add(&repo, &[PathBuf::from("../secret")], &NoopProgress).is_err());
     }
 
@@ -1059,7 +1135,9 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("target.bin"), b"payload").unwrap();
         symlink(tmp.path().join("target.bin"), tmp.path().join("link.bin")).unwrap();
 
@@ -1082,7 +1160,9 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("target.bin"), b"payload").unwrap();
         symlink(tmp.path().join("target.bin"), tmp.path().join("link.bin")).unwrap();
 
@@ -1109,7 +1189,9 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("target.psd"), b"payload").unwrap();
         symlink(tmp.path().join("target.psd"), tmp.path().join("link.psd")).unwrap();
         std::fs::remove_file(tmp.path().join("target.psd")).unwrap();
@@ -1134,7 +1216,9 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("secret.bin"), b"top secret").unwrap();
         symlink(outside.path(), tmp.path().join("outside-link")).unwrap();
@@ -1164,7 +1248,9 @@ mod tests {
     #[test]
     fn add_missing_path_with_no_glob_match_errors() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         assert!(add(&repo, &[PathBuf::from("nope.bin")], &NoopProgress).is_err());
     }
 
@@ -1177,7 +1263,9 @@ mod tests {
     #[test]
     fn add_refuses_an_explicit_fifo_argument() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let path = tmp.path().join("pipe");
         let status = std::process::Command::new("mkfifo")
             .arg(&path)
@@ -1203,7 +1291,9 @@ mod tests {
     #[test]
     fn add_error_path_leaves_zero_active_progress_tasks() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let progress = RecordingProgress::new();
         let err = add(&repo, &[PathBuf::from("nope.bin")], &progress).unwrap_err();
         assert!(err.to_string().contains("nope.bin") || !err.to_string().is_empty());
@@ -1227,7 +1317,9 @@ mod tests {
     #[test]
     fn add_persists_neither_lock_nor_state_when_a_later_named_path_is_missing() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("real.bin"), b"data").unwrap();
 
         let err = add(
@@ -1260,7 +1352,9 @@ mod tests {
     #[test]
     fn add_refuses_a_path_owned_by_a_source() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut cfg = repo.load_config().unwrap();
         cfg.mounts.by_name.insert(
             gat_core::name::MountName::from_string("models".to_string()),
@@ -1274,7 +1368,7 @@ mod tests {
                 exclude: Vec::new(),
             },
         );
-        repo.save_config(&cfg).unwrap();
+        repo.write_config_fixture(&cfg).unwrap();
 
         std::fs::create_dir_all(tmp.path().join("data/models")).unwrap();
         std::fs::write(tmp.path().join("data/models/a.bin"), b"a").unwrap();
@@ -1294,7 +1388,9 @@ mod tests {
     #[test]
     fn add_refuses_an_explicit_path_already_tracked_by_git() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("plain.txt"), b"already in git").unwrap();
         commit_all(tmp.path(), "add plain.txt");
 
@@ -1311,7 +1407,9 @@ mod tests {
     #[test]
     fn add_reports_a_glob_matched_path_already_tracked_by_git() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("tracked.psd"), b"a").unwrap();
         commit_all(tmp.path(), "add tracked.psd");
 
@@ -1331,7 +1429,9 @@ mod tests {
     #[test]
     fn add_directory_reports_already_git_tracked_members() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("data")).unwrap();
         std::fs::write(tmp.path().join("data/tracked.txt"), b"a").unwrap();
         commit_all(tmp.path(), "add tracked");
@@ -1355,7 +1455,9 @@ mod tests {
     #[test]
     fn add_directory_overlay_never_reselects_a_path_that_became_git_tracked() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("shared.bin"), b"a").unwrap();
         add(&repo, &[PathBuf::from("shared.bin")], &NoopProgress).unwrap();
         let lock = gat_io::LockStore::load_repository(&layout(tmp.path())).unwrap();
@@ -1384,7 +1486,9 @@ mod tests {
     #[test]
     fn add_refuses_an_explicit_path_matching_gatignore() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join(".gatignore"), "*.tmp\n").unwrap();
         std::fs::write(tmp.path().join("scratch.tmp"), b"a").unwrap();
 
@@ -1404,7 +1508,9 @@ mod tests {
     #[test]
     fn add_refuses_an_explicit_path_under_dot_git_or_dot_gat() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
 
         let err = add(&repo, &[PathBuf::from(".git/info/exclude")], &NoopProgress).unwrap_err();
         assert!(err.to_string().contains("infrastructure"), "{err}");
@@ -1427,7 +1533,9 @@ mod tests {
     #[test]
     fn add_directory_never_discovers_dot_git_or_dot_gat_contents() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("keep.bin"), b"a").unwrap();
 
         add(&repo, &[PathBuf::from(".")], &NoopProgress).unwrap();
@@ -1447,7 +1555,9 @@ mod tests {
     #[test]
     fn add_dot_never_walks_a_large_dot_gat_objects_tree_without_managed_excludes() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("keep.bin"), b"a").unwrap();
         // No prior `add()` call has run yet, so `.git/info/exclude` has
         // never been (re)generated with gat's managed block -- git
@@ -1479,7 +1589,9 @@ mod tests {
     #[test]
     fn add_directory_reports_gatignored_members() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join(".gatignore"), "scratch/\n").unwrap();
         std::fs::create_dir_all(tmp.path().join("scratch")).unwrap();
         std::fs::write(tmp.path().join("scratch/drop.bin"), b"a").unwrap();
@@ -1499,7 +1611,9 @@ mod tests {
     #[test]
     fn add_rejects_a_new_explicit_path_that_is_gitignored() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join(".gitignore"), "big.bin\n").unwrap();
         std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
 
@@ -1515,7 +1629,9 @@ mod tests {
     #[test]
     fn add_force_bypasses_gitignore_refusal_for_an_explicit_path() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join(".gitignore"), "big.bin\n").unwrap();
         std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
 
@@ -1536,7 +1652,9 @@ mod tests {
     #[test]
     fn add_force_bypasses_gatignore_refusal_for_an_explicit_path() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join(".gatignore"), "big.bin\n").unwrap();
         std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
 
@@ -1554,7 +1672,9 @@ mod tests {
     #[test]
     fn add_force_does_not_bypass_plain_git_tracked_refusal() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("tracked.bin"), b"payload").unwrap();
         commit_all(tmp.path(), "track file");
 
@@ -1572,7 +1692,9 @@ mod tests {
     #[test]
     fn add_force_does_not_bypass_infrastructure_path_refusal() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
 
         let err = add_with_options(
             &repo,
@@ -1594,7 +1716,9 @@ mod tests {
     #[test]
     fn add_dir_force_includes_gitignored_and_gatignored_new_members() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join(".gitignore"), "*.bin\n").unwrap();
         std::fs::write(tmp.path().join(".gatignore"), "scratch/\n").unwrap();
         std::fs::create_dir_all(tmp.path().join("data/scratch")).unwrap();
@@ -1632,7 +1756,9 @@ mod tests {
     #[test]
     fn add_force_on_an_ignored_directory_descends_into_its_nested_members() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join(".gitignore"), "ignored/\n").unwrap();
         std::fs::create_dir_all(tmp.path().join("ignored/nested")).unwrap();
         std::fs::write(tmp.path().join("ignored/nested/a.bin"), b"a").unwrap();
@@ -1659,7 +1785,9 @@ mod tests {
     #[test]
     fn add_force_dot_descends_into_an_ignored_directory_while_excluding_infra() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join(".gitignore"), "ignored/\n").unwrap();
         std::fs::create_dir_all(tmp.path().join("ignored/nested")).unwrap();
         std::fs::write(tmp.path().join("ignored/nested/a.bin"), b"a").unwrap();
@@ -1690,7 +1818,9 @@ mod tests {
     #[test]
     fn add_force_glob_descends_into_an_ignored_directory_for_matching_members() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join(".gitignore"), "ignored/\n").unwrap();
         std::fs::create_dir_all(tmp.path().join("ignored/nested")).unwrap();
         std::fs::write(tmp.path().join("ignored/nested/a.bin"), b"a").unwrap();
@@ -1717,7 +1847,9 @@ mod tests {
     #[test]
     fn add_force_does_not_widen_directory_scope_to_a_sibling_ignored_directory() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join(".gitignore"), "ignored/\n").unwrap();
         std::fs::create_dir_all(tmp.path().join("ignored")).unwrap();
         std::fs::create_dir_all(tmp.path().join("other")).unwrap();
@@ -1754,7 +1886,9 @@ mod tests {
     #[test]
     fn add_force_glob_does_not_widen_scope_or_bypass_the_residual_matcher() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join(".gitignore"), "ignored/\n").unwrap();
         std::fs::create_dir_all(tmp.path().join("ignored")).unwrap();
         std::fs::create_dir_all(tmp.path().join("other")).unwrap();
@@ -1783,7 +1917,9 @@ mod tests {
     #[test]
     fn add_dir_without_force_reports_the_same_ignored_members() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join(".gitignore"), "*.bin\n").unwrap();
         std::fs::create_dir_all(tmp.path().join("data")).unwrap();
         std::fs::write(tmp.path().join("data/model.bin"), b"model").unwrap();
@@ -1806,7 +1942,9 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("data")).unwrap();
         std::fs::write(tmp.path().join("data/target.bin"), b"payload").unwrap();
         symlink(
@@ -1841,7 +1979,9 @@ mod tests {
     #[test]
     fn add_succeeds_for_an_explicit_path_not_in_gitignore() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
 
         let outcome = add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
@@ -1851,7 +1991,9 @@ mod tests {
     #[test]
     fn add_reuses_an_existing_gat_tracked_explicit_path_despite_gats_own_managed_exclude_block() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
 
@@ -1877,7 +2019,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
 
         // Route the object cache outside the repo root so making the root
         // read-only (to force `gat.lock`'s write to fail) doesn't also
@@ -1885,10 +2029,11 @@ mod tests {
         // boundary this test characterizes.
         let cache_dir = tempfile::tempdir().unwrap();
         let mut cfg = repo.load_config().unwrap();
-        cfg.cache.location = Some(gat_core::cache_location::CacheLocation::from_path(
-            cache_dir.path().to_path_buf(),
-        ));
-        repo.save_config(&cfg).unwrap();
+        cfg.cache.location = Some(
+            gat_core::cache_location::CacheLocation::try_from_path(cache_dir.path().to_path_buf())
+                .expect("nonempty cache location"),
+        );
+        repo.write_config_fixture(&cfg).unwrap();
 
         std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
         let expected_oid = gat_core::oid::Oid::from_bytes(*blake3::hash(b"payload").as_bytes());
@@ -1934,8 +2079,12 @@ mod tests {
                 .is_empty(),
             "materialized state must not claim the path is tracked either"
         );
-        let cache_root =
-            layout(tmp.path()).resolve_cache_root(Some(cache_dir.path().as_os_str()), None);
+        let cache_root = layout(tmp.path()).resolve_cache_root(Some(
+            &gat_core::cache_location::CacheLocation::try_from_path(std::path::PathBuf::from(
+                cache_dir.path().as_os_str(),
+            ))
+            .expect("nonempty fixture cache path"),
+        ));
         let cache_path = cache_root.object_path_for_test(&expected_oid);
         assert!(
             cache_path.exists(),
@@ -1949,7 +2098,9 @@ mod tests {
     fn add_discovers_and_roundtrips_escaped_paths() {
         for selection in ["data", "data/*.bin"] {
             let tmp = test_repo();
-            let repo = Repo::at(tmp.path().to_path_buf());
+            let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+                .unwrap()
+                .repository_at(tmp.path().to_path_buf());
             std::fs::create_dir(tmp.path().join("data")).unwrap();
             for name in ["fi\tle.bin", "fi\nle.bin", "fi\rle.bin", "fi\"le.bin"] {
                 std::fs::write(tmp.path().join("data").join(name), b"payload").unwrap();
@@ -1974,7 +2125,9 @@ mod tests {
     #[test]
     fn add_dir_revisits_modified_managed_descendant() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("data/nested")).unwrap();
         std::fs::write(tmp.path().join("data/nested/a.bin"), b"old").unwrap();
         add(&repo, &[PathBuf::from("data")], &NoopProgress).unwrap();
@@ -2007,7 +2160,9 @@ mod tests {
     #[test]
     fn add_dir_not_hidden_by_managed_exclude() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("data")).unwrap();
         std::fs::write(tmp.path().join("data/a.bin"), b"content").unwrap();
         add(&repo, &[PathBuf::from("data")], &NoopProgress).unwrap();
@@ -2031,7 +2186,9 @@ mod tests {
     #[test]
     fn add_dir_warm_unchanged_zero_hashes() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("data")).unwrap();
         std::fs::write(tmp.path().join("data/a.bin"), b"content").unwrap();
         add(&repo, &[PathBuf::from("data")], &NoopProgress).unwrap();
@@ -2056,7 +2213,9 @@ mod tests {
     #[test]
     fn add_dir_gitignore_now_governs_new_file_discovery() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join(".gitignore"), "*.bin\n").unwrap();
         std::fs::create_dir_all(tmp.path().join("data")).unwrap();
         std::fs::write(tmp.path().join("data/model.bin"), b"model").unwrap();
@@ -2078,7 +2237,9 @@ mod tests {
     #[test]
     fn add_dir_deeply_nested() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("data/nested/deeper")).unwrap();
         std::fs::write(tmp.path().join("data/nested/deeper/a.bin"), b"deep").unwrap();
 
@@ -2095,7 +2256,9 @@ mod tests {
     #[test]
     fn add_dot_prunes_a_gitignored_node_modules_style_directory() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join(".gitignore"), "node_modules/\n").unwrap();
         std::fs::create_dir_all(tmp.path().join("node_modules/pkg/nested")).unwrap();
         std::fs::write(tmp.path().join("node_modules/pkg/index.js"), b"x").unwrap();
@@ -2117,7 +2280,9 @@ mod tests {
     #[test]
     fn add_dot_honors_a_nested_gitignore() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("data")).unwrap();
         std::fs::write(tmp.path().join("data/.gitignore"), "*.tmp\n").unwrap();
         std::fs::write(tmp.path().join("data/keep.bin"), b"a").unwrap();
@@ -2137,7 +2302,9 @@ mod tests {
     #[test]
     fn add_dot_honors_a_git_info_exclude_entry() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join(".git/info/exclude"), "drop.bin\n").unwrap();
         std::fs::write(tmp.path().join("drop.bin"), b"a").unwrap();
         std::fs::write(tmp.path().join("keep.bin"), b"b").unwrap();
@@ -2157,7 +2324,9 @@ mod tests {
     #[test]
     fn add_dot_after_state_db_deletion_recovers_without_reingesting_unchanged_files() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"unchanged").unwrap();
         std::fs::write(tmp.path().join("b.bin"), b"also-unchanged").unwrap();
         add(&repo, &[PathBuf::from(".")], &NoopProgress).unwrap();
@@ -2213,7 +2382,9 @@ mod tests {
     #[test]
     fn add_dot_reusing_many_existing_gat_tracked_files_issues_one_desired_state_query() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         for i in 0..50 {
             std::fs::write(tmp.path().join(format!("f{i}.bin")), format!("body-{i}")).unwrap();
         }
@@ -2239,7 +2410,9 @@ mod tests {
     #[test]
     fn add_dot_selects_repo_root_recursively() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("data")).unwrap();
         std::fs::write(tmp.path().join("root.bin"), b"root").unwrap();
         std::fs::write(tmp.path().join("data/nested.bin"), b"nested").unwrap();
@@ -2257,7 +2430,9 @@ mod tests {
     #[test]
     fn add_dot_slash_data_slash_normalizes_like_data() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir(tmp.path().join("data")).unwrap();
         std::fs::write(tmp.path().join("data/a.bin"), b"a").unwrap();
         add(&repo, &[PathBuf::from("./data/")], &NoopProgress).unwrap();
@@ -2279,10 +2454,12 @@ mod tests {
         use std::collections::HashMap;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut cfg = repo.load_config().unwrap();
         cfg.lock.shard_levels = Some(gat_core::lock::LockShardLevels::new(1).unwrap());
-        repo.save_config(&cfg).unwrap();
+        repo.write_config_fixture(&cfg).unwrap();
 
         // Create enough files to spread across multiple shards
         let mut paths = Vec::new();
@@ -2339,10 +2516,12 @@ mod tests {
     #[test]
     fn add_in_sharded_repo_keeps_info_exclude_in_sync() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut cfg = repo.load_config().unwrap();
         cfg.lock.shard_levels = Some(gat_core::lock::LockShardLevels::new(1).unwrap());
-        repo.save_config(&cfg).unwrap();
+        repo.write_config_fixture(&cfg).unwrap();
 
         std::fs::write(tmp.path().join("a.bin"), b"a").unwrap();
         add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
@@ -2400,10 +2579,12 @@ mod tests {
         }
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut cfg = repo.load_config().unwrap();
         cfg.lock.shard_levels = Some(gat_core::lock::LockShardLevels::new(1).unwrap());
-        repo.save_config(&cfg).unwrap();
+        repo.write_config_fixture(&cfg).unwrap();
 
         // Establish the sharded on-disk shape with an initial, unrelated
         // file before exercising the directory add.
@@ -2469,7 +2650,9 @@ mod tests {
     #[test]
     fn add_flat_lock_behavior_unchanged() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"a").unwrap();
         std::fs::write(tmp.path().join("b.bin"), b"b").unwrap();
         add(
@@ -2498,7 +2681,9 @@ mod tests {
     #[test]
     fn add_in_a_flat_repo_uses_the_sparse_pipeline_and_stays_a_single_file() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         assert!(
             matching_lock_shape(&repo, tmp.path()).unwrap().is_none(),
             "nothing tracked yet"
@@ -2548,7 +2733,9 @@ mod tests {
     #[test]
     fn add_and_reshape_racing_concurrently_never_corrupts_the_lock() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
 
         std::fs::write(tmp.path().join("seed.bin"), b"seed").unwrap();
         add(&repo, &[PathBuf::from("seed.bin")], &NoopProgress).unwrap();
@@ -2566,11 +2753,11 @@ mod tests {
             let target_depth = if i % 2 == 0 { "2" } else { "0" };
             gat_command::config(
                 &repo,
-                gat_command::ConfigRequest {
-                    key: gat_core::config_keys::ConfigKey::LockShardLevels,
-                    action: gat_command::ConfigAction::Set(vec![target_depth.to_string()]),
-                    scope: gat_core::config::ConfigScope::Project,
-                },
+                gat_command::ConfigRequest::new(
+                    gat_core::config_keys::SettingKey::LockShardLevels,
+                    gat_command::ConfigAction::Set(vec![target_depth.to_string()]),
+                    gat_core::config::ConfigScope::Project,
+                ),
             )
             .unwrap();
 
@@ -2641,7 +2828,9 @@ mod tests {
     #[test]
     fn writer_holds_the_shape_selection_guard_across_a_concurrent_reshape_attempt() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
 
         // Default `lock.shard_levels` is `0` (flat), matching what's on
         // disk after this seed `add` -- the writer below must observe
@@ -2667,11 +2856,11 @@ mod tests {
                 // config isn't part of the on-disk lock state it protects.
                 gat_command::config(
                     repo_ref,
-                    gat_command::ConfigRequest {
-                        key: gat_core::config_keys::ConfigKey::LockShardLevels,
-                        action: gat_command::ConfigAction::Set(vec!["2".to_string()]),
-                        scope: gat_core::config::ConfigScope::Project,
-                    },
+                    gat_command::ConfigRequest::new(
+                        gat_core::config_keys::SettingKey::LockShardLevels,
+                        gat_command::ConfigAction::Set(vec!["2".to_string()]),
+                        gat_core::config::ConfigScope::Project,
+                    ),
                 )
                 .unwrap();
                 repo_ref.reshape_lock().unwrap()

@@ -1,7 +1,5 @@
 //! Repository initialization capabilities for `gat init`.
 
-#[cfg(any(test, feature = "test-support"))]
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use gat_core::managed_block;
@@ -284,24 +282,11 @@ impl InitializationService<'_> {
             .map_err(InitializationError::from)
     }
 
-    #[must_use]
-    pub fn initialize_cache(&self) -> ResolvedCacheLocation {
-        let root = self.repo.resolved_cache_root();
-        ResolvedCacheLocation::new(root.display_path().to_path_buf())
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    #[must_use]
-    pub fn initialize_cache_with(
-        &self,
-        cache_dir_override: Option<&OsStr>,
-        global_config_dir: Option<PathBuf>,
-    ) -> ResolvedCacheLocation {
-        let root = self
-            .repo
-            .resolved_cache_root_with(cache_dir_override, global_config_dir);
-        ResolvedCacheLocation::new(root.display_path().to_path_buf())
+    pub fn initialize_cache(&self) -> Result<ResolvedCacheLocation, crate::RepositoryError> {
+        let root = self.repo.resolved_cache_root()?;
+        Ok(ResolvedCacheLocation::new(
+            root.display_path().to_path_buf(),
+        ))
     }
 }
 

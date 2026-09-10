@@ -24,6 +24,24 @@ const fn scope_word(scope: ConfigScope) -> &'static str {
 impl From<RepositoryError> for Failure {
     fn from(err: RepositoryError) -> Self {
         match &err {
+            RepositoryError::PendingMountRecovery(source) => Self::infrastructure(
+                super::mount::recovery_diagnostic(source.recovery_failure_kind()),
+                err,
+            ),
+            RepositoryError::ConfigurationChanged { .. } => Self::infrastructure(
+                Diagnostic::new(
+                    ErrorCode::RepositoryUnavailable,
+                    "Configuration changed during the operation; retry the command",
+                ),
+                err,
+            ),
+            RepositoryError::SettingLock { .. } => Self::infrastructure(
+                Diagnostic::new(
+                    ErrorCode::RepositoryUnavailable,
+                    "Could not acquire configuration mutation authority",
+                ),
+                err,
+            ),
             RepositoryError::CurrentDirectory(source) => Self::infrastructure(
                 Diagnostic::new(
                     super::io_code(source),
@@ -64,6 +82,17 @@ impl From<RepositoryError> for Failure {
                 ]);
                 Self::infrastructure(config_diagnostic(&err, message), err)
             }
+            RepositoryError::UndefinedResourceRemote { name } => Self::infrastructure(
+                Diagnostic::new(
+                    ErrorCode::InvalidConfig,
+                    "Configuration references an undefined remote",
+                )
+                .with_subject(UserLine::identifier(name.as_str()))
+                .with_hint(UserLine::authored(
+                    "Configure the remote or update the referring route or default choice.",
+                )),
+                err,
+            ),
             RepositoryError::InvalidEffectiveMounts(_) => Self::infrastructure(
                 Diagnostic::new(
                     ErrorCode::InvalidConfig,
@@ -343,7 +372,11 @@ mod tests {
         )
         .unwrap();
 
-        let error = gat_engine::Repository::at(root).load_config().unwrap_err();
+        let error = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(root)
+            .load_config()
+            .unwrap_err();
         let failure = Failure::from(error);
         let diagnostic = failure.diagnostic();
         assert_eq!(diagnostic.code(), ErrorCode::InvalidConfig);

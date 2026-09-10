@@ -1,4 +1,4 @@
-//! `${VAR}` remote URL template interpolation, and `HOME`/`GAT_CACHE_DIR`
+//! `${VAR}` remote URL template interpolation, and `HOME`/`GAT_CACHE_LOCATION`
 //! real process-environment wiring. Exercised via a child process
 //! (`gat_with_env`, rather than in-process `std::env::set_var`/
 //! `remove_var`, which is unsound to do concurrently across test
@@ -18,7 +18,7 @@ fn relative_cache_override_is_self_ignoring_on_the_first_cache_command() {
     let out = common::gat_with_env(
         temp.path(),
         &["system", "repair", "cache"],
-        &[("GAT_CACHE_DIR", Some(".gat/objects"))],
+        &[("GAT_CACHE_LOCATION", Some(".gat/objects"))],
     );
     assert_ok(
         &out,
@@ -118,27 +118,34 @@ fn add_ingests_into_the_directory_named_by_gat_cache_dir() {
     let tmp = init_repo();
     let dir = tmp.path();
     let shared_cache = tempfile::tempdir().unwrap();
-    std::fs::write(dir.join("big.bin"), b"payload routed via GAT_CACHE_DIR").unwrap();
+    std::fs::write(
+        dir.join("big.bin"),
+        b"payload routed via GAT_CACHE_LOCATION",
+    )
+    .unwrap();
 
     let out = common::gat_with_env(
         dir,
         &["add", "big.bin"],
-        &[("GAT_CACHE_DIR", Some(shared_cache.path().to_str().unwrap()))],
+        &[(
+            "GAT_CACHE_LOCATION",
+            Some(shared_cache.path().to_str().unwrap()),
+        )],
     );
-    assert_ok(&out, "gat add with GAT_CACHE_DIR set");
+    assert_ok(&out, "gat add with GAT_CACHE_LOCATION set");
 
     let default_cache = dir.join(".gat").join("objects");
     let has_default_objects =
         std::fs::read_dir(&default_cache).is_ok_and(|mut entries| entries.next().is_some());
     assert!(
         !has_default_objects,
-        "GAT_CACHE_DIR should have redirected ingestion away from the repo-local default cache"
+        "GAT_CACHE_LOCATION should have redirected ingestion away from the repo-local default cache"
     );
 
     let has_shared_objects = walk_has_any_file(shared_cache.path());
     assert!(
         has_shared_objects,
-        "expected the ingested object under GAT_CACHE_DIR's directory: {}",
+        "expected the ingested object under GAT_CACHE_LOCATION's directory: {}",
         shared_cache.path().display()
     );
 }
@@ -150,7 +157,7 @@ fn add_ingests_into_the_directory_named_by_gat_cache_dir() {
 /// default, never whatever ambient-looking Gat state happens to exist elsewhere on
 /// disk. Builds a deliberately conflicting fake global Gat config (a
 /// `gat.yaml` relocating the cache) and a deliberately conflicting
-/// `GAT_CACHE_DIR` relocation, first proving the spawned binary *does*
+/// `GAT_CACHE_LOCATION` relocation, first proving the spawned binary *does*
 /// honor both when a test explicitly opts into them via `extra_env` (so
 /// the assertion that follows is meaningful, not vacuous), then proving
 /// a completely ordinary spawned `gat init`/`gat add` -- run without any
@@ -183,7 +190,7 @@ fn spawned_ordinary_commands_ignore_a_conflicting_global_config_and_cache_dir_el
         honoring_repo.path(),
         &["add", "big.bin"],
         &[(
-            "GAT_CACHE_DIR",
+            "GAT_CACHE_LOCATION",
             Some(conflicting_cache_dir.path().to_str().unwrap()),
         )],
     );
@@ -193,7 +200,7 @@ fn spawned_ordinary_commands_ignore_a_conflicting_global_config_and_cache_dir_el
     );
     assert!(
         walk_has_any_file(conflicting_cache_dir.path()),
-        "expected the explicit conflicting GAT_CACHE_DIR override to actually be honored"
+        "expected the explicit conflicting GAT_CACHE_LOCATION override to actually be honored"
     );
 
     // Now prove an ordinary spawned `gat add`, with no `extra_env`
@@ -224,7 +231,7 @@ fn spawned_ordinary_commands_ignore_a_conflicting_global_config_and_cache_dir_el
     assert_eq!(
         count_files(conflicting_cache_dir.path()),
         conflicting_cache_dir_count_before,
-        "ordinary spawned command must not have reused the earlier explicit GAT_CACHE_DIR override"
+        "ordinary spawned command must not have reused the earlier explicit GAT_CACHE_LOCATION override"
     );
 }
 
@@ -383,4 +390,34 @@ fn file_remote_operations_hide_the_expanded_root() {
             "{stderr}"
         );
     }
+}
+
+#[test]
+fn list_overrides_and_masked_writes_report_the_effective_environment_source() {
+    let repo = init_repo();
+    let overrides = [
+        (
+            "GAT_GIT_IGNORE_PATTERNS",
+            Some(r#"["a,b/**", "space name/**"]"#),
+        ),
+        ("GAT_SYNC_AUTO_FETCH", Some("true")),
+    ];
+    let read = common::gat_with_env(repo.path(), &["config", "git.ignore_patterns"], &overrides);
+    assert_ok(&read, "read list environment override");
+    let output = String::from_utf8(read.stdout).unwrap();
+    for expected in ["a,b/**", "space name/**", "GAT_GIT_IGNORE_PATTERNS"] {
+        assert!(output.contains(expected), "{output}");
+    }
+    let write = common::gat_with_env(
+        repo.path(),
+        &["config", "sync.auto_fetch", "false"],
+        &overrides,
+    );
+    assert_ok(&write, "save masked setting");
+    let output = common::stderr(&write);
+    assert!(output.contains("GAT_SYNC_AUTO_FETCH"), "{output}");
+    assert!(output.contains("overridden"), "{output}");
+    let stored = gat_engine::load_config_file(&repo.path().join("gat.yaml")).unwrap();
+    assert_eq!(stored.sync.auto_fetch, Some(false));
+    assert!(stored.git.ignore_patterns.is_none());
 }

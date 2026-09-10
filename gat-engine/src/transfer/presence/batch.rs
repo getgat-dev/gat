@@ -1,13 +1,13 @@
 //! Bounded physical grouping underneath per-object semantic admission/results.
 
 use super::PresenceProbeError;
-use crate::remote_executor::{LocalTransferError, RemoteExecutor, RemoteLease};
+use crate::remote_executor::{LocalTransferError, PresenceLease, RemoteExecutor};
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream::BoxStream};
 use gat_core::oid::Oid;
 use std::{collections::VecDeque, sync::Arc};
 
 pub(super) type ProbeResult = (usize, Result<bool, PresenceProbeError>);
-pub(crate) type AdmittedPresence = (usize, Oid, RemoteLease);
+pub(crate) type AdmittedPresence = (usize, Oid, PresenceLease);
 
 /// Callers acquire one logical presence lease per entry before grouping. Only
 /// metadata capabilities and bounded typed sends run on the admitted worker.
@@ -55,7 +55,7 @@ pub fn presence_stream(
 fn file_stream(
     executor: &RemoteExecutor,
     indices: VecDeque<usize>,
-    prepared: Vec<(gat_io::PreparedFilePresence, RemoteLease)>,
+    prepared: Vec<(gat_io::PreparedFilePresence, PresenceLease)>,
     mut probe: impl FnMut(gat_io::PreparedFilePresence) -> std::io::Result<bool> + Send + 'static,
 ) -> BoxStream<'_, ProbeResult> {
     // At most one send per admitted entry: try_send never waits for the reader,
@@ -106,7 +106,7 @@ struct FileBatch<'a> {
     receiver: tokio::sync::mpsc::Receiver<Result<bool, PresenceProbeError>>,
     work: Option<BoxFuture<'a, Result<(), LocalTransferError>>>,
     failure: Option<Failure>,
-    leases: Option<Arc<Vec<RemoteLease>>>,
+    leases: Option<Arc<Vec<PresenceLease>>>,
 }
 
 impl<'a> FileBatch<'a> {
@@ -173,7 +173,7 @@ mod tests {
         count: usize,
     ) -> (
         VecDeque<usize>,
-        Vec<(gat_io::PreparedFilePresence, RemoteLease)>,
+        Vec<(gat_io::PreparedFilePresence, PresenceLease)>,
     ) {
         (0..count)
             .map(|index| {

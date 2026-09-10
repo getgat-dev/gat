@@ -6,6 +6,7 @@ use gat_command::{LsFilesError, StatusError};
 impl From<StatusError> for Failure {
     fn from(err: StatusError) -> Self {
         match err {
+            StatusError::Snapshot(source) => source.into(),
             StatusError::Repository(source) => source.into(),
             StatusError::Compare(source) => source.into(),
         }

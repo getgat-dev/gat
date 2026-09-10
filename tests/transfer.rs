@@ -219,7 +219,9 @@ fn history_aware_push_reports_resolution_before_pushing() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
     add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
     commit_all(tmp.path(), "add a.bin");
@@ -266,7 +268,9 @@ fn fetch_progress_reports_activity_message_per_object() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
     add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
     commit_all(tmp.path(), "add a.bin");
@@ -299,7 +303,9 @@ fn push_then_fetch_roundtrips_through_file_remote() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
     add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
     let oid = gat_io::LockStore::load_repository(&layout(tmp.path()))
@@ -330,7 +336,9 @@ fn fetch_succeeds_when_the_proof_db_fails_after_opening_successfully() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
     add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
     let oid = gat_io::LockStore::load_repository(&layout(tmp.path()))
@@ -361,7 +369,9 @@ fn fetch_skips_remote_and_hash_when_cached_object_is_already_verified() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
     add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
 
@@ -386,7 +396,9 @@ fn fetch_downloads_a_file_added_but_not_yet_git_added_or_committed() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
     add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
     // deliberately no `git add`/commit: push/fetch both always use the
@@ -412,7 +424,9 @@ fn pull_fetches_and_checks_out() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
     add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
     commit_all(tmp.path(), "add big.bin");
@@ -423,7 +437,7 @@ fn pull_fetches_and_checks_out() {
     push(&repo, None, None, &NoopProgress).unwrap();
     let mut cfg = repo.load_config().unwrap();
     cfg.sync.trust_state = Some(false);
-    repo.save_config(&cfg).unwrap();
+    repo.write_config_fixture(&cfg).unwrap();
 
     std::fs::remove_file(tmp.path().join("big.bin")).unwrap();
     std::fs::remove_dir_all(cache_path(&repo)).unwrap();
@@ -440,8 +454,10 @@ fn pull_never_rematerializes_an_already_correct_file_after_a_strategy_change() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
-    repo.save_config(&gat_core::config::Config {
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
+    repo.write_config_fixture(&gat_core::config::Config {
         cache: gat_core::config::CacheConfig {
             materialization_strategy: Some("copy".parse().unwrap()),
             ..Default::default()
@@ -467,7 +483,7 @@ fn pull_never_rematerializes_an_already_correct_file_after_a_strategy_change() {
         .load_config_scoped(gat_core::config::ConfigScope::Project)
         .unwrap();
     cfg.cache.materialization_strategy = Some("symlink".parse().unwrap());
-    repo.save_config_scoped(&cfg, gat_core::config::ConfigScope::Project)
+    repo.write_scoped_config_fixture(&cfg, gat_core::config::ConfigScope::Project)
         .unwrap();
 
     let outcome = pull_current(&repo, Selection::root(), None, &NoopProgress).unwrap();
@@ -502,7 +518,9 @@ fn pull_rejects_a_stale_desired_revision_before_any_worktree_mutation() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
     add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
     commit_all(tmp.path(), "add big.bin");
@@ -560,7 +578,9 @@ fn hook_and_repair_resync_share_pulls_stale_desired_revision_rejection_before_an
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
     add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
     commit_all(tmp.path(), "add big.bin");
@@ -630,8 +650,10 @@ fn pull_shares_one_coherent_context_across_fetch_sync_and_repair() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
-    repo.save_config(&gat_core::config::Config {
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
+    repo.write_config_fixture(&gat_core::config::Config {
         cache: gat_core::config::CacheConfig {
             materialization_strategy: Some("copy".parse().unwrap()),
             ..Default::default()
@@ -760,7 +782,9 @@ fn pull_fetch_failure_never_advances_past_fetching() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
     add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
     commit_all(tmp.path(), "add a.bin");
@@ -809,7 +833,9 @@ fn remote_named_add_list_and_push_fetch_by_name() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
     add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
     commit_all(tmp.path(), "add big.bin");
@@ -837,7 +863,9 @@ fn bare_push_with_an_empty_selection_and_no_configured_remote_succeeds() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     // Deliberately no `gat add` and no configured remote at all.
 
     let outcome = push(&repo, None, None, &NoopProgress).unwrap();
@@ -855,7 +883,9 @@ fn explicit_remote_push_with_an_empty_selection_still_validates_the_name() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     // Deliberately no `gat add` and no configured remote at all.
 
     let missing = RemoteName::from_string("does-not-exist".to_string());
@@ -873,7 +903,9 @@ fn bare_fetch_with_an_empty_selection_and_no_configured_remote_succeeds() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     // Deliberately no `gat add` and no configured remote at all.
 
     let outcome = fetch_current(&repo, &Selection::root(), None, &NoopProgress).unwrap();
@@ -890,7 +922,9 @@ fn explicit_remote_fetch_with_an_empty_selection_still_validates_the_name() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     // Deliberately no `gat add` and no configured remote at all.
 
     let remote = RemoteName::from_string("does-not-exist".to_string());
@@ -904,7 +938,9 @@ fn push_with_nothing_tracked_reports_zero_items() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     // Nothing has ever been `gat add`ed, so gat.lock has no entries.
 
     let remote_dir = tempfile::tempdir().unwrap();
@@ -927,7 +963,9 @@ fn push_skips_entries_missing_from_local_cache_without_erroring() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
     add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
     commit_all(tmp.path(), "add big.bin");
@@ -981,7 +1019,9 @@ fn push_fatal_presence_check_error_does_not_advance_the_pushing_position() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     let not_a_dir = tmp.path().join("not-a-directory");
     std::fs::write(&not_a_dir, b"not a directory").unwrap();
@@ -1012,7 +1052,9 @@ fn push_skips_corrupt_cached_objects_with_a_distinct_message() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
     add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
 
@@ -1052,7 +1094,9 @@ fn broad_push_skips_mount_owned_paths_but_explicit_mount_root_push_is_allowed() 
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     std::fs::create_dir_all(tmp.path().join("vendor/models")).unwrap();
     std::fs::write(tmp.path().join("root.bin"), b"shared-bytes").unwrap();
@@ -1097,7 +1141,7 @@ fn broad_push_skips_mount_owned_paths_but_explicit_mount_root_push_is_allowed() 
             remote: gat_core::name::RemoteName::from_string("backup".to_string()),
         },
     );
-    repo.save_config(&cfg).unwrap();
+    repo.write_config_fixture(&cfg).unwrap();
 
     let broad = push(&repo, None, None, &NoopProgress).unwrap();
     assert_eq!(broad.total, 1);
@@ -1135,7 +1179,7 @@ fn broad_push_skips_mount_owned_paths_but_explicit_mount_root_push_is_allowed() 
         .include = Some(vec![
         gat_core::globs::GatGlobPattern::parse("vendor/models/**").unwrap(),
     ]);
-    repo.save_config(&cfg).unwrap();
+    repo.write_config_fixture(&cfg).unwrap();
     let configured = gat_command::push(
         &repo,
         gat_command::PushRequest {
@@ -1178,7 +1222,9 @@ fn push_uploads_files_added_but_not_yet_git_added_or_committed() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
     add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
     // deliberately no `git add`/commit of gat.lock: push always uses
@@ -1204,7 +1250,9 @@ fn push_uses_verified_cache_state_without_rehashing_when_remote_is_missing() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
     add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
 
@@ -1242,7 +1290,9 @@ fn push_batches_cache_proof_work_for_remote_missing_objects() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let count = 96;
     let mut paths = Vec::with_capacity(count);
     for index in 0..count {
@@ -1287,7 +1337,9 @@ fn push_uploads_one_oid_to_two_routed_remotes_and_hashes_it_once() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     std::fs::write(tmp.path().join("a.bin"), b"shared-bytes").unwrap();
     std::fs::write(tmp.path().join("b.bin"), b"shared-bytes").unwrap();
@@ -1324,7 +1376,7 @@ fn push_uploads_one_oid_to_two_routed_remotes_and_hashes_it_once() {
             remote: gat_core::name::RemoteName::from_string("backup".to_string()),
         },
     );
-    repo.save_config(&cfg).unwrap();
+    repo.write_config_fixture(&cfg).unwrap();
 
     let _ = std::fs::remove_file(cache_path(&repo).join("cache.sqlite3"));
     let handle = rt.handle().clone();
@@ -1369,7 +1421,9 @@ fn push_fanned_out_oid_advances_the_pushing_position_once_per_remote_obligation(
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     std::fs::write(tmp.path().join("a.bin"), b"shared-bytes").unwrap();
     std::fs::write(tmp.path().join("b.bin"), b"shared-bytes").unwrap();
@@ -1402,7 +1456,7 @@ fn push_fanned_out_oid_advances_the_pushing_position_once_per_remote_obligation(
             remote: gat_core::name::RemoteName::from_string("backup".to_string()),
         },
     );
-    repo.save_config(&cfg).unwrap();
+    repo.write_config_fixture(&cfg).unwrap();
     let _ = std::fs::remove_file(cache_path(&repo).join("cache.sqlite3"));
 
     let progress = RecordingProgress::new();
@@ -1430,7 +1484,9 @@ fn push_never_opens_a_configured_remote_that_no_object_routes_to() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
     add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
@@ -1473,7 +1529,9 @@ fn push_does_not_verify_local_bytes_when_remote_already_has_the_oid() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
     add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
 
@@ -1509,7 +1567,9 @@ fn push_with_everything_already_remote_opens_no_proof_db_and_hashes_nothing() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
     add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
 
@@ -1540,7 +1600,9 @@ fn push_uploads_the_latest_unstaged_content_even_after_staging_older_content() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     std::fs::write(tmp.path().join("a.bin"), b"a-content").unwrap();
     add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
     stage_all(tmp.path()); // a.bin staged
@@ -1572,7 +1634,9 @@ fn historical_push_selects_the_old_object_not_current_state() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     std::fs::write(tmp.path().join("a.bin"), b"version-a").unwrap();
     add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
@@ -1626,7 +1690,9 @@ fn duplicate_oids_are_pushed_only_once() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     std::fs::write(tmp.path().join("a.bin"), b"same-bytes").unwrap();
     std::fs::write(tmp.path().join("b.bin"), b"same-bytes").unwrap();
@@ -1652,7 +1718,9 @@ fn historical_fetch_selects_the_old_object_not_current_state() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     std::fs::write(tmp.path().join("a.bin"), b"version-a").unwrap();
     add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
@@ -1698,7 +1766,9 @@ fn fetch_uses_the_first_selected_paths_route_for_duplicate_oids() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     std::fs::write(tmp.path().join("a.bin"), b"shared-bytes").unwrap();
     std::fs::write(tmp.path().join("b.bin"), b"shared-bytes").unwrap();
@@ -1735,7 +1805,7 @@ fn fetch_uses_the_first_selected_paths_route_for_duplicate_oids() {
             remote: gat_core::name::RemoteName::from_string("backup".to_string()),
         },
     );
-    repo.save_config(&cfg).unwrap();
+    repo.write_config_fixture(&cfg).unwrap();
 
     let origin = RemoteName::from_string("origin".to_string());
     push(&repo, None, Some(&origin), &NoopProgress).unwrap();
@@ -1759,7 +1829,9 @@ fn fetch_does_not_fall_back_to_a_later_paths_remote_when_the_first_route_is_miss
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     std::fs::write(tmp.path().join("a.bin"), b"shared-bytes").unwrap();
     std::fs::write(tmp.path().join("b.bin"), b"shared-bytes").unwrap();
@@ -1792,7 +1864,7 @@ fn fetch_does_not_fall_back_to_a_later_paths_remote_when_the_first_route_is_miss
             remote: gat_core::name::RemoteName::from_string("backup".to_string()),
         },
     );
-    repo.save_config(&cfg).unwrap();
+    repo.write_config_fixture(&cfg).unwrap();
 
     let origin = RemoteName::from_string("origin".to_string());
     push(&repo, None, Some(&origin), &NoopProgress).unwrap();
@@ -1810,7 +1882,9 @@ fn fetch_leaves_a_corrupt_local_object_in_place_until_the_download_is_verified()
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
     add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
 
@@ -1842,7 +1916,9 @@ fn pull_fetches_mount_owned_paths_from_their_routed_remote() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     std::fs::create_dir_all(tmp.path().join("vendor/models")).unwrap();
     std::fs::write(tmp.path().join("vendor/models/model.bin"), b"payload").unwrap();
@@ -1881,7 +1957,7 @@ fn pull_fetches_mount_owned_paths_from_their_routed_remote() {
         },
     );
     cfg.sync.trust_state = Some(false);
-    repo.save_config(&cfg).unwrap();
+    repo.write_config_fixture(&cfg).unwrap();
 
     let selection = scoped_selection(Path::new("vendor/models"));
     push(&repo, Some(&selection), None, &NoopProgress).unwrap();
@@ -1901,7 +1977,9 @@ fn history_aware_pull_still_materializes_current_desired_state() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     std::fs::write(tmp.path().join("a.bin"), b"version-a").unwrap();
     add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
@@ -1927,7 +2005,7 @@ fn history_aware_pull_still_materializes_current_desired_state() {
 
     let mut cfg = repo.load_config().unwrap();
     cfg.sync.trust_state = Some(false);
-    repo.save_config(&cfg).unwrap();
+    repo.write_config_fixture(&cfg).unwrap();
 
     std::fs::remove_file(tmp.path().join("a.bin")).unwrap();
     std::fs::remove_dir_all(cache_path(&repo)).unwrap();
@@ -1964,7 +2042,9 @@ fn path_scope_restricts_historical_push_before_oid_dedup() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     std::fs::create_dir_all(tmp.path().join("dir")).unwrap();
     std::fs::write(tmp.path().join("a.bin"), b"a-content").unwrap();
@@ -2027,7 +2107,9 @@ fn repair_corrupted_dedups_the_same_oid_across_a_repair_window_boundary() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     let remote_dir = tempfile::tempdir().unwrap();
     let url = gat_io::remote_file_url_for_test(remote_dir.path());
@@ -2098,7 +2180,9 @@ fn repair_continues_after_missing_and_mismatched_objects_with_one_transfer_slot(
     let _guard = rt.enter();
     for window in [1, 4] {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let remote_dir = tempfile::tempdir().unwrap();
         remote_add_with_default(
             &repo,
@@ -2193,7 +2277,9 @@ fn repair_corrupted_position_equals_attempted_entries_not_unique_oids() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     let remote_dir = tempfile::tempdir().unwrap();
     let url = gat_io::remote_file_url_for_test(remote_dir.path());
@@ -2241,7 +2327,9 @@ fn repair_route_failures_do_not_open_the_cache() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let mut operation =
         gat_engine::acquire_operation_without_desired_state(&repo, &NoopProgress).unwrap();
     let corrupted = vec![(gp("unrouted.bin"), gat_core::oid::Oid::from_bytes([7; 32]))];
@@ -2270,7 +2358,9 @@ fn repair_corrupted_opens_the_shared_remote_once_for_several_distinct_oids_and_n
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     let remote_dir = tempfile::tempdir().unwrap();
     let url = gat_io::remote_file_url_for_test(remote_dir.path());
@@ -2339,7 +2429,9 @@ fn repair_corrupted_resolves_the_same_oid_different_route_representative_determi
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     let default_remote_dir = tempfile::tempdir().unwrap();
     let default_url = gat_io::remote_file_url_for_test(default_remote_dir.path());
@@ -2379,7 +2471,7 @@ fn repair_corrupted_resolves_the_same_oid_different_route_representative_determi
             .load_config_scoped(gat_core::config::ConfigScope::Project)
             .unwrap();
         cfg.remotes.default = None;
-        repo.save_config_scoped(&cfg, gat_core::config::ConfigScope::Project)
+        repo.write_scoped_config_fixture(&cfg, gat_core::config::ConfigScope::Project)
             .unwrap();
     }
 
@@ -2508,7 +2600,9 @@ fn push_invocation_loads_effective_config_exactly_once() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
     std::fs::write(tmp.path().join("b.bin"), b"other").unwrap();
     add(
@@ -2543,7 +2637,9 @@ fn fetch_invocation_loads_effective_config_exactly_once() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
     add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
     let remote_dir = tempfile::tempdir().unwrap();
@@ -2577,7 +2673,9 @@ fn push_never_retains_more_than_one_configured_window_of_obligation_metadata() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let remote_dir = tempfile::tempdir().unwrap();
     remote_add_with_default(
         &repo,
@@ -2623,7 +2721,9 @@ fn push_dispatches_more_than_one_window_for_a_multi_window_selection() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let remote_dir = tempfile::tempdir().unwrap();
     remote_add_with_default(
         &repo,
@@ -2666,7 +2766,9 @@ fn push_cross_window_global_dedup_pushes_a_repeated_oid_exactly_once() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let remote_dir = tempfile::tempdir().unwrap();
     remote_add_with_default(
         &repo,
@@ -2720,7 +2822,9 @@ fn push_multi_remote_creates_one_obligation_per_remote_for_the_same_oid() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     std::fs::write(tmp.path().join("a.bin"), b"shared-bytes").unwrap();
     std::fs::write(tmp.path().join("b.bin"), b"shared-bytes").unwrap();
@@ -2757,7 +2861,7 @@ fn push_multi_remote_creates_one_obligation_per_remote_for_the_same_oid() {
             remote: gat_core::name::RemoteName::from_string("backup".to_string()),
         },
     );
-    repo.save_config(&cfg).unwrap();
+    repo.write_config_fixture(&cfg).unwrap();
 
     let outcome = push(&repo, None, None, &NoopProgress).unwrap();
     // Local verification is shared by oid: only one unique object is
@@ -2797,7 +2901,9 @@ fn push_verifies_a_cross_window_fanned_out_oid_exactly_once() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     let origin_dir = tempfile::tempdir().unwrap();
     let backup_dir = tempfile::tempdir().unwrap();
@@ -2839,7 +2945,7 @@ fn push_verifies_a_cross_window_fanned_out_oid_exactly_once() {
             remote: gat_core::name::RemoteName::from_string("backup".to_string()),
         },
     );
-    repo.save_config(&cfg).unwrap();
+    repo.write_config_fixture(&cfg).unwrap();
 
     let before = gat_io::cache_proof_test_support::snapshot().fs_verifications;
     let ctx = DesiredOperation::acquire_with_limits(&repo, &NoopProgress, limits).unwrap();
@@ -2893,7 +2999,9 @@ fn push_progress_is_invariant_across_transfer_window_sizes() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let remote_dir = tempfile::tempdir().unwrap();
     remote_add_with_default(
         &repo,
@@ -2987,7 +3095,9 @@ fn push_high_concurrency_never_creates_more_than_one_pushing_task() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let remote_dir = tempfile::tempdir().unwrap();
     remote_add_with_default(
         &repo,
@@ -3049,7 +3159,9 @@ fn fetch_progress_is_invariant_across_transfer_window_sizes() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let remote_dir = tempfile::tempdir().unwrap();
     remote_add_with_default(
         &repo,
@@ -3107,7 +3219,9 @@ fn fetch_high_concurrency_never_creates_more_than_one_fetching_task() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let remote_dir = tempfile::tempdir().unwrap();
     remote_add_with_default(
         &repo,
@@ -3148,7 +3262,9 @@ fn fetch_cross_window_dedup_uses_the_first_selected_paths_route_once() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     let origin_dir = tempfile::tempdir().unwrap();
     let backup_dir = tempfile::tempdir().unwrap();
@@ -3189,7 +3305,7 @@ fn fetch_cross_window_dedup_uses_the_first_selected_paths_route_once() {
             remote: gat_core::name::RemoteName::from_string("backup".to_string()),
         },
     );
-    repo.save_config(&cfg).unwrap();
+    repo.write_config_fixture(&cfg).unwrap();
 
     push(&repo, None, None, &NoopProgress).unwrap();
 
@@ -3247,7 +3363,9 @@ fn warm_fetch_opens_zero_remote_operators() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let remote_dir = tempfile::tempdir().unwrap();
     remote_add_with_default(
         &repo,
@@ -3295,7 +3413,9 @@ fn fetch_correctly_aligns_verification_across_several_subwindows_within_one_tran
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let remote_dir = tempfile::tempdir().unwrap();
     remote_add_with_default(
         &repo,
@@ -3375,7 +3495,9 @@ fn pull_end_to_end_with_tiny_limits_materializes_every_file_across_many_windows(
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let remote_dir = tempfile::tempdir().unwrap();
     remote_add_with_default(
         &repo,
@@ -3428,7 +3550,9 @@ fn push_stops_dispatching_further_windows_after_the_first_filled_window_fails() 
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     let not_a_dir = tmp.path().join("not-a-directory");
     std::fs::write(&not_a_dir, b"not a directory").unwrap();
@@ -3519,7 +3643,9 @@ fn status_remote_streams_bounded_presence_windows_instead_of_materializing_the_w
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let remote_dir = tempfile::tempdir().unwrap();
     remote_add_with_default(
         &repo,
@@ -3590,7 +3716,9 @@ fn fetch_then_repair_then_sync_share_one_proof_session() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     let remote_dir = tempfile::tempdir().unwrap();
     let url = gat_io::remote_file_url_for_test(remote_dir.path());
@@ -3691,7 +3819,9 @@ fn push_across_many_windows_to_the_default_remote_opens_its_operator_exactly_onc
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     // `origin` is added first, so it (not `unused`) becomes the implicit
     // default remote every unrouted path resolves to.
@@ -3772,7 +3902,9 @@ fn pull_with_tiny_limits_fetches_and_materializes_every_path_across_many_windows
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let remote_dir = tempfile::tempdir().unwrap();
     remote_add_with_default(
         &repo,
@@ -3837,7 +3969,9 @@ fn push_rev_flag_selects_only_that_snapshot_not_its_ancestry() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     std::fs::write(tmp.path().join("a.bin"), b"version-1").unwrap();
     add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
@@ -3909,7 +4043,9 @@ fn fetch_rev_flag_selects_only_that_snapshot_not_its_ancestry() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     std::fs::write(tmp.path().join("a.bin"), b"version-1").unwrap();
     add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
@@ -3971,7 +4107,9 @@ fn pull_rev_flag_prefetches_only_that_snapshot_alongside_current_state() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     std::fs::write(tmp.path().join("a.bin"), b"version-1").unwrap();
     add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
@@ -4006,7 +4144,7 @@ fn pull_rev_flag_prefetches_only_that_snapshot_alongside_current_state() {
 
     let mut cfg = repo.load_config().unwrap();
     cfg.sync.trust_state = Some(false);
-    repo.save_config(&cfg).unwrap();
+    repo.write_config_fixture(&cfg).unwrap();
 
     std::fs::remove_file(tmp.path().join("a.bin")).unwrap();
     std::fs::remove_dir_all(cache_path(&repo)).unwrap();
@@ -4043,7 +4181,9 @@ fn remote_status_rev_flag_checks_only_that_snapshot_not_its_ancestry() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     std::fs::write(tmp.path().join("a.bin"), b"version-1").unwrap();
     add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
@@ -4149,7 +4289,9 @@ fn push_rev_with_ancestors_flag_walks_full_ancestry_but_not_head() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     std::fs::write(tmp.path().join("a.bin"), b"version-1").unwrap();
     add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
@@ -4221,7 +4363,9 @@ fn fetch_rev_with_depth_flag_bounds_the_walked_ancestry() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     std::fs::write(tmp.path().join("a.bin"), b"version-1").unwrap();
     add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
@@ -4278,7 +4422,9 @@ fn push_all_history_includes_a_commit_only_reachable_via_a_custom_ref() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let layout = layout(tmp.path());
 
     std::fs::write(tmp.path().join("branch.bin"), b"branch").unwrap();
@@ -4359,7 +4505,9 @@ fn push_with_all_history_fails_closed_on_a_dangling_ref() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     std::fs::write(tmp.path().join("a.bin"), b"a").unwrap();
     add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
@@ -4388,7 +4536,9 @@ fn fetch_with_all_history_fails_closed_on_a_dangling_ref() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     std::fs::write(tmp.path().join("a.bin"), b"a").unwrap();
     add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
@@ -4418,7 +4568,9 @@ fn pull_with_all_history_fails_closed_on_a_dangling_ref() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     std::fs::write(tmp.path().join("a.bin"), b"a").unwrap();
     add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
@@ -4455,7 +4607,9 @@ fn remote_status_with_all_history_fails_closed_on_a_dangling_ref() {
     let _guard = rt.enter();
     opendal::init_default_registry();
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
 
     std::fs::write(tmp.path().join("a.bin"), b"a").unwrap();
     add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();

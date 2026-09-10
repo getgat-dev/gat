@@ -4,7 +4,7 @@
 /// or opened. Classification contains no resolved endpoint values.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemoteOpenFailureKind {
-    InvalidConnectTimeout,
+    NonUnicodeVariable { name: String },
     InvalidInterpolation,
     MissingVariable { name: String },
     MalformedUrl,
@@ -36,6 +36,9 @@ impl RemoteOpenError {
         use gat_io::{InterpolateError, OpenRemoteError, RemoteError};
 
         let kind = match &source {
+            OpenRemoteError::Interpolate(InterpolateError::NonUnicodeVariable { name }) => {
+                RemoteOpenFailureKind::NonUnicodeVariable { name: name.clone() }
+            }
             OpenRemoteError::Interpolate(
                 InterpolateError::UnterminatedReference { .. }
                 | InterpolateError::InvalidVariableName { .. },
@@ -44,7 +47,6 @@ impl RemoteOpenError {
                 RemoteOpenFailureKind::MissingVariable { name: name.clone() }
             }
             OpenRemoteError::Remote(remote) => match remote {
-                RemoteError::InvalidConnectTimeout => RemoteOpenFailureKind::InvalidConnectTimeout,
                 RemoteError::MalformedUrl { .. } => RemoteOpenFailureKind::MalformedUrl,
                 RemoteError::UnsupportedScheme { .. } => RemoteOpenFailureKind::UnsupportedBackend,
                 RemoteError::InvalidFileRemotePath { hint } => {

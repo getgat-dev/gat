@@ -103,8 +103,8 @@ fn diff_against_the_working_tree_reports_a_symlinked_gat_lock_as_a_local_state_e
     let error = working_diff(&repo, "HEAD", Selection::root()).unwrap_err();
     assert!(matches!(
         error,
-        DiffError::Compare(source)
-            if matches!(source.kind(), gat_engine::CompareErrorKind::Lock(_))
+        DiffError::Snapshot(source)
+            if matches!(source.kind(), gat_engine::RepoSnapshotErrorKind::Lock(gat_engine::LockFailureKind::UnsupportedFileType))
     ));
 }
 

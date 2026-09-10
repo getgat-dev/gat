@@ -221,7 +221,7 @@ fn run_push_window(
     #[cfg(any(test, feature = "test-support"))]
     test_support::record_push_window(obligations.len());
 
-    let metadata: Vec<_> = obligations
+    let (objects, metadata): (Vec<_>, Vec<_>) = obligations
         .map(|obligation| {
             let object = PublishObject::new(
                 obligation.oid,
@@ -230,21 +230,19 @@ fn run_push_window(
             );
             (
                 object,
-                obligation.oid,
-                obligation.selected_index,
-                obligation.representative_path,
+                (
+                    obligation.oid,
+                    obligation.selected_index,
+                    obligation.representative_path,
+                ),
             )
         })
-        .collect();
-    let objects = metadata
-        .iter()
-        .map(|(object, _, _, _)| object.clone())
-        .collect();
+        .unzip();
     let outcome = publish_window(operation, objects, task)?;
     debug_assert_eq!(metadata.len(), outcome.statuses.len());
 
     let mut cache_skips = BTreeMap::<Oid, (usize, GatPath, PushSkipReason)>::new();
-    for ((_, oid, selected_index, path), status) in metadata.into_iter().zip(outcome.statuses) {
+    for ((oid, selected_index, path), status) in metadata.into_iter().zip(outcome.statuses) {
         let reason = match status {
             PublishStatus::AlreadyPresent | PublishStatus::Uploaded => None,
             PublishStatus::CacheMissing => Some(PushSkipReason::CacheMissing),

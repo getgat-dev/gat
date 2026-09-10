@@ -268,7 +268,7 @@ pub fn path_with_gat() -> OsString {
 /// semantic merge driver): the child's home directory ([`HOME_ENV_VAR`])
 /// is pointed at [`fake_home`]'s permanently empty directory, the
 /// global/system git config is redirected to [`isolated_gitconfig`], any
-/// `GAT_CACHE_DIR` the test *process* happens to have inherited is
+/// `GAT_CACHE_LOCATION` the test *process* happens to have inherited is
 /// stripped from the child rather than passed through, and `PATH` is set
 /// via [`path_with_gat`] so any hook dispatcher/merge-driver invocation
 /// resolves `gat` to the build under test.
@@ -279,11 +279,14 @@ pub fn path_with_gat() -> OsString {
 /// behavior silently depends on (or is broken by) the developer/CI
 /// machine's real global Gat/Git config or an inherited cache relocation.
 pub fn isolated_child_env(cmd: &mut Command) {
+    for key in gat_core::settings::SettingKey::CANONICAL {
+        cmd.env_remove(key.environment_name());
+    }
     cmd.env(HOME_ENV_VAR, fake_home())
         .env("GIT_CONFIG_GLOBAL", test_support_git::isolated_gitconfig())
         .env("GIT_CONFIG_SYSTEM", test_support_git::isolated_gitconfig())
         .env("PATH", path_with_gat())
-        .env_remove("GAT_CACHE_DIR");
+        .env_remove("GAT_CACHE_LOCATION");
 }
 
 /// Runs `git` with `args` in `dir`, returning the raw captured [`Output`]
@@ -330,13 +333,13 @@ pub fn git_with_env(dir: &Path, args: &[&str], extra_env: &[(&str, Option<&str>)
 ///
 /// `extra_env` is applied strictly *after* the default isolation
 /// environment is established, so a test that specifically needs to
-/// characterize `HOME`/`GAT_CACHE_DIR` handling can still override
+/// characterize `HOME`/`GAT_CACHE_LOCATION` handling can still override
 /// either for the child process, without ever mutating this test
 /// process's own environment (unsound to do concurrently across test
 /// threads). Each entry is `(name, Some(value))` to set/override a
 /// variable for the child, or `(name, None)` to explicitly *unset* one
 /// of the two defaulted variables above for the child -- e.g. to
-/// characterize the unset-`GAT_CACHE_DIR` path -- rather than falling
+/// characterize the unset-`GAT_CACHE_LOCATION` path -- rather than falling
 /// back to whatever this test process's own environment happens to
 /// contain.
 pub fn gat_with_env(dir: &Path, args: &[&str], extra_env: &[(&str, Option<&str>)]) -> Output {

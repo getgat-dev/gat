@@ -128,8 +128,13 @@ fn resolve_selection_request(
             scope: scope.resolve(),
         },
         A::Default { name, unset, scope } => R::Default {
-            name: name.map(Into::into),
-            unset,
+            action: if unset {
+                gat_engine::DefaultAction::Unset
+            } else {
+                name.map_or(gat_engine::DefaultAction::Get, |name| {
+                    gat_engine::DefaultAction::Set(name.into())
+                })
+            },
             scope: scope.resolve(),
         },
         A::Add {
@@ -174,8 +179,13 @@ fn resolve_selection_request(
 fn resolve_remote_request(action: RemoteAction) -> RemoteRequest {
     match action {
         RemoteAction::Default { name, unset, scope } => RemoteRequest::Default {
-            name: name.map(Into::into),
-            unset,
+            action: if unset {
+                gat_engine::DefaultAction::Unset
+            } else {
+                name.map_or(gat_engine::DefaultAction::Get, |name| {
+                    gat_engine::DefaultAction::Set(name.into())
+                })
+            },
             scope: scope.resolve(),
         },
         RemoteAction::List => RemoteRequest::List,
@@ -1006,7 +1016,9 @@ mod tests {
                     };
                     assert_eq!(
                         resolve_default_selection(
-                            &Repository::at(std::env::temp_dir()),
+                            &gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+                                .unwrap()
+                                .repository_at(std::env::temp_dir()),
                             &selection
                         )
                         .unwrap()
@@ -1021,9 +1033,14 @@ mod tests {
                 unreachable!()
             };
             assert!(
-                resolve_default_selection(&Repository::at(std::env::temp_dir()), &selection)
-                    .unwrap()
-                    .is_none()
+                resolve_default_selection(
+                    &gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+                        .unwrap()
+                        .repository_at(std::env::temp_dir()),
+                    &selection
+                )
+                .unwrap()
+                .is_none()
             );
         }
 
@@ -1439,7 +1456,9 @@ mod tests {
         gat_engine::initialize_backends();
         let tmp = test_repo();
         std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
-        let repo = Repository::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         ::test_support::add(&repo, &[std::path::PathBuf::from("a.bin")], &NoopProgress).unwrap();
         commit_all(tmp.path(), "add a.bin");
 

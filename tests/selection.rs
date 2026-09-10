@@ -9,7 +9,6 @@ use gat_core::config::{Config, SelectionConfig};
 use gat_core::globs::GatGlobPattern;
 use gat_core::progress::NoopProgress;
 use gat_core::selection::Selection;
-use gat_engine::Repository;
 use std::path::PathBuf;
 use test_support::{add, git_repo_with_initial_commit, remote_add_with_default};
 use test_support_git::commit_all;
@@ -20,7 +19,9 @@ fn seven_commands_and_hooks_share_defaults_and_explicit_root_replaces_them() {
     let _guard = runtime.enter();
     gat_engine::initialize_backends();
     let temp = git_repo_with_initial_commit();
-    let repo = Repository::at(temp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(temp.path().to_path_buf());
     let paths = ["models/a.bin", "models/experimental/b.bin", "archive/c.bin"];
     for path in paths {
         let dest = temp.path().join(path);
@@ -28,7 +29,7 @@ fn seven_commands_and_hooks_share_defaults_and_explicit_root_replaces_them() {
         std::fs::write(dest, path.as_bytes()).unwrap();
     }
     add(&repo, &paths.map(PathBuf::from), &NoopProgress).unwrap();
-    repo.save_config(&Config {
+    repo.write_config_fixture(&Config {
         selections: gat_core::config::SelectionsConfig {
             default: Some("runtime".into()),
             by_name: std::collections::BTreeMap::from([(

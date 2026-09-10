@@ -24,6 +24,11 @@ use std::collections::BTreeMap;
 /// not model text.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    #[error("invalid setting {key}: {reason}")]
+    InvalidSettingValue {
+        key: crate::settings::SettingKey,
+        reason: crate::settings::SettingValueError,
+    },
     #[error("no selection named `{name}`")]
     UnknownSelection { name: crate::name::SelectionName },
     /// A standalone route path (not yet attached to a named route in a
@@ -253,6 +258,11 @@ impl std::fmt::Display for ConfigScope {
 /// `gat-io` and does not participate in semantic merging.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
 pub struct Config {
+    #[serde(
+        default,
+        skip_serializing_if = "crate::settings::NetworkConfig::is_empty"
+    )]
+    pub network: crate::settings::NetworkConfig,
     /// Named remotes and an optional default, managed with `gat remote`.
     /// Adding a remote never chooses a default; use `gat remote default`.
     #[serde(default, skip_serializing_if = "RemotesConfig::is_empty")]
@@ -353,7 +363,7 @@ impl RemotesConfig {
 pub struct CacheConfig {
     /// Where the local content-addressed cache lives: an absolute path, or
     /// relative to the repo root. Unset means `<repo>/.gat/objects`. The
-    /// `GAT_CACHE_DIR` environment variable overrides this when set (e.g.
+    /// `GAT_CACHE_LOCATION` environment variable overrides this when set (e.g.
     /// to share one cache across repos/checkouts without editing
     /// `gat.yaml`). Set with `gat config cache.location <path>`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -441,8 +451,13 @@ impl std::str::FromStr for MaterializationMode {
 /// argument per mode (see [`Self::from_values`]) instead of a single
 /// `,`-delimited
 /// value.
+///
+/// ```compile_fail
+/// use gat_core::config::MaterializationStrategy;
+/// let invalid = MaterializationStrategy(Vec::new());
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MaterializationStrategy(pub Vec<MaterializationMode>);
+pub struct MaterializationStrategy(Vec<MaterializationMode>);
 
 impl MaterializationStrategy {
     #[must_use]
@@ -482,13 +497,27 @@ impl MaterializationStrategy {
     }
 }
 
+impl TryFrom<Vec<MaterializationMode>> for MaterializationStrategy {
+    type Error = ConfigError;
+
+    fn try_from(modes: Vec<MaterializationMode>) -> Result<Self, Self::Error> {
+        Self::validate(modes)
+    }
+}
+
+impl From<MaterializationMode> for MaterializationStrategy {
+    fn from(mode: MaterializationMode) -> Self {
+        Self(vec![mode])
+    }
+}
+
 /// `cache.materialization_strategy`'s fallback when unset. Plain `copy` is the safest
 /// cross-platform default (reflink/hardlink support varies a lot by
 /// filesystem and OS); opt into the faster, space-saving modes explicitly
 /// with `gat config cache.materialization_strategy reflink hardlink symlink copy`.
 impl Default for MaterializationStrategy {
     fn default() -> Self {
-        Self(vec![MaterializationMode::Copy])
+        Self::from(MaterializationMode::Copy)
     }
 }
 
@@ -500,7 +529,7 @@ impl std::str::FromStr for MaterializationStrategy {
 
     fn from_str(s: &str) -> std::result::Result<Self, ConfigError> {
         let mode: MaterializationMode = s.parse()?;
-        Self::validate(vec![mode])
+        Ok(Self::from(mode))
     }
 }
 
@@ -627,18 +656,6 @@ impl CacheConfig {
     fn is_empty(&self) -> bool {
         self == &Self::default()
     }
-
-    /// Layers `override_` over `self`: each field wins when set in
-    /// `override_`, otherwise `self`'s value carries through.
-    fn merged_with(self, override_: Self) -> Self {
-        Self {
-            location: override_.location.or(self.location),
-            materialization_strategy: override_
-                .materialization_strategy
-                .or(self.materialization_strategy),
-            ingest_strategy: override_.ingest_strategy.or(self.ingest_strategy),
-        }
-    }
 }
 
 /// Named selections merge by name, replacing complete definitions on collision.
@@ -750,7 +767,7 @@ impl SyncConfig {
     /// Effective `auto_fetch`, after layering: an explicit value (`true` or
     /// `false`) set in any layer wins over lower-priority layers, and the
     /// built-in default `false` applies only when every layer left it
-    /// unset. See `Self::merged_with`.
+    /// unset. See [`crate::settings::SettingsLayer`].
     #[must_use]
     pub fn auto_fetch(&self) -> bool {
         self.auto_fetch.unwrap_or(false)
@@ -760,15 +777,6 @@ impl SyncConfig {
     #[must_use]
     pub fn auto_repair(&self) -> bool {
         self.auto_repair.unwrap_or(false)
-    }
-
-    /// Higher-priority explicit values override inherited sync behavior.
-    fn merged_with(self, override_: Self) -> Self {
-        Self {
-            trust_state: override_.trust_state.or(self.trust_state),
-            auto_fetch: override_.auto_fetch.or(self.auto_fetch),
-            auto_repair: override_.auto_repair.or(self.auto_repair),
-        }
     }
 }
 
@@ -805,14 +813,6 @@ impl LockConfig {
     pub fn shard_levels(&self) -> crate::lock::LockShardLevels {
         self.shard_levels
             .unwrap_or(crate::lock::LockShardLevels::FLAT)
-    }
-
-    /// Layers `override_` over `self`: wins when set, same as
-    /// [`CacheConfig::merged_with`].
-    fn merged_with(self, override_: Self) -> Self {
-        Self {
-            shard_levels: override_.shard_levels.or(self.shard_levels),
-        }
     }
 }
 
@@ -891,7 +891,7 @@ pub struct GitConfig {
     /// `GitConfigRaw`/[`Self::deserialize`] below), but values always
     /// persist under this canonical `ignore_patterns` name. `None` means unset in
     /// this layer (inherit from a lower-priority layer); `Some(vec![])`
-    /// is an explicit empty override -- see `Self::merged_with`.
+    /// is an explicit empty override -- see [`crate::settings::SettingsLayer`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ignore_patterns: Option<Vec<crate::git_ignore::GitIgnorePattern>>,
 }
@@ -983,18 +983,6 @@ impl GitConfig {
     #[must_use]
     pub fn effective_ignore_patterns(&self) -> &[crate::git_ignore::GitIgnorePattern] {
         self.ignore_patterns.as_deref().unwrap_or(&[])
-    }
-
-    /// Layers `override_` over `self`: `ignore_patterns` wins wholesale
-    /// when set (even to an explicit empty list) in `override_`, rather
-    /// than concatenating -- a higher-priority layer fully owns its own
-    /// pattern list instead of silently appending to (or being masked by
-    /// emptiness in) a lower one. `None` in `override_` means that layer
-    /// left the key unset, so `self`'s value carries through.
-    fn merged_with(self, override_: Self) -> Self {
-        Self {
-            ignore_patterns: override_.ignore_patterns.or(self.ignore_patterns),
-        }
     }
 }
 
@@ -1301,20 +1289,16 @@ pub struct MountConfig {
 impl Config {
     /// Layers `override_` over `self`: for each nested section, uses that
     /// section's own rules (whole named definitions or
-    /// individual scalar settings -- see [`CacheConfig::merged_with`],
+    /// individual scalar settings -- see [`crate::settings::SettingsLayer`],
     /// [`RemotesConfig::merged_with`], etc.). Document metadata is absent
     /// from this semantic operation.
-    fn merged_with(self, override_: Self) -> Self {
-        Self {
-            remotes: self.remotes.merged_with(override_.remotes),
-            cache: self.cache.merged_with(override_.cache),
-            sync: self.sync.merged_with(override_.sync),
-            selections: self.selections.merged_with(override_.selections),
-            lock: self.lock.merged_with(override_.lock),
-            mounts: self.mounts.merged_with(override_.mounts),
-            routes: self.routes.merged_with(override_.routes),
-            git: self.git.merged_with(override_.git),
-        }
+    fn merged_with(mut self, mut override_: Self) -> Self {
+        crate::settings::SettingsLayer::merge_config(&mut self, &mut override_);
+        self.remotes = self.remotes.merged_with(override_.remotes);
+        self.selections = self.selections.merged_with(override_.selections);
+        self.mounts = self.mounts.merged_with(override_.mounts);
+        self.routes = self.routes.merged_with(override_.routes);
+        self
     }
 
     /// Folds `layers` (lowest precedence first) into one effective
@@ -1446,6 +1430,25 @@ mod tests {
     }
 
     #[test]
+    fn typed_materialization_strategies_validate_and_preserve_fallback_order() {
+        use MaterializationMode::{Copy, Hardlink, Reflink};
+        assert!(matches!(
+            MaterializationStrategy::try_from(Vec::new()),
+            Err(ConfigError::EmptyLinkModeList),
+        ));
+        assert!(matches!(
+            MaterializationStrategy::try_from(vec![Copy, Reflink, Copy]),
+            Err(ConfigError::DuplicateLinkMode { .. }),
+        ));
+        let strategy = MaterializationStrategy::try_from(vec![Reflink, Copy, Hardlink]).unwrap();
+        assert_eq!(strategy.modes(), &[Reflink, Copy, Hardlink]);
+        assert_eq!(
+            MaterializationStrategy::from(Copy),
+            MaterializationStrategy::default()
+        );
+    }
+
+    #[test]
     fn materialization_strategy_from_values_rejects_an_empty_list() {
         let err = MaterializationStrategy::from_values::<&str>(&[]).unwrap_err();
         assert!(matches!(err, ConfigError::EmptyLinkModeList));
@@ -1574,6 +1577,34 @@ mod tests {
     }
 
     #[test]
+    fn owned_merge_moves_list_storage_and_preserves_explicit_empty_overrides() {
+        let patterns = validate_ignore_patterns(vec!["*.bin".into(), "/models/".into()]).unwrap();
+        let allocation = patterns.as_ptr();
+        let layer = Config {
+            git: GitConfig {
+                ignore_patterns: Some(patterns),
+            },
+            ..Default::default()
+        };
+        let merged = Config::merge_layers([layer, Config::default()]);
+        assert_eq!(
+            merged.git.ignore_patterns.as_ref().unwrap().as_ptr(),
+            allocation
+        );
+        assert_eq!(merged.git.effective_ignore_patterns().len(), 2);
+        let empty = Config {
+            git: GitConfig {
+                ignore_patterns: Some(Vec::new()),
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            Config::merge_layers([merged, empty]).git.ignore_patterns,
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
     fn merge_layers_of_no_layers_is_the_default_config() {
         assert_eq!(Config::merge_layers([]), Config::default());
     }
@@ -1581,9 +1612,10 @@ mod tests {
     #[test]
     fn merge_layers_local_wins_over_project_wins_over_global_per_field() {
         let global = cfg(|c| {
-            c.cache.location = Some(crate::cache_location::CacheLocation::from_path(
-                "global-cache".into(),
-            ));
+            c.cache.location = Some(
+                crate::cache_location::CacheLocation::try_from_path("global-cache".into())
+                    .expect("nonempty cache location"),
+            );
             c.selections
                 .by_name
                 .entry("runtime".into())
@@ -1593,9 +1625,10 @@ mod tests {
             ]);
         });
         let project = cfg(|c| {
-            c.cache.location = Some(crate::cache_location::CacheLocation::from_path(
-                "project-cache".into(),
-            ));
+            c.cache.location = Some(
+                crate::cache_location::CacheLocation::try_from_path("project-cache".into())
+                    .expect("nonempty cache location"),
+            );
         });
         let local = cfg(|c| {
             c.selections
@@ -1612,9 +1645,10 @@ mod tests {
         // project overrides global's `cache.location`...
         assert_eq!(
             merged.cache.location,
-            Some(crate::cache_location::CacheLocation::from_path(
-                "project-cache".into()
-            ))
+            Some(
+                crate::cache_location::CacheLocation::try_from_path("project-cache".into())
+                    .expect("nonempty cache location")
+            )
         );
         // ...and local replaces the global selection; the absent project
         // selection does not affect inheritance.
@@ -1656,9 +1690,10 @@ mod tests {
     #[test]
     fn merge_layers_unset_fields_in_higher_layers_do_not_erase_lower_ones() {
         let global = cfg(|c| {
-            c.cache.location = Some(crate::cache_location::CacheLocation::from_path(
-                "global-cache".into(),
-            ));
+            c.cache.location = Some(
+                crate::cache_location::CacheLocation::try_from_path("global-cache".into())
+                    .expect("nonempty cache location"),
+            );
         });
         let project = Config::default();
         let local = Config::default();
@@ -1666,9 +1701,10 @@ mod tests {
         let merged = Config::merge_layers([global, project, local]);
         assert_eq!(
             merged.cache.location,
-            Some(crate::cache_location::CacheLocation::from_path(
-                "global-cache".into()
-            ))
+            Some(
+                crate::cache_location::CacheLocation::try_from_path("global-cache".into())
+                    .expect("nonempty cache location")
+            )
         );
     }
 
@@ -2051,7 +2087,17 @@ mod tests {
             auto_fetch: Some(false),
             auto_repair: Some(true),
         };
-        let merged = global.merged_with(local);
+        let merged = Config::merge_layers([
+            Config {
+                sync: global,
+                ..Config::default()
+            },
+            Config {
+                sync: local,
+                ..Config::default()
+            },
+        ])
+        .sync;
         assert_eq!(merged.trust_state, Some(true));
         assert!(!merged.auto_fetch());
         assert!(merged.auto_repair());
@@ -2127,7 +2173,18 @@ mod tests {
             shard_levels: Some(crate::lock::LockShardLevels::new(2).unwrap()),
         };
         assert_eq!(
-            global.merged_with(local).shard_levels,
+            Config::merge_layers([
+                Config {
+                    lock: global,
+                    ..Config::default()
+                },
+                Config {
+                    lock: local,
+                    ..Config::default()
+                }
+            ])
+            .lock
+            .shard_levels,
             Some(crate::lock::LockShardLevels::new(2).unwrap())
         );
 
@@ -2136,7 +2193,18 @@ mod tests {
         };
         let local = LockConfig { shard_levels: None };
         assert_eq!(
-            global.merged_with(local).shard_levels,
+            Config::merge_layers([
+                Config {
+                    lock: global,
+                    ..Config::default()
+                },
+                Config {
+                    lock: local,
+                    ..Config::default()
+                }
+            ])
+            .lock
+            .shard_levels,
             Some(crate::lock::LockShardLevels::new(1).unwrap())
         );
     }

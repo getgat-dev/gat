@@ -1,6 +1,6 @@
 [package]
 name = "gat"
-version = "0.0.5"
+version = "0.0.7"
 edition = "2024"
 rust-version = "1.91"
 description = "Simple, fast, versioned large-file storage for git."
@@ -14,7 +14,7 @@ categories = ["command-line-utilities", "development-tools", "filesystem"]
 # Developer generators are workspace members so locked workspace checks cover
 # them, but they are omitted from default-members so ordinary builds compile
 # only the product and its test-support crates.
-members = ["test-support-git", "test-support-gat", "gat-core", "gat-io", "gat-engine", "gat-command", "tools"]
+members = ["test-support-git", "test-support-gat", "gat-core", "gat-io", "gat-engine", "gat-command", "tools/docs", "tools/benchmark", "tools/check"]
 default-members = [".", "test-support-git", "test-support-gat", "gat-core", "gat-io", "gat-engine", "gat-command"]
 
 [lib]

@@ -57,13 +57,13 @@ fn local_storage_writers_ignore_their_first_files_without_exclude_sync() {
                 .unwrap(),
             "cache" => {
                 layout
-                    .resolve_cache_root(None, None)
+                    .resolve_cache_root(None)
                     .writer()
                     .ingest(&b"content"[..])
                     .unwrap();
             }
             "cache-repair" => layout
-                .resolve_cache_root(None, None)
+                .resolve_cache_root(None)
                 .maintenance()
                 .rebuild_database()
                 .unwrap(),
@@ -71,7 +71,7 @@ fn local_storage_writers_ignore_their_first_files_without_exclude_sync() {
             "cache-sweep" => {
                 seed_unprotected_cache_object(&layout);
                 layout
-                    .resolve_cache_root(None, None)
+                    .resolve_cache_root(None)
                     .maintenance()
                     .sweep(false, |_| {
                         Ok::<_, std::convert::Infallible>(gat_io::CacheSweepDecision::Delete)
@@ -82,7 +82,7 @@ fn local_storage_writers_ignore_their_first_files_without_exclude_sync() {
             }
             "cache-proof" => {
                 std::fs::create_dir_all(temp.path().join(".gat/objects")).unwrap();
-                let _client = layout.resolve_cache_root(None, None).open_client();
+                let _client = layout.resolve_cache_root(None).open_client();
                 assert!(temp.path().join(".gat/objects/cache.sqlite3").is_file());
             }
             _ => unreachable!(),
@@ -128,14 +128,14 @@ fn read_only_access_and_external_cache_writes_do_not_create_local_storage() {
             .unwrap()
             .is_none()
     );
-    let _client = layout.resolve_cache_root(None, None).open_client();
+    let _client = layout.resolve_cache_root(None).open_client();
     assert!(matches!(
         gat_io::inspect_database(&layout).unwrap(),
         gat_io::StateDatabaseHealth::Absent
     ));
     assert!(matches!(
         layout
-            .resolve_cache_root(None, None)
+            .resolve_cache_root(None)
             .maintenance()
             .inspect_database()
             .unwrap(),
@@ -143,7 +143,12 @@ fn read_only_access_and_external_cache_writes_do_not_create_local_storage() {
     ));
     let external = tempfile::tempdir().unwrap();
     layout
-        .resolve_cache_root(Some(external.path().as_os_str()), None)
+        .resolve_cache_root(Some(
+            &gat_core::cache_location::CacheLocation::try_from_path(std::path::PathBuf::from(
+                external.path().as_os_str(),
+            ))
+            .expect("nonempty fixture cache path"),
+        ))
         .writer()
         .ingest(&b"content"[..])
         .unwrap();
@@ -152,7 +157,7 @@ fn read_only_access_and_external_cache_writes_do_not_create_local_storage() {
 }
 
 fn seed_unprotected_cache_object(layout: &RepositoryLayout) -> std::path::PathBuf {
-    let cache = layout.resolve_cache_root(None, None);
+    let cache = layout.resolve_cache_root(None);
     let oid = Oid::from_hex(&"aa".repeat(32)).unwrap();
     let object = cache.object_path_for_test(&oid);
     std::fs::create_dir_all(object.parent().unwrap()).unwrap();
@@ -164,7 +169,7 @@ fn seed_unprotected_cache_object(layout: &RepositoryLayout) -> std::path::PathBu
 fn cache_sweep_prepares_only_existing_storage_and_never_writes_in_dry_run() {
     let temp = repository();
     let layout = layout(temp.path());
-    let cache = layout.resolve_cache_root(None, None);
+    let cache = layout.resolve_cache_root(None);
     let keep = |_| Ok::<_, std::convert::Infallible>(gat_io::CacheSweepDecision::Keep);
     cache.maintenance().sweep(false, keep).unwrap().unwrap();
     assert!(!temp.path().join(".gat").exists());
@@ -213,7 +218,7 @@ fn database_readers_fail_before_creating_sidecars_when_protection_is_invalid() {
     let initial = layout(temp.path());
     drop(gat_io::StateStore::open(&initial).unwrap());
     initial
-        .resolve_cache_root(None, None)
+        .resolve_cache_root(None)
         .maintenance()
         .rebuild_database()
         .unwrap();
@@ -224,7 +229,7 @@ fn database_readers_fail_before_creating_sidecars_when_protection_is_invalid() {
     assert!(gat_io::inspect_database(&layout).is_err());
     assert!(
         layout
-            .resolve_cache_root(None, None)
+            .resolve_cache_root(None)
             .maintenance()
             .inspect_database()
             .is_err()
@@ -250,7 +255,7 @@ fn existing_database_readers_protect_sqlite_sidecars_before_opening() {
         let initial = layout(temp.path());
         drop(gat_io::StateStore::open(&initial).unwrap());
         initial
-            .resolve_cache_root(None, None)
+            .resolve_cache_root(None)
             .maintenance()
             .rebuild_database()
             .unwrap();
@@ -271,7 +276,7 @@ fn existing_database_readers_protect_sqlite_sidecars_before_opening() {
             )),
             "cache-health" => assert!(matches!(
                 layout
-                    .resolve_cache_root(None, None)
+                    .resolve_cache_root(None)
                     .maintenance()
                     .inspect_database()
                     .unwrap(),
@@ -301,7 +306,7 @@ fn failed_ignore_initialization_prevents_state_and_cache_publication() {
     assert!(gat_io::RepoLock::acquire_repository(&layout).is_err());
     assert!(
         layout
-            .resolve_cache_root(None, None)
+            .resolve_cache_root(None)
             .writer()
             .begin_ingest()
             .is_err()

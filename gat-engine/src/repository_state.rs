@@ -295,7 +295,9 @@ mod contract_tests {
 
     fn tracked_repo() -> (crate::test_harness::TestRepo, Repo) {
         let tmp = crate::test_harness::test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         repo.save_lock(&Lock {
             entries: vec![entry("a.bin", 1)],
         })

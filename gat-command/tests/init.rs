@@ -1,9 +1,8 @@
-use std::ffi::OsStr;
 use std::path::Path;
 
 use gat_command::{
     InitConfigOutcome, InitError, InitGitIntegrationOutcome, InitHooksOutcome, InitOutcome,
-    InitRequest, init_with_cache_resolution,
+    InitRequest, init,
 };
 use gat_engine::InitializationErrorKind;
 use gat_engine::Repository;
@@ -23,8 +22,7 @@ fn converge(repo: &Repository, request: InitRequest) -> InitOutcome {
 }
 
 fn converge_result(repo: &Repository, request: InitRequest) -> Result<InitOutcome, InitError> {
-    let global = tempfile::tempdir().expect("fake global config");
-    init_with_cache_resolution(repo, request, None, Some(global.path().to_path_buf()))
+    init(repo, request)
 }
 
 fn hook_installed(root: &Path) -> bool {
@@ -47,7 +45,9 @@ fn converges_all_hook_and_merge_driver_flag_combinations() {
     for (no_hooks, no_merge_driver) in [(false, false), (true, false), (false, true), (true, true)]
     {
         let tmp = git_repo();
-        let repo = Repository::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         converge(
             &repo,
             InitRequest {
@@ -66,7 +66,9 @@ fn converges_all_hook_and_merge_driver_flag_combinations() {
 #[test]
 fn repeated_convergence_reports_stable_state() {
     let tmp = git_repo();
-    let repo = Repository::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     converge(&repo, InitRequest::default());
 
     let installed = converge(&repo, InitRequest::default());
@@ -98,7 +100,9 @@ fn repeated_convergence_reports_stable_state() {
 #[test]
 fn example_config_is_opt_in_and_never_overwrites() {
     let tmp = git_repo();
-    let repo = Repository::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let config_path = tmp.path().join("gat.yaml");
 
     let plain = converge(&repo, InitRequest::default());
@@ -123,7 +127,9 @@ fn example_config_is_opt_in_and_never_overwrites() {
 #[test]
 fn example_config_creation_is_inert() {
     let tmp = git_repo();
-    let repo = Repository::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let outcome = converge(
         &repo,
         InitRequest {
@@ -181,7 +187,9 @@ fn example_config_creation_is_inert() {
 #[test]
 fn hook_and_git_content_survive_install_and_removal() {
     let tmp = git_repo();
-    let repo = Repository::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let hooks = tmp.path().join(".git/hooks");
     std::fs::create_dir_all(&hooks).expect("hooks dir");
     std::fs::write(hooks.join("post-checkout"), "#!/bin/sh\r\necho custom\r\n")
@@ -238,7 +246,9 @@ fn linked_worktree_uses_the_common_git_directory() {
             "linked",
         ],
     );
-    let repo = Repository::at(worktree);
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(worktree);
 
     converge(&repo, InitRequest::default());
 
@@ -250,7 +260,9 @@ fn linked_worktree_uses_the_common_git_directory() {
 #[test]
 fn explicit_cache_override_wins_without_ambient_environment() {
     let tmp = git_repo();
-    let repo = Repository::at(tmp.path().to_path_buf());
+    let _repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let global = tempfile::tempdir().expect("global config");
     std::fs::write(
         global.path().join("gat.yaml"),
@@ -258,28 +270,31 @@ fn explicit_cache_override_wins_without_ambient_environment() {
     )
     .expect("global config");
 
-    let outcome = init_with_cache_resolution(
+    let repo = gat_engine::Invocation::from_pairs([("GAT_CACHE_LOCATION", "explicit-cache")])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
+    let outcome = init(
         &repo,
         InitRequest {
             no_hooks: true,
             no_merge_driver: true,
             example_config: false,
         },
-        Some(OsStr::new("explicit-cache")),
-        Some(global.path().to_path_buf()),
     )
     .expect("init");
 
     assert_eq!(
         outcome.cache_location.display_path(),
-        Path::new("explicit-cache")
+        tmp.path().join("explicit-cache")
     );
 }
 
 #[test]
 fn unreadable_hook_fails_after_merge_integration_without_touching_hook() {
     let tmp = git_repo();
-    let repo = Repository::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let path = tmp.path().join(".git/hooks/post-checkout");
     std::fs::create_dir_all(path.parent().expect("hook parent")).expect("hooks dir");
     let bytes = [0x23, 0x21, 0x0a, 0x80, 0x81];

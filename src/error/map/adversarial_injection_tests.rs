@@ -75,7 +75,9 @@ fn unknown_config_key_never_forges_an_extra_rendered_line() {
 #[test]
 fn unresolvable_revision_never_forges_an_extra_rendered_line() {
     let tmp = ::test_support::empty_git_repo();
-    let repo = gat_engine::Repository::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let selection = gat_core::history::HistorySelection {
         roots: vec![gat_core::history::HistoryRoot::Revision(PAYLOAD.into())],
         ..Default::default()

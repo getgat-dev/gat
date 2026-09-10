@@ -19,7 +19,7 @@ impl From<ConfigError> for Failure {
                     .with_detail(UserLine::compose([
                         UserLine::authored("Expected one of: "),
                         UserLine::join(
-                            gat_core::config_keys::ConfigKey::CANONICAL
+                            gat_core::config_keys::SettingKey::CANONICAL
                                 .into_iter()
                                 .map(|key| UserLine::config_key(key.as_str())),
                             ", ",
@@ -200,7 +200,7 @@ mod tests {
         assert!(!diagnostic.subject_line().unwrap().as_str().contains('\n'));
         let detail = &diagnostic.detail_lines()[0];
         let words: Vec<_> = detail.wrapping_words().collect();
-        for key in gat_core::config_keys::ConfigKey::CANONICAL {
+        for key in gat_core::config_keys::SettingKey::CANONICAL {
             assert!(
                 words
                     .iter()

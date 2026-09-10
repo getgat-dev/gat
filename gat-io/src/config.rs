@@ -145,6 +145,8 @@ pub enum ScopedConfigWriteError {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfigInput {
+    #[serde(default)]
+    network: gat_core::settings::NetworkConfig,
     #[serde(default = "default_version")]
     version: u32,
     #[serde(default)]
@@ -346,6 +348,7 @@ impl ConfigInput {
             mounts_by_name.insert(gat_core::name::MountName::from_string(name), mount);
         }
         Ok(Config {
+            network: self.network,
             remotes: self.remotes,
             cache: self.cache,
             sync: self.sync,
@@ -394,7 +397,64 @@ fn normalize_route_paths(
 #[derive(Debug, Clone, Copy)]
 pub struct ConfigStore;
 
+/// Opaque revision bound to the exact scope document that was read.
+#[derive(Clone)]
+pub struct ConfigRevision {
+    path: PathBuf,
+    bytes: Option<std::sync::Arc<[u8]>>,
+}
+impl std::fmt::Debug for ConfigRevision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ConfigRevision { .. }")
+    }
+}
+impl ConfigRevision {
+    pub fn is_current(
+        &self,
+        layout: &RepositoryLayout,
+        scope: ConfigScope,
+        global: Option<&Path>,
+    ) -> Result<bool, ScopedConfigError> {
+        let path = layout.config_path_for_home(scope, global)?;
+        if path != self.path {
+            return Ok(false);
+        }
+        Ok(read_optional(&path)?.as_deref() == self.bytes.as_deref())
+    }
+}
+fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, ConfigError> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(ConfigError::Unreadable {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
 impl ConfigStore {
+    pub fn capture_scope(
+        layout: &RepositoryLayout,
+        scope: ConfigScope,
+        global: Option<&Path>,
+    ) -> Result<(Config, ConfigRevision), ScopedConfigError> {
+        let path = layout.config_path_for_home(scope, global)?;
+        let bytes = read_optional(&path)?;
+        let config = bytes
+            .as_deref()
+            .map(|bytes| Self::decode(&path, bytes))
+            .transpose()?
+            .unwrap_or_default();
+        Ok((
+            config,
+            ConfigRevision {
+                path,
+                bytes: bytes.map(Into::into),
+            },
+        ))
+    }
+
     /// Reads one repository-owned `gat.yaml` scope without exposing its path.
     pub fn load_scope(
         layout: &RepositoryLayout,
@@ -452,19 +512,15 @@ impl ConfigStore {
     /// inspection where no current-repository layout exists. Repository-owned
     /// scoped access goes through [`Self::load_scope`].
     pub fn load_file(path: &Path) -> std::result::Result<Config, ConfigError> {
-        let bytes = match std::fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Config::default());
-            }
-            Err(source) => {
-                return Err(ConfigError::Unreadable {
-                    path: path.to_path_buf(),
-                    source,
-                });
-            }
-        };
-        let text = std::str::from_utf8(&bytes).map_err(|source| ConfigError::InvalidUtf8 {
+        read_optional(path)?
+            .as_deref()
+            .map(|bytes| Self::decode(path, bytes))
+            .transpose()
+            .map(Option::unwrap_or_default)
+    }
+
+    fn decode(path: &Path, bytes: &[u8]) -> std::result::Result<Config, ConfigError> {
+        let text = std::str::from_utf8(bytes).map_err(|source| ConfigError::InvalidUtf8 {
             path: path.to_path_buf(),
             source,
         })?;
@@ -541,6 +597,17 @@ mod tests {
                 Err(ConfigError::InvalidSyntax { .. })
             ));
         }
+    }
+
+    #[test]
+    fn gc_execution_policy_is_not_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gat.yaml");
+        std::fs::write(&path, "gc:\n  repository_concurrency: 4\n").unwrap();
+        assert!(matches!(
+            ConfigStore::load_file(&path),
+            Err(ConfigError::InvalidSyntax { .. })
+        ));
     }
 
     #[test]

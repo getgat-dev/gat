@@ -31,51 +31,20 @@ tasks:
     cmds:
       - cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
+  lint:architecture:
+    desc: Check workspace dependencies and source ownership
+    cmds:
+      - cargo run --quiet --locked -p gat-check -- architecture
+
   lint:test-hygiene:
-    desc: |
-      Lightweight source checks: reject unexplained sleeps in test code,
-      test-side std::env::set_var/remove_var, and network URLs/fixed
-      ports/hardcoded shared paths in every crate's tests and test support.
+    desc: Check test isolation at operation boundaries
     cmds:
-      - ./tools/check-test-hygiene.sh
+      - cargo run --quiet --locked -p gat-check -- test-hygiene
 
-  lint:test-hygiene:selftest:
-    desc: |
-      Regression fixtures for tools/check-test-hygiene.sh itself:
-      illegal sleep/env mutation in test-support,
-      an allowed sleep-ok: case, and a forbidden network/path case.
+  test:checks:
+    desc: Test the repository policy checker
     cmds:
-      - ./tools/check-test-hygiene.sh --self-test
-
-  lint:error-architecture:
-    desc: |
-      Guards the error-rendering boundary: fails if a generic
-      print_error(Error)-style function or a raw error eprintln! is
-      reintroduced anywhere outside output::error::render.
-    cmds:
-      - ./tools/check-error-architecture.sh
-
-  lint:error-architecture:selftest:
-    desc: |
-      Regression fixtures for tools/check-error-architecture.sh itself:
-      raw error output and print_error fail while typed output passes.
-    cmds:
-      - ./tools/check-error-architecture.sh --self-test
-
-  lint:workspace-boundary:
-    desc: |
-      Guards forbidden production dependency directions, root optional
-      dependencies, tools default-member isolation, and the engine/command
-      source ownership rules Cargo cannot express.
-    cmds:
-      - ./tools/check-workspace-boundary.sh
-
-  lint:workspace-boundary:selftest:
-    desc: |
-      Regression fixtures for forbidden dependency directions, root/tool
-      manifest policy, and focused engine/command source ownership.
-    cmds:
-      - ./tools/check-workspace-boundary.sh --self-test
+      - cargo test --locked -p gat-check
 
   test:
     desc: Run the test suite (nextest, or cargo test if unavailable)
@@ -88,10 +57,12 @@ tasks:
         fi
 
   test:install:
-    desc: Test Unix installer checksums and failure recovery with local release fixtures
+    desc: Test native installer checksums and failure recovery with local release fixtures
     cmds:
-      - bash tools/check-linux-release.sh --self-test
-      - bash tools/test-installers.sh
+      - cmd: bash tools/check/test-installers.sh
+        platforms: [linux, darwin, freebsd, openbsd, netbsd]
+      - cmd: pwsh -NoProfile -File tools/check/test-installers.ps1
+        platforms: [windows]
 
   test:doc:
     desc: |
@@ -139,12 +110,8 @@ tasks:
     cmds:
       - task: fmt:check
       - task: lint
-      - task: lint:test-hygiene:selftest
-      - task: lint:test-hygiene
-      - task: lint:error-architecture:selftest
-      - task: lint:error-architecture
-      - task: lint:workspace-boundary:selftest
-      - task: lint:workspace-boundary
+      - task: test:checks
+      - cargo run --quiet --locked -p gat-check -- all
       - task: test:install
       - task: test
       - task: test:doc
@@ -163,18 +130,19 @@ tasks:
     desc: Install gat and all development helper binaries
     cmds:
       - cargo install --path . --locked --bin gat --force --profile incremental
-      - cargo install --path tools --locked --bins --force --profile incremental
+      - cargo install --path tools/docs --locked --bins --force --profile incremental
+      - cargo install --path tools/benchmark --locked --bins --force --profile incremental
 
   docs:generate:
     desc: Regenerate docs/commands/*.mdx, docs/references/configuration.mdx, and docs.json's Commands nav from the CLI
     cmds:
-      - cargo run --quiet --locked -p gat-tools --bin generate-docs -- --write
+      - cargo run --quiet --locked -p gat-docs --bin generate-docs -- --write
 
   docs:validate:
     desc: Validate generated docs are current and the Mintlify site is valid
     cmds:
-      - cargo test --locked -p gat-tools --bin generate-docs
-      - cargo run --quiet --locked -p gat-tools --bin generate-docs -- --check
+      - cargo test --locked -p gat-docs --bin generate-docs
+      - cargo run --quiet --locked -p gat-docs --bin generate-docs -- --check
       - npm --prefix docs ci
       - npm --prefix docs run check
 
@@ -194,4 +162,4 @@ tasks:
       directory when --path is omitted. Forwards extra flags, e.g.:
       task benchmark:generate -- --small-files 20000 --large-files 10
     cmds:
-      - cargo run --quiet --locked -p gat-tools --bin generate-benchmark -- {{.CLI_ARGS}}
+      - cargo run --quiet --locked -p gat-bench --bin gat-bench -- {{.CLI_ARGS}}

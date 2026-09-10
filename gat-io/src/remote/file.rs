@@ -643,7 +643,7 @@ mod tests {
                 }
             );
             let cache =
-                crate::RepositoryLayout::at(local.path().to_owned()).resolve_cache_root(None, None);
+                crate::RepositoryLayout::at(local.path().to_owned()).resolve_cache_root(None);
             let read = PreparedFileRead {
                 source: remote.path().join("object"),
                 oid,
@@ -680,7 +680,7 @@ mod tests {
             let remote = tempfile::tempdir().unwrap();
             let local = tempfile::tempdir().unwrap();
             let cache =
-                crate::RepositoryLayout::at(local.path().to_owned()).resolve_cache_root(None, None);
+                crate::RepositoryLayout::at(local.path().to_owned()).resolve_cache_root(None);
             let expected = if expected_full_body {
                 bytes.as_slice()
             } else {
@@ -743,7 +743,7 @@ mod tests {
             let remote = tempfile::tempdir().unwrap();
             let local = tempfile::tempdir().unwrap();
             let cache =
-                crate::RepositoryLayout::at(local.path().to_owned()).resolve_cache_root(None, None);
+                crate::RepositoryLayout::at(local.path().to_owned()).resolve_cache_root(None);
             let bytes = vec![42; super::super::TRANSFER_CHUNK_SIZE + 17];
             let oid = Oid::from_bytes(*blake3::hash(&bytes).as_bytes());
             let read = read_fixture(remote.path(), &bytes, oid);
@@ -796,8 +796,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let remote = tempfile::tempdir().unwrap();
         let local = tempfile::tempdir().unwrap();
-        let cache =
-            crate::RepositoryLayout::at(local.path().to_owned()).resolve_cache_root(None, None);
+        let cache = crate::RepositoryLayout::at(local.path().to_owned()).resolve_cache_root(None);
         let bytes = vec![42; 3 * super::super::TRANSFER_CHUNK_SIZE];
         let oid = Oid::from_bytes(*blake3::hash(&bytes).as_bytes());
         let read = read_fixture(remote.path(), &bytes, oid);
@@ -820,8 +819,7 @@ mod tests {
     fn fused_receive_mismatch_preserves_valid_cache_and_publishes_neither_oid() {
         let remote = tempfile::tempdir().unwrap();
         let local = tempfile::tempdir().unwrap();
-        let cache =
-            crate::RepositoryLayout::at(local.path().to_owned()).resolve_cache_root(None, None);
+        let cache = crate::RepositoryLayout::at(local.path().to_owned()).resolve_cache_root(None);
         let (valid, _) = cache
             .writer()
             .ingest(std::io::Cursor::new(b"valid"))
@@ -842,8 +840,7 @@ mod tests {
     fn fused_receive_rejects_missing_directories_and_symlinks_before_cache_creation() {
         let remote = tempfile::tempdir().unwrap();
         let local = tempfile::tempdir().unwrap();
-        let cache =
-            crate::RepositoryLayout::at(local.path().to_owned()).resolve_cache_root(None, None);
+        let cache = crate::RepositoryLayout::at(local.path().to_owned()).resolve_cache_root(None);
         let oid = Oid::from_bytes([0; 32]);
         let source = remote.path().join("missing");
         let read = || PreparedFileRead {
@@ -995,7 +992,7 @@ mod tests {
         url.query_pairs_mut()
             .append_pair("root", second.path().to_str().unwrap());
         runtime.block_on(async {
-            let client = RemoteClient::open(url.as_str()).unwrap();
+            let client = RemoteClient::open_for_test(url.as_str()).unwrap();
             assert!(
                 client
                     .prepare_write(0, super::super::TRANSFER_CHUNK_SIZE)
@@ -1024,7 +1021,7 @@ mod tests {
                 invalid
                     .query_pairs_mut()
                     .append_pair(option, "SECRET-OPTION");
-                let error = RemoteClient::open(invalid.as_str()).unwrap_err();
+                let error = RemoteClient::open_for_test(invalid.as_str()).unwrap_err();
                 assert!(!error.to_string().contains("SECRET-OPTION"));
             }
         });
@@ -1225,7 +1222,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let root = tempfile::tempdir().unwrap();
         runtime.block_on(async {
-            let client = RemoteClient::open(&super::super::file_url(root.path())).unwrap();
+            let client = RemoteClient::open_for_test(&super::super::file_url(root.path())).unwrap();
             let oid = Oid::from_bytes([7; 32]);
             let mut writer = client.prepare_file_write(&oid, 3).unwrap().begin().unwrap();
             writer.append(b"abc").unwrap();

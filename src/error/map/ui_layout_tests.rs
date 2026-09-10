@@ -30,9 +30,9 @@ fn canonical_alternatives_wrap_between_values_without_losing_choices() {
         Failure::from("invalid".parse::<IngestStrategy>().unwrap_err()),
     ];
     for (failure, choices) in failures.iter().zip([
-        gat_core::config_keys::ConfigKey::CANONICAL
+        gat_core::config_keys::SettingKey::CANONICAL
             .into_iter()
-            .map(gat_core::config_keys::ConfigKey::as_str)
+            .map(gat_core::config_keys::SettingKey::as_str)
             .collect::<Vec<_>>(),
         vec!["reflink", "hardlink", "symlink", "copy"],
         vec!["safe", "hybrid", "mmap"],

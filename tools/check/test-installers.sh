@@ -3,7 +3,7 @@
 set -euo pipefail
 installer_shell="$(command -v "${1:-/bin/sh}")"
 echo "Testing installer with $installer_shell"
-repo_dir="$(cd "$(dirname "$0")/.." && pwd)"
+repo_dir="$(cd "$(dirname "$0")/../.." && pwd)"
 fixture="$(mktemp -d)"
 trap 'rm -rf "$fixture"' EXIT
 export FIXTURE_DIR="$fixture"

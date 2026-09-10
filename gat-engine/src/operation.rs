@@ -146,7 +146,11 @@ impl<'repo> Operation<'repo> {
         &self,
         id: crate::remote_catalog::RemoteId,
     ) -> Result<(), crate::remote_session::RemoteSessionError> {
-        crate::remote_session::RemoteSession::validate(self.snapshot.remotes_catalog(), id)
+        crate::remote_session::RemoteSession::validate(
+            self.snapshot.remotes_catalog(),
+            id,
+            &self.repo.inputs.templates(),
+        )
     }
 
     /// This operation's loaded effective [`gat_core::config::Config`]
@@ -242,7 +246,6 @@ impl<'repo> Operation<'repo> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::Repository as Repo;
 
     /// Constructing an `Operation` from already-captured snapshot/session
     /// values must not perform any additional resource initialization: no
@@ -251,11 +254,13 @@ mod tests {
     fn construction_performs_no_additional_side_effects() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let config = repo.load_config().unwrap();
         let desired_revision = crate::repository_state::current_desired_revision(&repo).unwrap();
         let snapshot = Snapshot::new(repo.snapshot_input(config, desired_revision)).unwrap();
-        let session = Session::new();
+        let session = Session::for_test();
 
         let remote_opens_before = crate::remote_session::test_support::remote_opens();
         let op = Operation::new(&repo, snapshot, session);
@@ -287,7 +292,9 @@ mod contract_tests {
 
     fn tracked_repo() -> (crate::test_harness::TestRepo, Repo) {
         let tmp = crate::test_harness::test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         repo.save_lock(&Lock {
             entries: vec![entry("a.bin", 1)],
         })

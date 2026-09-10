@@ -24,6 +24,8 @@ pub enum InterpolateError {
     /// secret content from elsewhere in the input.
     #[error("environment variable `{name}` is not set")]
     MissingVariable { name: String },
+    #[error("environment variable is not Unicode")]
+    NonUnicodeVariable { name: String },
 }
 
 pub(crate) type Result<T> = std::result::Result<T, InterpolateError>;
@@ -32,16 +34,11 @@ pub(crate) type Result<T> = std::result::Result<T, InterpolateError>;
 /// `[A-Za-z_][A-Za-z0-9_]*`; missing or non-Unicode values are errors.
 /// `$$` produces a literal dollar, and bare `$NAME` stays unchanged.
 /// Replacement values are never scanned for further references.
-pub(super) fn interpolate_env(input: &str) -> Result<String> {
-    interpolate_with(input, |name| {
-        std::env::var(name).map_err(|_| InterpolateError::MissingVariable {
-            name: name.to_string(),
-        })
-    })
-}
-
 /// Injected lookup keeps tests independent of process environment mutations.
-fn interpolate_with(input: &str, lookup: impl Fn(&str) -> Result<String>) -> Result<String> {
+pub(crate) fn interpolate_with(
+    input: &str,
+    lookup: impl Fn(&str) -> Result<String>,
+) -> Result<String> {
     use gat_core::endpoint::{TemplateSyntaxError, TemplateToken, tokenize_template};
     let tokens = tokenize_template(input).map_err(|error| match error {
         TemplateSyntaxError::UnterminatedReference { offset } => {
@@ -306,19 +303,5 @@ mod tests {
         assert!(!msg.contains("SUPERSECRET"), "{msg}");
         assert!(!msg.contains(input), "{msg}");
         assert!(msg.contains("MISSING_VAR"), "{msg}");
-    }
-
-    /// A single test covering the real-environment production wrapper (as
-    /// opposed to `interpolate_with`'s map-based lookup used everywhere
-    /// else in this module): confirms `interpolate_env` itself reads the
-    /// real process environment, with no in-process env mutation at all.
-    /// Process-boundary behavior is covered separately from this pure
-    /// interpolation test.
-    #[test]
-    fn interpolate_env_reads_the_real_process_environment() {
-        // A variable essentially guaranteed to be set and stable in any
-        // environment gat's tests run in, so this needs no `set_var`.
-        let path = std::env::var("PATH").expect("PATH must be set to run tests at all");
-        assert_eq!(interpolate_env("${PATH}").unwrap(), path);
     }
 }

@@ -4,7 +4,6 @@
 //! The type centralizes repository paths owned by the I/O layer.
 
 use crate::CacheRoot;
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -150,21 +149,11 @@ impl RepositoryLayout {
     /// repository layout prevents higher layers from independently
     /// reconstructing the default and relative configured locations.
     #[must_use]
-    pub fn resolve_cache_root(
-        &self,
-        cache_dir_override: Option<&OsStr>,
-        configured_location: Option<&CacheLocation>,
-    ) -> CacheRoot {
-        let objects_dir = if let Some(dir) = cache_dir_override {
-            PathBuf::from(dir)
-        } else {
-            match configured_location {
-                Some(location) if location.as_path().is_absolute() => {
-                    location.as_path().to_path_buf()
-                }
-                Some(location) => self.root.join(location.as_path()),
-                None => self.local_directory.path().join("objects"),
-            }
+    pub fn resolve_cache_root(&self, configured_location: Option<&CacheLocation>) -> CacheRoot {
+        let objects_dir = match configured_location {
+            Some(location) if location.as_path().is_absolute() => location.as_path().to_path_buf(),
+            Some(location) => self.root.join(location.as_path()),
+            None => self.local_directory.path().join("objects"),
         };
         CacheRoot::new(objects_dir, Arc::clone(&self.local_directory))
     }
@@ -208,7 +197,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let layout = RepositoryLayout::at(temp.path().to_path_buf());
         let clone = layout.clone();
-        let cache = clone.resolve_cache_root(None, None);
+        let cache = clone.resolve_cache_root(None);
         let writer = cache.writer();
         crate::StateStore::open(&layout).unwrap();
         cache.maintenance().rebuild_database().unwrap();
@@ -283,54 +272,47 @@ mod tests {
     }
 
     #[test]
-    fn cache_resolution_prefers_override_without_reinterpreting_it() {
-        let layout = RepositoryLayout::at(PathBuf::from("/repo"));
-        let configured = CacheLocation::from_path(PathBuf::from("configured"));
-
-        assert_eq!(
-            layout
-                .resolve_cache_root(Some(OsStr::new("override")), Some(&configured))
-                .display_path(),
-            Path::new("override")
-        );
-    }
-
-    #[test]
     fn cache_resolution_joins_only_relative_configured_locations() {
         let layout = RepositoryLayout::at(PathBuf::from("/repo"));
-        let relative = CacheLocation::from_path(PathBuf::from("shared"));
-        let absolute = CacheLocation::from_path(PathBuf::from("/var/cache/gat"));
+        let relative =
+            CacheLocation::try_from_path(PathBuf::from("shared")).expect("nonempty cache location");
+        let absolute = CacheLocation::try_from_path(PathBuf::from("/var/cache/gat"))
+            .expect("nonempty cache location");
 
         assert_eq!(
-            layout
-                .resolve_cache_root(None, Some(&relative))
-                .display_path(),
+            layout.resolve_cache_root(Some(&relative)).display_path(),
             Path::new("/repo/shared")
         );
         assert_eq!(
-            layout
-                .resolve_cache_root(None, Some(&absolute))
-                .display_path(),
+            layout.resolve_cache_root(Some(&absolute)).display_path(),
             Path::new("/var/cache/gat")
         );
         assert_eq!(
-            layout.resolve_cache_root(None, None).display_path(),
+            layout.resolve_cache_root(None).display_path(),
             Path::new("/repo/.gat/objects")
         );
     }
 
     #[cfg(unix)]
     #[test]
-    fn cache_resolution_preserves_non_utf8_override_bytes() {
+    fn cache_resolution_preserves_non_utf8_path_bytes() {
         use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
         let layout = RepositoryLayout::at(PathBuf::from("/repo"));
         let override_path = std::ffi::OsString::from_vec(vec![b'c', b'a', 0xff]);
-        let resolved = layout.resolve_cache_root(Some(&override_path), None);
+        let resolved = layout.resolve_cache_root(Some(
+            &gat_core::cache_location::CacheLocation::try_from_path(std::path::PathBuf::from(
+                &override_path,
+            ))
+            .expect("nonempty fixture cache path"),
+        ));
 
         assert_eq!(
             resolved.display_path().as_os_str().as_bytes(),
-            override_path.as_bytes()
+            Path::new("/repo")
+                .join(&override_path)
+                .as_os_str()
+                .as_bytes()
         );
     }
 

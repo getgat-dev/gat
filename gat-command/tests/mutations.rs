@@ -7,7 +7,9 @@ use gat_engine::Repository;
 fn repository() -> (tempfile::TempDir, Repository) {
     let tmp = tempfile::tempdir().unwrap();
     test_support_git::run_git(tmp.path(), &["init", "-q"]);
-    let repo = Repository::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     (tmp, repo)
 }
 
@@ -366,7 +368,9 @@ fn tiny_windows_bound_explicit_and_directory_preparation() {
             },
             force: false,
         };
-        let repo = Repository::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         for _ in 0..2 {
             let (result, high_water) = gat_command::add_with_window_for_test(
                 &repo,
@@ -411,10 +415,11 @@ fn add_repairs_external_cache_in_many_windows_after_state_loss() {
     let (tmp, repo) = repository();
     let external = tempfile::tempdir().unwrap();
     let mut config = repo.load_config().unwrap();
-    config.cache.location = Some(gat_core::cache_location::CacheLocation::from_path(
-        external.path().to_path_buf(),
-    ));
-    repo.save_config(&config).unwrap();
+    config.cache.location = Some(
+        gat_core::cache_location::CacheLocation::try_from_path(external.path().to_path_buf())
+            .expect("nonempty cache location"),
+    );
+    repo.write_config_fixture(&config).unwrap();
     std::fs::create_dir(tmp.path().join("data")).unwrap();
     for index in 0..9 {
         std::fs::write(

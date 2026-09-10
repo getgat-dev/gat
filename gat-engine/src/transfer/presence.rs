@@ -253,15 +253,15 @@ pub(crate) fn fair_request_order(by_remote: &BTreeMap<RemoteId, Vec<usize>>) -> 
         by_remote.values().map(|indices| indices.iter()).collect();
     let total = columns.iter().map(std::iter::ExactSizeIterator::len).sum();
     let mut ordered = Vec::with_capacity(total);
-    let mut advanced = true;
-    while advanced {
-        advanced = false;
-        for column in &mut columns {
+    // Retire exhausted remotes so a long tail costs one visit per remaining
+    // request, rather than scanning every originally configured remote.
+    while !columns.is_empty() {
+        columns.retain_mut(|column| {
             if let Some(&index) = column.next() {
                 ordered.push(index);
-                advanced = true;
             }
-        }
+            !column.as_slice().is_empty()
+        });
     }
     ordered
 }
@@ -651,6 +651,20 @@ mod tests {
     }
 
     #[test]
+    fn fair_request_order_preserves_uneven_tails_and_skips_empty_remotes() {
+        with_runtime(|| {
+            let (_dir, obligations, _handles) = two_remote_fixture(3);
+            let mut requests = by_remote(&obligations);
+            requests.values_mut().nth(1).unwrap().truncate(1);
+            assert_eq!(fair_request_order(&requests), [0, 1, 2, 4]);
+            requests.values_mut().next().unwrap().clear();
+            assert_eq!(fair_request_order(&requests), [1]);
+            requests.clear();
+            assert!(fair_request_order(&requests).is_empty());
+        });
+    }
+
+    #[test]
     fn drive_presence_scheduler_never_admits_more_than_capacity_concurrently() {
         with_runtime(|| {
             let executor = executor(8, 8);
@@ -668,7 +682,7 @@ mod tests {
                 async move {
                     let now = active.fetch_add(1, Ordering::SeqCst) + 1;
                     max_active.fetch_max(now, Ordering::SeqCst);
-                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    tokio::task::yield_now().await;
                     active.fetch_sub(1, Ordering::SeqCst);
                     Ok::<bool, std::io::Error>(true)
                 }
@@ -811,13 +825,15 @@ mod tests {
             let executor = executor(8, 8);
             let (_dir, obligations, handles) = single_remote_fixture(3);
             let pending: Vec<usize> = (0..obligations.len()).collect();
-            // Index 0 sleeps longest (finishes last) and errors; index 2
-            // fails immediately. The lowest-index error (0) must still win.
+            // Complete in reverse order; the lowest-index error must still win.
+            let (completed, _) = tokio::sync::watch::channel(3);
             let check = move |_handle: &RemoteHandle, obligation: &FakeObligation| {
                 let tag = u64::from(obligation.oid.as_bytes()[0]);
+                let completed = completed.clone();
+                let mut turn = completed.subscribe();
                 async move {
-                    let delay_ms = (3 - tag) * 5;
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    turn.wait_for(|next| *next == tag + 1).await.unwrap();
+                    completed.send_replace(tag);
                     if tag == 0 || tag == 2 {
                         Err(std::io::Error::other(format!("job {tag} failed")))
                     } else {
