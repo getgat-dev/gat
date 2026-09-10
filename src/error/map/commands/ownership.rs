@@ -13,12 +13,16 @@ impl From<OwnershipError> for Failure {
                 UserLine::compose([
                     UserLine::authored("This path is owned by mount `"),
                     UserLine::identifier(err.mount.as_str()),
-                    UserLine::authored("`; only `gat mount` commands can change it"),
+                    UserLine::authored("`; only "),
+                    UserLine::authored("`gat mount`").unbroken(),
+                    UserLine::authored(" commands can change it"),
                 ]),
             )
             .with_subject(UserLine::gat_path(&err.path))
             .with_hint(UserLine::compose([
-                UserLine::authored("use `gat mount` commands to change paths under `"),
+                UserLine::authored("use "),
+                UserLine::authored("`gat mount`").unbroken(),
+                UserLine::authored(" commands to change paths under `"),
                 UserLine::gat_path(&err.target),
                 UserLine::authored("`"),
             ])),

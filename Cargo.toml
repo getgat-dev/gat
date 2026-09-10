@@ -1,6 +1,6 @@
 [package]
 name = "gat"
-version = "0.0.3"
+version = "0.0.5"
 edition = "2024"
 rust-version = "1.91"
 description = "Simple, fast, versioned large-file storage for git."
@@ -44,6 +44,7 @@ anstream = "1.0"
 anstyle = "1.0"
 terminal_size = "0.4"
 unicode-width = "0.2"
+unicode-segmentation = "1.12"
 # Serializes typed config-list outcomes at the root machine-output boundary;
 # physical gat.yaml persistence remains owned separately by gat-io.
 yaml_serde = "0.10"

@@ -12,15 +12,24 @@ impl From<RouteError> for Failure {
                 Diagnostic::new(ErrorCode::RemoteNotFound, "No remote with that name")
                     .with_subject(UserLine::identifier(remote.as_str()))
                     .with_hint(UserLine::compose([
-                        UserLine::authored("Run `gat remote add "),
-                        UserLine::identifier(remote.as_str()),
-                        UserLine::authored(" <url>` to configure it."),
+                        UserLine::authored("Run `"),
+                        UserLine::compose([
+                            UserLine::authored("gat remote add "),
+                            UserLine::identifier(remote.as_str()),
+                            UserLine::authored(" <url>"),
+                        ])
+                        .unbroken(),
+                        UserLine::authored("` to configure it."),
                     ])),
             ),
             RouteError::ReservedName => Self::expected(
                 Diagnostic::new(
                     ErrorCode::InvalidConfig,
-                    "Route name `*` is reserved for `gat route list`'s synthetic default-remote row",
+                    UserLine::compose([
+                        UserLine::authored("Route name `*` is reserved for "),
+                        UserLine::authored("`gat route list`").unbroken(),
+                        UserLine::authored("'s synthetic default-remote row"),
+                    ]),
                 )
                 .with_hint("Choose a different name."),
             ),
@@ -28,8 +37,13 @@ impl From<RouteError> for Failure {
                 Diagnostic::new(ErrorCode::InvalidConfig, "That route already exists")
                     .with_subject(UserLine::identifier(name.as_str()))
                     .with_hint(UserLine::compose([
-                        UserLine::authored("Run `gat route update "),
-                        UserLine::identifier(name.as_str()),
+                        UserLine::authored("Run `"),
+                        UserLine::compose([
+                            UserLine::authored("gat route update "),
+                            UserLine::identifier(name.as_str()),
+                            UserLine::authored(""),
+                        ])
+                        .unbroken(),
                         UserLine::authored("` instead."),
                     ])),
             ),

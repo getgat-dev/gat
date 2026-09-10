@@ -5,7 +5,7 @@ tag: "Experimental"
 ---
 
 <Warning>
-`gat gc` is **Experimental**: its interface or behavior may change or be removed between releases. See [Feature lifecycle](/references/feature-lifecycle).
+`gat gc` is **Experimental**: its interface or behavior may change. See [Feature lifecycle](/references/feature-lifecycle).
 </Warning>
 
 <Tooltip tip="Deleting stored content that is not protected by the selected locks and histories. Protection depends on the repositories and history you supply, not on when an object was last downloaded.">Garbage collection</Tooltip> keeps objects referenced by the selected Git histories and
@@ -68,6 +68,9 @@ Options:
       --no-history
           Keep only the current working lock and additional repositories' HEAD
           locks. Conflicts with every history selection or traversal flag
+
+  -o, --full-output
+          Show all rows and complete details
 
       --dry-run
           Show what would be deleted without changing anything

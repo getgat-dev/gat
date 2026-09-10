@@ -26,11 +26,39 @@ pub struct WriteFailure {
 pub struct Output<'a> {
     stdout: &'a mut dyn Write,
     stderr: &'a mut dyn Write,
+    layouts: [super::OutputLayout; 2],
 }
 
 impl<'a> Output<'a> {
     pub fn new(stdout: &'a mut dyn Write, stderr: &'a mut dyn Write) -> Self {
-        Self { stdout, stderr }
+        Self {
+            stdout,
+            stderr,
+            layouts: [super::OutputLayout::default(); 2],
+        }
+    }
+
+    /// Set policies once at the process boundary; writers do not inspect terminals.
+    pub const fn set_layouts(&mut self, stdout: super::OutputLayout, stderr: super::OutputLayout) {
+        self.layouts = [stdout, stderr];
+    }
+
+    pub(crate) const fn layout(&self, stream: Stream) -> super::OutputLayout {
+        self.layouts[match stream {
+            Stream::Stdout => 0,
+            Stream::Stderr => 1,
+        }]
+    }
+
+    pub(crate) fn prose_width(&self, stream: Stream) -> usize {
+        self.layout(stream).prose_width()
+    }
+
+    /// Completeness is independent of the detected stream widths.
+    pub fn set_full_output(&mut self, full: bool) {
+        for layout in &mut self.layouts {
+            *layout = layout.with_full_output(full);
+        }
     }
 
     fn write(&mut self, stream: Stream, args: fmt::Arguments<'_>) -> Result<(), WriteFailure> {
@@ -44,12 +72,12 @@ impl<'a> Output<'a> {
             .map_err(|source| WriteFailure { stream, source })
     }
 
-    fn line(&mut self, stream: Stream, args: fmt::Arguments<'_>) -> Result<(), WriteFailure> {
+    pub(crate) fn line(
+        &mut self,
+        stream: Stream,
+        args: fmt::Arguments<'_>,
+    ) -> Result<(), WriteFailure> {
         self.write(stream, format_args!("{args}\n"))
-    }
-
-    pub(crate) fn stdout(&mut self, args: fmt::Arguments<'_>) -> Result<(), WriteFailure> {
-        self.line(Stream::Stdout, args)
     }
 
     pub(crate) fn stderr(&mut self, args: fmt::Arguments<'_>) -> Result<(), WriteFailure> {
@@ -94,6 +122,48 @@ mod tests {
 
     fn status() -> Outcome {
         Outcome::Status(gat_command::StatusOutcome::NoTrackedFiles)
+    }
+
+    #[test]
+    fn wrapped_elements_stop_after_the_first_failed_flush() {
+        use crate::output::terminal as ui;
+        use crate::presentation::UserLine;
+        for kind in 0..3 {
+            let mut writer = FailingWriter {
+                bytes: Vec::new(),
+                remaining: usize::MAX,
+                kind: io::ErrorKind::Other,
+                fail_flush: true,
+                failures: 0,
+            };
+            let mut unused = Vec::new();
+            let mut output = Output::new(&mut writer, &mut unused);
+            output.set_layouts(
+                crate::output::OutputLayout::bounded(20),
+                crate::output::OutputLayout::default(),
+            );
+            let text = UserLine::authored("A few files need care before the next sync can start.");
+            let result = match kind {
+                0 => ui::list_hint(&mut output, Stream::Stdout, &text),
+                1 => ui::success_heading(
+                    &mut output,
+                    Stream::Stdout,
+                    &UserLine::authored("Sync"),
+                    &text,
+                ),
+                _ => ui::fields(
+                    &mut output,
+                    Stream::Stdout,
+                    &[(UserLine::authored("Note"), text)],
+                ),
+            };
+            assert_eq!(result.unwrap_err().stream, Stream::Stdout);
+            assert_eq!(
+                std::str::from_utf8(&writer.bytes).unwrap().lines().count(),
+                1
+            );
+            assert!(unused.is_empty());
+        }
     }
 
     #[test]

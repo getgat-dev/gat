@@ -384,6 +384,15 @@ impl Diagnostic {
         self.summary.as_str()
     }
 
+    /// Approved summary and subject, retaining identity boundaries for layout.
+    pub(crate) const fn summary_line(&self) -> &UserLine {
+        &self.summary
+    }
+
+    pub(crate) const fn subject_line(&self) -> Option<&UserLine> {
+        self.subject.as_ref()
+    }
+
     /// Approved logical detail lines, retaining identity boundaries for wrapping.
     pub(crate) fn detail_lines(&self) -> &[UserLine] {
         &self.details
@@ -652,12 +661,16 @@ impl UserProblem {
         }
     }
 
-    /// The safe, authored text to render/embed -- a [`UserLine`], so it
-    /// can never smuggle a raw newline or control sequence into whatever
-    /// row/line the caller embeds it in.
+    /// Approved summary text for inspection. Renderers use
+    /// [`Self::summary_line`] to retain prose and identity boundaries.
     #[must_use]
     pub const fn summary(&self) -> &str {
         self.summary.as_str()
+    }
+
+    /// Approved summary, retaining identity boundaries for composition and layout.
+    pub(crate) const fn summary_line(&self) -> &UserLine {
+        &self.summary
     }
 
     /// Internal-only accessor for the hidden technical source, for tests
@@ -671,13 +684,8 @@ impl UserProblem {
 }
 
 impl std::fmt::Display for UserProblem {
-    /// Renders only the authored summary -- never the technical source,
-    /// same invariant as `Failure`'s deliberate lack of a `Display`/`Error`
-    /// impl that would make it easy to leak the hidden cause. Unlike
-    /// `Failure`, `UserProblem` does implement `Display`: it is routine
-    /// data meant to be interpolated into a row/line by its caller (e.g.
-    /// `format!("repair of object {oid} failed: {problem}")`), not a type
-    /// callers must be prevented from printing directly.
+    /// Displays only the approved summary, never its retained technical source.
+    /// Human output composes `summary_line()` instead to preserve layout metadata.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.summary.as_str())
     }
@@ -697,9 +705,8 @@ impl Clone for UserProblem {
 }
 
 impl PartialEq for UserProblem {
-    /// Compares only the safe summary text -- the same field `Display`
-    /// exposes and the same field tests actually assert against; a
-    /// retained technical source has no meaningful equality of its own.
+    /// Compares approved summaries, including layout metadata. Retained technical
+    /// sources have no meaningful equality and do not participate.
     fn eq(&self, other: &Self) -> bool {
         self.summary == other.summary
     }

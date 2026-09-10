@@ -11,6 +11,10 @@ use std::path::PathBuf;
     styles = crate::output::help_styles()
 )]
 pub struct Cli {
+    /// Show all rows and complete details
+    #[arg(short = 'o', long, global = true)]
+    pub full_output: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }

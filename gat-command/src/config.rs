@@ -31,14 +31,7 @@ pub struct ConfigRequest {
 impl ConfigRequest {
     pub fn from_raw(key: String, action: ConfigAction, scope: ConfigScope) -> Result<Self> {
         let Some(key_value) = ConfigKey::parse(&key) else {
-            return Err(ConfigError::UnknownKey {
-                key,
-                supported: ConfigKey::CANONICAL
-                    .into_iter()
-                    .map(ConfigKey::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            });
+            return Err(ConfigError::UnknownKey { key });
         };
         Ok(Self {
             key: key_value,
@@ -95,8 +88,8 @@ pub enum ConfigOutcome {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("unknown config key `{key}` (expected one of: {supported})")]
-    UnknownKey { key: String, supported: String },
+    #[error("unknown config key `{key}`")]
+    UnknownKey { key: String },
 
     #[error("`{key}` takes exactly one value (got {got})")]
     WrongValueCount { key: ConfigKey, got: usize },

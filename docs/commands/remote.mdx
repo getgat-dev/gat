@@ -29,13 +29,13 @@ remote on one machine, add the same name with `--local`.
 ## Usage
 
 ```text
-Usage: gat remote <COMMAND>
+Usage: gat remote [OPTIONS] <COMMAND>
 ```
 
 <Accordion title="All options" id="gat-remote-options">
 
 ```text
-Usage: gat remote <COMMAND>
+Usage: gat remote [OPTIONS] <COMMAND>
 
 Commands:
   default  Show or choose the default remote. Adding a remote never chooses it
@@ -52,6 +52,9 @@ Commands:
   help     Print this message or the help of the given subcommand(s)
 
 Options:
+  -o, --full-output
+          Show all rows and complete details
+
   -h, --help
           Print help (see a summary with '-h')
 ```
@@ -100,6 +103,9 @@ Options:
       --global
           Write to the global config (`~/.gat/gat.yaml`), applying to every
           repository for this user
+
+  -o, --full-output
+          Show all rows and complete details
 
       --project
           Write to the project config (`<repo_root>/gat.yaml`), committed to git
@@ -167,6 +173,9 @@ Arguments:
           Existing remote to choose; omit to show the current default
 
 Options:
+  -o, --full-output
+          Show all rows and complete details
+
       --unset
           Remove this scope's choice and inherit from lower layers
 
@@ -203,15 +212,18 @@ List remotes, their defining scopes, and the effective default.
 ### Usage
 
 ```text
-Usage: gat remote list
+Usage: gat remote list [OPTIONS]
 ```
 
 <Accordion title="All options" id="gat-remote-list-options">
 
 ```text
-Usage: gat remote list
+Usage: gat remote list [OPTIONS]
 
 Options:
+  -o, --full-output
+          Show all rows and complete details
+
   -h, --help
           Print help (see a summary with '-h')
 ```
@@ -250,6 +262,9 @@ Options:
           Write to the global config (`~/.gat/gat.yaml`), applying to every
           repository for this user
 
+  -o, --full-output
+          Show all rows and complete details
+
       --project
           Write to the project config (`<repo_root>/gat.yaml`), committed to git
           and shared with everyone who clones the repo. The default
@@ -279,19 +294,22 @@ Show the redacted URL, default status, and defining scope without contacting sto
 ### Usage
 
 ```text
-Usage: gat remote show <NAME>
+Usage: gat remote show [OPTIONS] <NAME>
 ```
 
 <Accordion title="All options" id="gat-remote-show-options">
 
 ```text
-Usage: gat remote show <NAME>
+Usage: gat remote show [OPTIONS] <NAME>
 
 Arguments:
   <NAME>
           Name of the remote to inspect
 
 Options:
+  -o, --full-output
+          Show all rows and complete details
+
   -h, --help
           Print help (see a summary with '-h')
 ```
@@ -326,6 +344,9 @@ Arguments:
           Name of the remote to update
 
 Options:
+  -o, --full-output
+          Show all rows and complete details
+
       --url <URL>
           New URL template; may contain `${VAR}` references (see `add`)
 

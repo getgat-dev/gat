@@ -124,11 +124,9 @@ impl From<GcError> for Failure {
                         "History beyond the shallow boundary is unavailable, so the keep set may \
                          be missing objects still referenced by a historical `gat.lock` there.",
                     )
-                    .with_hint(
-                        "Re-run with --dry-run to report uncertain objects, unshallow the \
-                         repository (`git fetch --unshallow`), or pass --unsafe to override this \
-                         safety check.",
-                    ),
+                    .with_hint(UserLine::compose([UserLine::authored("Re-run with --dry-run to report uncertain objects, unshallow the \
+                         repository ("), UserLine::authored("`git fetch --unshallow`").unbroken(), UserLine::authored("), or pass --unsafe to override this \
+                         safety check.")])),
                 ),
             },
         }

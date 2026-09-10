@@ -1,0 +1,99 @@
+---
+title: Human CLI output
+description: Terminal widths, wrapping, indentation, list limits, and complete output.
+---
+
+GAT's human-readable lists show up to **20 row lines**. When there are more than
+20 rows, GAT shows the first 19 followed by an omission marker:
+
+```text
+(... 128 more rows)
+```
+
+That example represents 147 result rows: 19 displayed and 128 omitted. Headings
+and final counts always describe the complete result. The limit changes what
+GAT displays; it does not limit which files the command processes.
+
+## Width and metadata
+
+Rows use the full width of their output terminal. When output is redirected or
+the width cannot be detected, GAT uses 100 columns. Long paths, names, and
+metadata end with `...` instead of wrapping onto another line. Unicode display
+width is respected, including wide characters and combining marks.
+
+Metadata is dim and limited to 24 columns. Common states use short labels such
+as `new`, `cached`, `uncached`, and `conflict`. Recovery guidance appears below
+the rows, including when affected rows are omitted.
+
+The two-column layout requires at least 40 terminal columns. Below that width,
+GAT omits metadata and fits the status and primary label to the available space.
+This threshold does not force a narrow terminal to display 40 columns.
+
+## Wrapping and indentation
+
+Headings, messages, hints, fields, notices, and footers wrap at the smaller of
+the destination terminal width and 100 columns. Stdout and stderr use their own
+widths. Wrapping keeps explanations complete; it never replaces prose with `...`.
+
+Continuation lines align after a message's symbol or a hint's `hint:` prefix.
+Detail fields align values beneath their first line. Below 40 columns, or when
+labels would take more than half the available width, fields stack:
+
+```text
+  Note:
+    Files shared between the
+    development environments.
+```
+
+Protected values, including paths, URLs, names, and command examples, stay intact
+with their original spaces.
+GAT moves them to another line when that helps, but a value or word wider than
+the available text area can exceed the wrapping width. On extremely narrow
+terminals, fixed prefixes may also exceed it. Indentation is removed when it
+would consume the entire width. Use a wider terminal when copying long values.
+
+Diagnostic subjects participate in wrapping rather than being appended afterward.
+Diagnostic details are indented beneath the summary. Optional hints and statistics
+are dim; required recovery instructions retain normal contrast and remain visible
+even when list rows are omitted.
+
+System warning and error rows use short state labels. Their complete explanations
+appear below each group and remain visible even when the affected rows are omitted.
+This also applies with `--full-output`, so each explanation appears once.
+
+Incomplete sync reports its result once and exits nonzero; it does not append a
+second error summary after the completed report.
+
+Help and transient progress use their own terminal-aware renderers.
+
+## Complete output
+
+Use the global `-o` / `--full-output` flag to disable list-row and list-width limits and show
+complete metadata:
+
+```sh
+gat status --full-output
+gat --full-output ls-files
+gat status -o
+```
+
+Explanatory prose still wraps with `--full-output`.
+
+The flag works before or after a subcommand. Complete output can wrap in the
+terminal. Redirecting output does not automatically enable it. It also does not
+change path selection: a configured selection still applies unless explicitly
+replaced, for example with `--path .`.
+
+## What the limits cover
+
+The 20-line budget covers list rows and the omission marker. Headings, hints,
+count footers, detail views, and diagnostics have their own formatting and are
+outside that budget. A report can therefore occupy more than 20 physical lines.
+
+Sync and system reports share one row budget across their sections. Their
+omission marker includes hidden rows in later sections; those sections retain
+their headings and guidance.
+
+Human output includes formatting and summaries even with `--full-output`; it is
+not a machine-readable path stream. Git integration protocols retain their
+existing output contracts.

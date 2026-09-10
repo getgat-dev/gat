@@ -10,8 +10,17 @@ fn main() -> ExitCode {
     let mut stdout = anstream::AutoStream::auto(std::io::stdout());
     let mut stderr = anstream::AutoStream::auto(std::io::stderr());
     let mut output = output::Output::new(&mut stdout, &mut stderr);
+    let layout = |size: Option<(terminal_size::Width, terminal_size::Height)>| {
+        size.map_or_else(output::OutputLayout::default, |(width, _)| {
+            output::OutputLayout::bounded(usize::from(width.0))
+        })
+    };
+    output.set_layouts(
+        layout(terminal_size::terminal_size_of(std::io::stdout())),
+        layout(terminal_size::terminal_size_of(std::io::stderr())),
+    );
     match run(&mut output) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => ExitCode::from(code),
         Err(ProcessFailure::Usage(error)) => {
             let (stream, code) = if error.use_stderr() {
                 (output::Stream::Stderr, 2)
@@ -74,7 +83,7 @@ fn output_result(result: Result<(), output::WriteFailure>) -> Result<(), Process
     }
 }
 
-fn run(output: &mut output::Output<'_>) -> Result<(), ProcessFailure> {
+fn run(output: &mut output::Output<'_>) -> Result<u8, ProcessFailure> {
     // opendal auto-registers enabled services (S3/Azblob/Fs/...) via a
     // ctor at load time; call this explicitly too so `Operator::from_uri`
     // works even in link configurations where ctors don't run.
@@ -89,6 +98,7 @@ fn run(output: &mut output::Output<'_>) -> Result<(), ProcessFailure> {
     let _guard = rt.enter();
 
     let cli = Cli::try_parse().map_err(ProcessFailure::Usage)?;
+    output.set_full_output(cli.full_output);
     let repo = Repository::discover().map_err(Failure::from)?;
     let context = app::Context::new(repo);
 
@@ -114,7 +124,7 @@ fn run(output: &mut output::Output<'_>) -> Result<(), ProcessFailure> {
     // tell the user it's experimental, not just a successful one.
     output_result(output::notices::emit(output, &context.lifecycle))?;
     let outcome = result?;
-    let exit = app::exit_result(&outcome);
+    let code = app::exit_code(&outcome);
     output_result(output::render::render(output, outcome))?;
-    exit.map_err(ProcessFailure::Command)
+    Ok(code)
 }

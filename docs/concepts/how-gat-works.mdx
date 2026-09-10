@@ -85,6 +85,7 @@ does not check out those versions: Git chooses the revision to restore.
   - data/
     - model.bin
   - .gat/
+    - .gitignore
     - objects/
     - state/
   - .git/
@@ -93,7 +94,12 @@ does not check out those versions: Git chooses the revision to restore.
 </FileTree>
 
 Commit `gat.lock` and project `gat.yaml`. The cache, working files, and local
-bookkeeping stay out of Git.
+bookkeeping stay out of Git. Gat owns `.gat/.gitignore`, which ignores the
+directory's contents before local storage files are written. A new command that
+writes local storage recreates this file if it is missing; exclude sync is only
+needed for managed working files. Opening an existing local database also ensures
+this protection, since SQLite can create coordination files even for read-only
+queries. Reading an absent database leaves local storage absent.
 
 <AccordionGroup>
   <Accordion title="gat.lock: which content belongs at each path">

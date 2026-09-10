@@ -8,8 +8,8 @@ pub use gat_engine::{
     CacheClean, CacheDbState, CacheInspect, CacheRepair, CandidateInvalidReason, CandidateOutcome,
     DbUnreadableReason, GitClean, GitInspect, GitRepair, LiveLockInvalidReason, LiveLockState,
     LockClean, LockMaintenanceState as LockState, LockRepair, PreparedTxnStatus, RecoveryChoice,
-    StateClean, StateDbState, StateInspect, StateRepair, TemporaryCleanOutcome, TransactionKind,
-    TransactionMalformedReason, TransactionState,
+    RecoverySelectionFailure, StateClean, StateDbState, StateInspect, StateRepair,
+    TemporaryCleanOutcome, TransactionKind, TransactionMalformedReason, TransactionState,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -187,7 +187,7 @@ fn repair(
     if scope == SystemScope::All {
         let lock = maintenance.repair_lock(&lock_request)?;
         task.inc(1);
-        if matches!(lock, LockRepair::ExplicitChoiceRequired { .. }) {
+        if !lock.is_complete() {
             return Ok(SystemOutcome {
                 verb: SystemVerb::Repair,
                 facts: vec![DomainFact::Lock(LockFact::Repair(lock))],

@@ -147,17 +147,17 @@ impl LockStore {
         lock: &Lock,
         shard_levels: LockShardLevels,
     ) -> Result<()> {
-        persistence::publish_complete(layout.root_path(), lock, shard_levels)
+        persistence::publish_complete(layout, lock, shard_levels)
     }
 
     /// As [`Self::publish_repository`], returning an opaque receipt for the
     /// I/O-owned desired-state mirror to consume without rereading files.
     pub(crate) fn publish_complete_with_evidence(
-        root: &std::path::Path,
+        layout: &crate::RepositoryLayout,
         lock: &Lock,
         shard_levels: LockShardLevels,
     ) -> Result<FullLockEvidence> {
-        persistence::publish_complete_with_evidence(root, lock, shard_levels)
+        persistence::publish_complete_with_evidence(layout, lock, shard_levels)
     }
 
     /// Prepare a reshape when the current physical representation differs
@@ -168,7 +168,7 @@ impl LockStore {
         layout: &crate::RepositoryLayout,
         target: LockShardLevels,
     ) -> Result<Option<PendingLockReshape>> {
-        persistence::begin_reshape(layout.root_path(), target)
+        persistence::begin_reshape(layout, target)
     }
 
     /// Test-support observation of the live lock representation.
@@ -231,7 +231,7 @@ impl LockStore {
         layout: &crate::RepositoryLayout,
         target: LockShardLevels,
     ) -> Result<LockWriteGuard> {
-        persistence::acquire_matching_shape(layout.root_path(), &layout.sync_lock_path(), target)
+        persistence::acquire_matching_shape(layout, target)
     }
 
     /// As [`Self::acquire_matching_shape`], but treats "nothing tracked on
@@ -241,11 +241,7 @@ impl LockStore {
         layout: &crate::RepositoryLayout,
         target: LockShardLevels,
     ) -> Result<LockWriteGuard> {
-        persistence::acquire_current_or_target_shape(
-            layout.root_path(),
-            &layout.sync_lock_path(),
-            target,
-        )
+        persistence::acquire_current_or_target_shape(layout, target)
     }
 
     /// Publish the complete post-mutation rows for exactly the logical
@@ -254,7 +250,7 @@ impl LockStore {
     /// state store is the sole consumer of the physical rows, prior proofs,
     /// and publication evidence.
     pub(crate) fn publish_touched(
-        root: &std::path::Path,
+        layout: &crate::RepositoryLayout,
         shape_lock: &LockWriteGuard,
         touched_shard_ids: &std::collections::BTreeSet<LockShardId>,
         rows_by_shard: &std::collections::BTreeMap<LockShardId, Vec<Entry>>,
@@ -268,7 +264,7 @@ impl LockStore {
                 .get(&LockShardId::flat())
                 .map_or(&[][..], Vec::as_slice);
             let published = persistence::publish_flat_shard(
-                root,
+                layout,
                 entries,
                 priors.get(&LockShardId::flat()).copied(),
             )?;
@@ -277,7 +273,7 @@ impl LockStore {
                 None => (Vec::new(), vec![LockShardId::flat()]),
             })
         } else {
-            persistence::save_sparse_shards(root, touched_shard_ids, rows_by_shard, priors)
+            persistence::save_sparse_shards(layout, touched_shard_ids, rows_by_shard, priors)
         }
     }
 
@@ -285,11 +281,11 @@ impl LockStore {
     /// crate-private so only the `SQLite` state store can bridge its ordered
     /// cursor into the physical writer.
     pub(crate) fn publish_flat_streaming(
-        root: &std::path::Path,
+        layout: &crate::RepositoryLayout,
         next_row: impl FnMut() -> Result<Option<Entry>>,
     ) -> Result<persistence::SparseShardPublish> {
         Ok(
-            match persistence::publish_flat_shard_streaming(root, next_row)? {
+            match persistence::publish_flat_shard_streaming(layout, next_row)? {
                 Some(shard) => (vec![shard], Vec::new()),
                 None => (Vec::new(), vec![LockShardId::flat()]),
             },

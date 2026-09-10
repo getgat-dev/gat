@@ -13,9 +13,16 @@ impl From<RemoteError> for Failure {
         }
         match err {
             RemoteError::DefaultWouldDangle { name } => Self::expected(
-                Diagnostic::new(ErrorCode::InvalidConfig, "Removal would leave the default remote dangling")
-                    .with_subject(UserLine::identifier(name.as_str()))
-                    .with_hint("Change or unset the default with gat remote default before removing this definition."),
+                Diagnostic::new(
+                    ErrorCode::InvalidConfig,
+                    "Removal would leave the default remote dangling",
+                )
+                .with_subject(UserLine::identifier(name.as_str()))
+                .with_hint(UserLine::compose([
+                    UserLine::authored("Change or unset the default with "),
+                    UserLine::authored("`gat remote default`").unbroken(),
+                    UserLine::authored(" before removing this definition."),
+                ])),
             ),
             RemoteError::Scope(source) => source.into(),
             RemoteError::ReservedName { name } => Self::expected(
@@ -31,9 +38,14 @@ impl From<RemoteError> for Failure {
                 Diagnostic::new(ErrorCode::InvalidConfig, "That remote already exists")
                     .with_subject(UserLine::identifier(name.as_str()))
                     .with_hint(UserLine::compose([
-                        UserLine::authored("Run `gat remote update "),
-                        UserLine::identifier(name.as_str()),
-                        UserLine::authored(" --url <url>` instead."),
+                        UserLine::authored("Run `"),
+                        UserLine::compose([
+                            UserLine::authored("gat remote update "),
+                            UserLine::identifier(name.as_str()),
+                            UserLine::authored(" --url <url>"),
+                        ])
+                        .unbroken(),
+                        UserLine::authored("` instead."),
                     ])),
             ),
             RemoteError::Repository(source) => (*source).into(),

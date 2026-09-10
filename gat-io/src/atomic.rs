@@ -16,9 +16,12 @@
 //! higher layers classify them into semantic operation failures.
 
 use fs2::FileExt as _;
-use std::cell::Cell;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::rc::{Rc, Weak};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Local filesystem failures from atomically publishing a file
@@ -30,9 +33,9 @@ use std::time::{Duration, Instant};
 /// creating, writing, syncing, renaming, or locking.
 #[derive(Debug, thiserror::Error)]
 pub enum AtomicError {
-    /// `path`'s parent directory could not be created before writing the
-    /// temp file into it.
-    #[error("could not create `{}`", path.display())]
+    /// A parent directory or repository storage protection could not be
+    /// prepared. `path` identifies the directory or required self-ignore file.
+    #[error("could not prepare local storage at `{}`", path.display())]
     DirectoryUnavailable {
         path: PathBuf,
         #[source]
@@ -70,7 +73,7 @@ pub enum AtomicError {
         #[source]
         source: std::io::Error,
     },
-    /// `RepoLock::acquire`'s lock file itself (`.gat/state/sync.lock`)
+    /// `RepoLock::acquire_repository`'s lock file itself (`.gat/state/sync.lock`)
     /// could not be created/opened.
     #[error("could not open lock file `{}`", path.display())]
     LockFileUnavailable {
@@ -364,21 +367,9 @@ pub fn sync_dir(dir: &Path) {
 const LOCK_WAIT: Duration = Duration::from_secs(10);
 
 thread_local! {
-    /// How many nested `RepoLock::acquire` calls are currently active on
-    /// this thread. Reentrancy is scoped to the *same thread*, never
-    /// shared across threads: `flock(2)`/`LockFileEx` still provide true
-    /// mutual exclusion between concurrent threads (each thread's first,
-    /// outermost `acquire` opens its own file description and really
-    /// waits on the OS lock), so two threads racing to mutate the same
-    /// repo remain serialized. Only a *single
-    /// thread* that already holds the lock and calls back into something
-    /// that acquires it again (e.g. `sync()` holding the lock across
-    /// `plan()`/`execute()`, or `Repo::save_lock` reshaping and then
-    /// writing entries) skips re-locking, since `flock` is per-open-file-
-    /// description, not per-thread: a second `File::open` +
-    /// `try_lock_exclusive` on the same thread would otherwise wait
-    /// forever on a lock this same thread already holds.
-    static LOCK_DEPTH: Cell<u32> = const { Cell::new(0) };
+    // Weak handles make the registry non-owning. Each repository retains its
+    // own OS lock, and only the final guard releases that lock.
+    static HELD_LOCKS: RefCell<HashMap<Arc<PathBuf>, Weak<std::fs::File>>> = RefCell::new(HashMap::new());
 }
 
 /// A cooperative, OS advisory-lock-based file lock (`.gat/state/sync.lock`)
@@ -393,25 +384,41 @@ thread_local! {
 /// semantics: a live process's lock cannot be stolen by an age heuristic,
 /// and a crashed/killed process's lock is released automatically by the OS
 /// when its file descriptors close. RAII: dropping this struct closes the
-/// file handle, which unconditionally releases the advisory lock -- except
-/// for a reentrant (nested, same-thread) guard, which holds no file handle
-/// of its own and just decrements `LOCK_DEPTH` on drop.
+/// final shared file handle, which releases the advisory lock. Reentrant
+/// guards share ownership only within the same thread and canonical repository.
+/// Guards cannot move to another thread because the registry is thread-local.
+///
+/// ```compile_fail
+/// fn require_send<T: Send>() {}
+/// require_send::<gat_io::RepoLock>();
+/// ```
 pub struct RepoLock {
-    _file: Option<std::fs::File>,
+    file: Rc<std::fs::File>,
+    identity: Arc<PathBuf>,
 }
 
 impl RepoLock {
     /// Acquire this repository's mutation lock without exposing its path.
     pub fn acquire_repository(layout: &crate::RepositoryLayout) -> Result<Self> {
-        Self::acquire(&layout.sync_lock_path())
-    }
-
-    pub(crate) fn acquire(path: &Path) -> Result<Self> {
-        if LOCK_DEPTH.with(Cell::get) > 0 {
-            LOCK_DEPTH.with(|d| d.set(d.get() + 1));
-            return Ok(Self { _file: None });
+        layout
+            .local_directory()
+            .ensure()
+            .map_err(|error| AtomicError::DirectoryUnavailable {
+                path: error.path,
+                source: error.source,
+            })?;
+        let identity = layout.local_directory().lock_identity().map_err(|source| {
+            AtomicError::DirectoryUnavailable {
+                path: layout.cache_root_path().to_path_buf(),
+                source,
+            }
+        })?;
+        if let Some(file) =
+            HELD_LOCKS.with(|locks| locks.borrow().get(&identity).and_then(Weak::upgrade))
+        {
+            return Ok(Self { file, identity });
         }
-
+        let path = layout.sync_lock_path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|source| {
                 AtomicError::DirectoryUnavailable {
@@ -424,9 +431,9 @@ impl RepoLock {
             .write(true)
             .create(true)
             .truncate(false)
-            .open(path)
+            .open(&path)
             .map_err(|source| AtomicError::LockFileUnavailable {
-                path: path.to_path_buf(),
+                path: path.clone(),
                 source,
             })?;
 
@@ -437,25 +444,25 @@ impl RepoLock {
         loop {
             match file.try_lock_exclusive() {
                 Ok(()) => {
-                    LOCK_DEPTH.with(|d| d.set(1));
-                    return Ok(Self { _file: Some(file) });
+                    let file = Rc::new(file);
+                    HELD_LOCKS.with(|locks| {
+                        locks
+                            .borrow_mut()
+                            .insert(Arc::clone(&identity), Rc::downgrade(&file))
+                    });
+                    return Ok(Self { file, identity });
                 }
                 Err(e) if e.kind() == fs2::lock_contended_error().kind() => {
                     // The OS confirms another process actively holds the lock.
                     // Poll until the deadline; the lock is released automatically
                     // when that process finishes or its file descriptor closes.
                     if Instant::now() >= deadline {
-                        return Err(AtomicError::LockTimedOut {
-                            path: path.to_path_buf(),
-                        });
+                        return Err(AtomicError::LockTimedOut { path });
                     }
                     std::thread::sleep(Duration::from_millis(50));
                 }
                 Err(source) => {
-                    return Err(AtomicError::LockAcquireFailed {
-                        path: path.to_path_buf(),
-                        source,
-                    });
+                    return Err(AtomicError::LockAcquireFailed { path, source });
                 }
             }
         }
@@ -464,12 +471,16 @@ impl RepoLock {
 
 impl Drop for RepoLock {
     fn drop(&mut self) {
-        LOCK_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+        if Rc::strong_count(&self.file) == 1 {
+            // A guard may outlive the registry during thread-local teardown.
+            // Dropping its file still releases the OS lock in that case.
+            let _ = HELD_LOCKS.try_with(|locks| locks.borrow_mut().remove(&self.identity));
+        }
     }
 }
 
 /// Test-only synchronization hook for deterministically proving that a
-/// concurrent `RepoLock::acquire` call on another thread has actually
+/// concurrent `RepoLock::acquire_repository` call on another thread has actually
 /// reached the OS-level lock boundary (i.e. is about to make, or is
 /// retrying, its `try_lock_exclusive` call) rather than guessing with a
 /// fixed sleep. Registrations are keyed per-`ThreadId` in a shared map, so
@@ -508,7 +519,7 @@ pub mod test_support {
         }
     }
 
-    /// Install `sender` so `super::RepoLock::acquire` notifies it the
+    /// Install `sender` so `super::RepoLock::acquire_repository` notifies it the
     /// first time it's called on `thread_id`, for the duration of `f`.
     /// Only this thread's own registration is ever installed or removed,
     /// so this is safe to call from multiple tests running in parallel.
@@ -546,6 +557,87 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thread_local_guard_releases_lock_after_registry_teardown() {
+        thread_local! {
+            static GUARD: RefCell<Option<RepoLock>> = const { RefCell::new(None) };
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let layout = crate::RepositoryLayout::at(temp.path().to_path_buf());
+        let worker_layout = layout.clone();
+        std::thread::spawn(move || {
+            // Initialize the guard slot first so its destructor runs after
+            // the registry's destructor on thread exit.
+            GUARD.with(|slot| {
+                *slot.borrow_mut() = Some(RepoLock::acquire_repository(&worker_layout).unwrap());
+            });
+        })
+        .join()
+        .unwrap();
+        let probe = std::fs::OpenOptions::new()
+            .write(true)
+            .open(layout.sync_lock_path())
+            .unwrap();
+        probe.try_lock_exclusive().unwrap();
+    }
+
+    #[test]
+    fn nested_locks_for_different_repositories_initialize_and_lock_each_repository() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let a = crate::RepositoryLayout::at(a.path().to_path_buf());
+        let b = crate::RepositoryLayout::at(b.path().to_path_buf());
+        let _a = RepoLock::acquire_repository(&a).unwrap();
+        let _b = RepoLock::acquire_repository(&b).unwrap();
+        assert_eq!(
+            std::fs::read(b.cache_root_path().join(".gitignore")).unwrap(),
+            b"*\n"
+        );
+        let probe = std::fs::OpenOptions::new()
+            .write(true)
+            .open(b.sync_lock_path())
+            .unwrap();
+        assert_eq!(
+            probe.try_lock_exclusive().unwrap_err().kind(),
+            fs2::lock_contended_error().kind()
+        );
+    }
+
+    #[test]
+    fn dropping_outer_guard_keeps_the_os_lock_until_the_last_nested_guard() {
+        let temp = tempfile::tempdir().unwrap();
+        let layout = crate::RepositoryLayout::at(temp.path().to_path_buf());
+        let outer = RepoLock::acquire_repository(&layout).unwrap();
+        let inner = RepoLock::acquire_repository(&layout).unwrap();
+        drop(outer);
+        let probe = std::fs::OpenOptions::new()
+            .write(true)
+            .open(layout.sync_lock_path())
+            .unwrap();
+        assert_eq!(
+            probe.try_lock_exclusive().unwrap_err().kind(),
+            fs2::lock_contended_error().kind()
+        );
+        drop(inner);
+        probe.try_lock_exclusive().unwrap();
+        assert!(HELD_LOCKS.with(|locks| locks.borrow().is_empty()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_aliases_share_the_same_reentrant_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = temp.path().join("repository");
+        std::fs::create_dir(&repository).unwrap();
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&repository, &alias).unwrap();
+        let layout = crate::RepositoryLayout::at(repository);
+        let alias = crate::RepositoryLayout::at(alias);
+        let first = RepoLock::acquire_repository(&layout).unwrap();
+        let second = RepoLock::acquire_repository(&alias).unwrap();
+        assert!(Rc::ptr_eq(&first.file, &second.file));
+    }
 
     #[test]
     #[cfg(unix)]

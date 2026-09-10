@@ -15,11 +15,23 @@ impl From<SystemError> for Failure {
             )),
             SystemError::RecoveryChoiceOnlyForLock => Self::expected(Diagnostic::new(
                 ErrorCode::InvalidArgumentValue,
-                "`--restore-backup`/`--promote-staged` are only valid with `gat system repair lock`",
+                UserLine::compose([
+                    UserLine::authored(
+                        "`--restore-backup` or `--promote-staged` are only valid with ",
+                    ),
+                    UserLine::authored("`gat system repair lock`").unbroken(),
+                ]),
             )),
             SystemError::CachePurgeOnlyForCacheScope => Self::expected(Diagnostic::new(
                 ErrorCode::InvalidArgumentValue,
-                "`--purge-objects`/`--purge-temporary` are only valid with `gat system clean cache` or `... clean all`",
+                UserLine::compose([
+                    UserLine::authored(
+                        "`--purge-objects` or `--purge-temporary` are only valid with ",
+                    ),
+                    UserLine::authored("`gat system clean cache`").unbroken(),
+                    UserLine::authored(" or "),
+                    UserLine::authored("`gat system clean all`").unbroken(),
+                ]),
             )),
             SystemError::Maintenance(source) => {
                 if let MaintenanceErrorKind::UnsupportedCacheSchema { version } = source.kind() {

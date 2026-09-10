@@ -16,10 +16,14 @@ impl From<SyncError> for Failure {
     fn from(err: SyncError) -> Self {
         let mut diagnostic = classify(&err);
         if err.flush_failed() {
-            diagnostic = diagnostic.with_hint(
-                "Additionally, Gat could not persist some already-applied state changes; \
-                 run `gat sync` again to retry.",
-            );
+            diagnostic = diagnostic.with_hint(UserLine::compose([
+                UserLine::authored(
+                    "Additionally, Gat could not persist some already-applied state changes; \
+                 run ",
+                ),
+                UserLine::authored("`gat sync`").unbroken(),
+                UserLine::authored(" again to retry."),
+            ]));
         }
         match err.kind() {
             SyncErrorKind::InvalidTrackedPath(_)
@@ -189,7 +193,11 @@ fn classify_cache(kind: &CacheFailureKind) -> Diagnostic {
             ErrorCode::StateCorrupt,
             "Gat's local cache metadata is corrupt",
         )
-        .with_hint("Run `gat system repair cache` to rebuild it."),
+        .with_hint(UserLine::compose([
+            UserLine::authored("Run "),
+            UserLine::authored("`gat system repair cache`").unbroken(),
+            UserLine::authored(" to rebuild it."),
+        ])),
         CacheFailureKind::StorageExhausted => Diagnostic::new(
             ErrorCode::StorageExhausted,
             "Could not access the local object cache",
@@ -201,26 +209,25 @@ fn classify_cache(kind: &CacheFailureKind) -> Diagnostic {
         CacheFailureKind::InvalidObjectId => {
             Diagnostic::new(ErrorCode::Internal, "An object identifier was malformed")
         }
-        CacheFailureKind::Materialization(modes) => {
-            let modes = modes
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
-            Diagnostic::new(
-                ErrorCode::CacheUnavailable,
-                "Could not materialize a cached object",
-            )
-            .with_hint(UserLine::compose([
-                UserLine::authored("Every configured cache.materialization_strategy mode failed ("),
-                UserLine::identifier(&modes),
-                UserLine::authored(
-                    "); run `gat config cache.materialization_strategy <mode> [<mode>...]` \
+        CacheFailureKind::Materialization(modes) => Diagnostic::new(
+            ErrorCode::CacheUnavailable,
+            "Could not materialize a cached object",
+        )
+        .with_hint(UserLine::compose([
+            UserLine::authored("Every configured cache.materialization_strategy mode failed ("),
+            UserLine::join(
+                modes.iter().map(|mode| UserLine::identifier(mode.as_str())),
+                ", ",
+            ),
+            UserLine::authored("); run "),
+            UserLine::authored("`gat config cache.materialization_strategy <mode> [<mode>...]`")
+                .unbroken(),
+            UserLine::authored(
+                " \
                      to change the fallback chain (e.g. `copy` works on the widest range of \
                      filesystems)",
-                ),
-            ]))
-        }
+            ),
+        ])),
     }
 }
 

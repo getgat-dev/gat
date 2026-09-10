@@ -26,8 +26,13 @@ impl From<MountError> for Failure {
             MountError::AlreadyExists { name } => Self::expected(
                 Diagnostic::new(ErrorCode::Conflict, "That mount already exists").with_hint(
                     UserLine::compose([
-                        UserLine::authored("run `gat mount remove "),
-                        UserLine::identifier(name.as_str()),
+                        UserLine::authored("run `"),
+                        UserLine::compose([
+                            UserLine::authored("gat mount remove "),
+                            UserLine::identifier(name.as_str()),
+                            UserLine::authored(""),
+                        ])
+                        .unbroken(),
                         UserLine::authored("` first to change it"),
                     ]),
                 ),

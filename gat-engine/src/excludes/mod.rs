@@ -27,7 +27,7 @@ pub struct SyncStatus {
 }
 
 /// Regenerate the gat-managed block in `.git/info/exclude` from the
-/// on-disk `gat.lock`, `.gat/` itself, and `git.ignore_patterns` (see
+/// on-disk `gat.lock` and `git.ignore_patterns` (see
 /// current Git exclude policy). By default every `gat.lock` entry gets its
 /// own exact rule except paths containing LF, which Git cannot express
 /// exactly and which are recorded as comments instead;
@@ -60,7 +60,7 @@ pub(crate) fn fingerprint(
     ignore_patterns: &[gat_core::git_ignore::GitIgnorePattern],
 ) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"gat-excludes-v2\0");
+    hasher.update(b"gat-excludes-v3\0");
     hasher.update(desired_fingerprint);
     for pattern in ignore_patterns {
         hasher.update(pattern.as_str().as_bytes());
@@ -225,7 +225,7 @@ fn exact_exclude_pattern(path: &str) -> String {
 }
 
 /// Render `exact` (already the final, sorted, deduplicated set of paths that
-/// need their own rule) plus `.gat/` and `git.ignore_patterns` into the
+/// need their own rule) plus `git.ignore_patterns` into the
 /// gat-managed `.git/info/exclude` block, writing it out unless `dry_run` or
 /// nothing changed. Shared tail of lock-backed and store-backed generation
 /// once each has produced its `exact` set. `exact` entries are Gat-managed
@@ -253,8 +253,8 @@ fn render_with_proof(
     exact: Vec<String>,
     dry_run: bool,
 ) -> Result<(SyncStatus, [u8; 32], gat_io::InfoExcludeUpdate)> {
-    let mut body = String::from(".gat/\n");
-    let mut count = 1;
+    let mut body = String::new();
+    let mut count = 0;
     for pattern in cfg.git.effective_ignore_patterns() {
         body.push_str(pattern.as_str());
         body.push('\n');
@@ -662,7 +662,7 @@ mod tests {
     }
 
     #[test]
-    fn default_writes_exact_tracked_paths_and_cache_dir_into_info_exclude() {
+    fn default_writes_only_exact_tracked_paths_into_info_exclude() {
         let tmp = git_repo();
         let repo = Repo::at(tmp.path().to_path_buf());
         let mut lock = Lock::default();
@@ -673,7 +673,7 @@ mod tests {
 
         let text = std::fs::read_to_string(tmp.path().join(".git/info/exclude")).unwrap();
         assert!(text.contains("big.bin"));
-        assert!(text.contains(".gat/"));
+        assert!(!text.contains(".gat/"));
     }
 
     #[test]
@@ -705,7 +705,7 @@ mod tests {
 
         let text = std::fs::read_to_string(tmp.path().join(".git/info/exclude")).unwrap();
         assert!(!text.contains("big.bin"));
-        assert!(text.contains(".gat/"));
+        assert!(!text.contains(".gat/"));
     }
 
     #[test]
@@ -750,7 +750,7 @@ mod tests {
         let text = std::fs::read_to_string(tmp.path().join(".git/info/exclude")).unwrap();
         assert!(text.contains("a.bin"));
         assert!(text.contains("b.bin"));
-        assert!(text.contains(".gat/"));
+        assert!(!text.contains(".gat/"));
         // exact rules are sorted, so a.bin must precede b.bin
         assert!(text.find("a.bin").unwrap() < text.find("b.bin").unwrap());
     }
@@ -904,7 +904,7 @@ mod tests {
         assert!(text.contains("# my own rule"));
         assert!(text.contains("*.log"));
         assert!(text.contains("big.bin"));
-        assert!(text.contains(".gat/"));
+        assert!(!text.contains(".gat/"));
     }
 
     /// `sync`'s managed block must preserve a pre-existing `CRLF`
@@ -970,10 +970,9 @@ mod tests {
         assert!(!exclude_path.exists());
     }
 
-    /// An empty desired state must still manage `.gat/` via
-    /// `sync_from_store`.
+    /// Local storage protection is independent of the desired-path block.
     #[test]
-    fn sync_from_store_manages_gat_dir_for_empty_desired_state() {
+    fn sync_from_store_has_no_rules_for_empty_desired_state() {
         let tmp = git_repo();
         let repo = Repo::at(tmp.path().to_path_buf());
         let store = store_with_lock(&repo, &Lock::default());
@@ -981,7 +980,42 @@ mod tests {
         sync_from_store(&repo, &store, false).unwrap();
 
         let text = std::fs::read_to_string(tmp.path().join(".git/info/exclude")).unwrap();
-        assert!(text.contains(".gat/"));
+        assert!(!text.contains(".gat/"));
+    }
+
+    #[test]
+    fn old_exclude_fingerprint_migrates_local_directory_rule_out_of_managed_block() {
+        let tmp = git_repo();
+        let repo = Repo::at(tmp.path().to_path_buf());
+        let mut store = store_with_lock(&repo, &Lock::default());
+        let cfg = repo.load_config().unwrap();
+        let mut old_fingerprint = blake3::Hasher::new();
+        old_fingerprint.update(b"gat-excludes-v2\0");
+        old_fingerprint.update(&store.desired_fingerprint().unwrap());
+        let update = gat_io::mutate_info_exclude(repo.layout(), false, |_| {
+            gat_io::InfoExcludeMutation::Replace(format!("user-rule\n{BEGIN}\n.gat/\n{END}\n"))
+        })
+        .unwrap();
+        store
+            .record_exclude_output(
+                *old_fingerprint.finalize().as_bytes(),
+                1,
+                *blake3::hash(b".gat/\n").as_bytes(),
+                update,
+            )
+            .unwrap();
+
+        let result = sync_from_store_fast_path(&repo, &mut store, &cfg).unwrap();
+        assert!(result.changed);
+        assert_eq!(result.count, 0);
+        let text = std::fs::read_to_string(tmp.path().join(".git/info/exclude")).unwrap();
+        assert!(text.starts_with("user-rule\n"));
+        assert!(!text.contains(".gat/"));
+        assert!(
+            !sync_from_store_fast_path(&repo, &mut store, &cfg)
+                .unwrap()
+                .changed
+        );
     }
 
     /// A freshly regenerated

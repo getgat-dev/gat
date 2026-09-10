@@ -53,10 +53,8 @@ impl StateMaintenanceError {
 pub fn inspect_database(
     repository: &RepositoryLayout,
 ) -> Result<StateDatabaseHealth, StateMaintenanceError> {
-    inspect_database_at(&repository.materialized_db_path())
-}
-
-fn inspect_database_at(path: &Path) -> Result<StateDatabaseHealth, StateMaintenanceError> {
+    let db_path = repository.materialized_db_path();
+    let path = db_path.as_path();
     let meta = match std::fs::metadata(path) {
         Ok(meta) => meta,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -69,6 +67,11 @@ fn inspect_database_at(path: &Path) -> Result<StateDatabaseHealth, StateMaintena
             StateDatabaseUnreadable::NotARegularFile,
         ));
     }
+    // A read-only connection may still create WAL coordination files.
+    repository
+        .local_directory()
+        .ensure()
+        .map_err(|error| StateMaintenanceError::io(error.path, error.source))?;
     let conn = match Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
         Ok(conn) => conn,
         Err(err) => {
@@ -125,6 +128,10 @@ pub fn remove_stale_sidecars(
     reason = "Repository database paths are constructed with a parent directory"
 )]
 pub fn rebuild_atomically(repository: &RepositoryLayout) -> Result<(), StateMaintenanceError> {
+    repository
+        .local_directory()
+        .ensure()
+        .map_err(|error| StateMaintenanceError::io(error.path, error.source))?;
     let db_path = repository.materialized_db_path();
     let dir = db_path
         .parent()

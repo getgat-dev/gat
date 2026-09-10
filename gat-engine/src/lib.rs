@@ -189,8 +189,8 @@ pub use maintenance::{
     DbIntegrityFailure, DbUnreadableReason, GitClean, GitInspect, GitRepair, LiveLockInvalidReason,
     LiveLockState, LockClean, LockMaintenanceState, LockRepair, LockRepairRequest,
     MaintenanceError, MaintenanceErrorKind, MaintenanceService, PreparedTxnStatus, RecoveryChoice,
-    StateClean, StateDbState, StateInspect, StateRepair, TemporaryCleanOutcome, TransactionKind,
-    TransactionMalformedReason, TransactionState,
+    RecoverySelectionFailure, StateClean, StateDbState, StateInspect, StateRepair,
+    TemporaryCleanOutcome, TransactionKind, TransactionMalformedReason, TransactionState,
 };
 pub use merge_driver::{MergeDriverError, MergeStage, merge_driver};
 pub use mount::{

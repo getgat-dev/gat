@@ -708,13 +708,15 @@ mod tests {
     fn file_gc_groups_listing_and_deletion_into_bounded_workers() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _entered = runtime.enter();
-        let (_root, handles) =
+        let (root, handles) =
             crate::remote_session::test_support::open_handles_on_current_runtime(&["remote"]);
         let remote = handles[0].client();
         for index in 0..257 {
-            remote
-                .write(&gat_io::object_key_oid(&oid(index)), b"orphan".to_vec())
-                .unwrap();
+            // Seed the file backend directly: this test measures listing and
+            // deletion worker batches, not the remote upload implementation.
+            let path = root.path().join(gat_io::object_key_oid(&oid(index)));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"orphan").unwrap();
         }
         let executor = crate::remote_executor::RemoteExecutor::new(
             crate::limits::ExecutionLimits::default().remote,

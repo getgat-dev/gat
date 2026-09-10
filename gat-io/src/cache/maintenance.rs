@@ -36,32 +36,36 @@ pub enum CacheMaintenanceError {
 }
 
 pub struct CacheMaintenance<'cache> {
-    objects_dir: &'cache Path,
+    root: &'cache crate::cache::root::CacheRootInner,
 }
 
 impl<'cache> CacheMaintenance<'cache> {
-    pub(crate) const fn new(objects_dir: &'cache Path) -> Self {
-        Self { objects_dir }
+    pub(crate) const fn new(root: &'cache crate::cache::root::CacheRootInner) -> Self {
+        Self { root }
     }
 
     pub fn inspect_database(&self) -> Result<CacheDatabaseHealth, CacheMaintenanceError> {
-        inspect_database(self.objects_dir)
+        inspect_database(self.root)
     }
 
     pub fn rebuild_database(&self) -> Result<(), CacheMaintenanceError> {
-        rebuild_database(self.objects_dir)
+        let directory = self
+            .root
+            .prepare_directory()
+            .map_err(|error| CacheMaintenanceError::io(error.path, error.source))?;
+        rebuild_database(&directory)
     }
 
     pub fn count_temporary_objects(&self) -> Result<usize, CacheMaintenanceError> {
-        count_temporary_objects(self.objects_dir)
+        count_temporary_objects(&self.root.objects_dir)
     }
 
     pub fn purge_temporary_objects(&self) -> Result<usize, CacheMaintenanceError> {
-        purge_temporary_objects(self.objects_dir)
+        purge_temporary_objects(&self.root.objects_dir)
     }
 
     pub fn purge_objects(&self) -> Result<usize, CacheMaintenanceError> {
-        purge_objects(self.objects_dir)
+        purge_objects(&self.root.objects_dir)
     }
 
     pub fn sweep<E>(
@@ -72,7 +76,7 @@ impl<'cache> CacheMaintenance<'cache> {
         Result<super::enumeration::CacheSweepStats, E>,
         super::enumeration::CacheEnumerationError,
     > {
-        super::enumeration::sweep_objects(self.objects_dir, dry_run, decide)
+        super::enumeration::sweep_objects(self.root, dry_run, decide)
     }
 }
 
@@ -85,8 +89,10 @@ impl CacheMaintenanceError {
     }
 }
 
-pub fn inspect_database(objects_dir: &Path) -> Result<CacheDatabaseHealth, CacheMaintenanceError> {
-    let path = objects_dir.join(CACHE_DB_FILENAME);
+fn inspect_database(
+    root: &crate::cache::root::CacheRootInner,
+) -> Result<CacheDatabaseHealth, CacheMaintenanceError> {
+    let path = root.objects_dir.join(CACHE_DB_FILENAME);
     let meta = match std::fs::metadata(&path) {
         Ok(meta) => meta,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -99,6 +105,9 @@ pub fn inspect_database(objects_dir: &Path) -> Result<CacheDatabaseHealth, Cache
             CacheDatabaseUnreadable::NotARegularFile,
         ));
     }
+    // A read-only connection may still create WAL coordination files.
+    root.prepare_directory()
+        .map_err(|error| CacheMaintenanceError::io(error.path, error.source))?;
     let conn = match Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
         Ok(conn) => conn,
         Err(source) => {
@@ -136,11 +145,14 @@ pub fn inspect_database(objects_dir: &Path) -> Result<CacheDatabaseHealth, Cache
     )
 }
 
-pub fn rebuild_database(objects_dir: &Path) -> Result<(), CacheMaintenanceError> {
+fn rebuild_database(
+    directory: &super::root::PreparedCacheDirectory<'_>,
+) -> Result<(), CacheMaintenanceError> {
+    let objects_dir = directory.path();
     std::fs::create_dir_all(objects_dir)
         .map_err(|source| CacheMaintenanceError::io(objects_dir, source))?;
     remove_database_files(objects_dir)?;
-    CacheState::open_strict(objects_dir).map_err(crate::cache::proof::CacheProofError::from)?;
+    CacheState::open_strict(directory).map_err(crate::cache::proof::CacheProofError::from)?;
     Ok(())
 }
 

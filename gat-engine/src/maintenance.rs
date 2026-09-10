@@ -220,11 +220,37 @@ pub enum LockRepair {
     Recovered {
         txn_id: String,
         choice: RecoveryChoice,
+        /// Post-recovery inspection, including unrelated transaction findings.
+        state: LockMaintenanceState,
     },
-    ExplicitChoiceRequired {
-        live: LiveLockState,
-        unresolved: Vec<TransactionState>,
+    /// Inspection found state that automatic repair cannot resolve.
+    Unresolved {
+        state: LockMaintenanceState,
     },
+    /// The request did not select exactly one eligible transaction.
+    RecoveryNotSelected {
+        state: LockMaintenanceState,
+        reason: RecoverySelectionFailure,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecoverySelectionFailure {
+    NoMatch,
+    Ambiguous,
+}
+
+impl LockRepair {
+    /// Whether repair resolved blocking lock state. Disposable scratch does not
+    /// block later repairs; it remains the responsibility of explicit cleanup.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        match self {
+            Self::NothingToDo | Self::CleanScratch { .. } => true,
+            Self::Recovered { state, .. } => !lock_requires_repair(state),
+            Self::Unresolved { .. } | Self::RecoveryNotSelected { .. } => false,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -261,15 +287,16 @@ impl MaintenanceService<'_> {
             .map_err(|source| MaintenanceError::new(MaintenanceErrorKind::Lock, source))?;
         let state = self.inspect_lock()?;
         match build_lock_repair_plan(state, request) {
-            LockRepairPlan::NothingToDo => Ok(LockRepair::NothingToDo),
-            LockRepairPlan::CleanScratch { count } => Ok(LockRepair::CleanScratch { count }),
+            LockRepairPlan::Report(report) => Ok(report),
             LockRepairPlan::Recover { txn_id, choice } => {
                 LockStore::recover_repository_reshape(self.repo.layout(), &txn_id, choice)
                     .map_err(|source| MaintenanceError::new(MaintenanceErrorKind::Lock, source))?;
-                Ok(LockRepair::Recovered { txn_id, choice })
-            }
-            LockRepairPlan::ExplicitChoiceRequired { live, unresolved } => {
-                Ok(LockRepair::ExplicitChoiceRequired { live, unresolved })
+                let state = self.inspect_lock()?;
+                Ok(LockRepair::Recovered {
+                    txn_id,
+                    choice,
+                    state,
+                })
             }
         }
     }
@@ -487,17 +514,10 @@ struct UnsupportedCacheSchema {
 }
 
 enum LockRepairPlan {
-    NothingToDo,
-    CleanScratch {
-        count: usize,
-    },
+    Report(LockRepair),
     Recover {
         txn_id: String,
         choice: RecoveryChoice,
-    },
-    ExplicitChoiceRequired {
-        live: LiveLockState,
-        unresolved: Vec<TransactionState>,
     },
 }
 
@@ -507,31 +527,23 @@ fn build_lock_repair_plan(
 ) -> LockRepairPlan {
     if let Some(choice) = request.choice {
         return match select_explicit_transaction(&state, request.transaction.as_deref(), choice) {
-            Some(index) => LockRepairPlan::Recover {
+            Ok(index) => LockRepairPlan::Recover {
                 txn_id: state.transactions[index].id.clone(),
                 choice,
             },
-            None => LockRepairPlan::ExplicitChoiceRequired {
-                live: state.live,
-                unresolved: Vec::new(),
-            },
+            Err(reason) => {
+                LockRepairPlan::Report(LockRepair::RecoveryNotSelected { state, reason })
+            }
         };
     }
-    if state.transactions.iter().any(needs_explicit_recovery) {
-        return LockRepairPlan::ExplicitChoiceRequired {
-            live: state.live,
-            unresolved: state
-                .transactions
-                .into_iter()
-                .filter(needs_explicit_recovery)
-                .collect(),
-        };
+    if lock_requires_repair(&state) {
+        return LockRepairPlan::Report(LockRepair::Unresolved { state });
     }
     let count = removable_transaction_count(&state);
     if count > 0 {
-        LockRepairPlan::CleanScratch { count }
+        LockRepairPlan::Report(LockRepair::CleanScratch { count })
     } else {
-        LockRepairPlan::NothingToDo
+        LockRepairPlan::Report(LockRepair::NothingToDo)
     }
 }
 
@@ -539,7 +551,7 @@ fn select_explicit_transaction(
     state: &LockMaintenanceState,
     transaction: Option<&str>,
     choice: RecoveryChoice,
-) -> Option<usize> {
+) -> Result<usize, RecoverySelectionFailure> {
     let mut candidates = state
         .transactions
         .iter()
@@ -557,9 +569,14 @@ fn select_explicit_transaction(
         candidates
             .find(|(_, transaction)| transaction.id == id)
             .map(|(index, _)| index)
+            .ok_or(RecoverySelectionFailure::NoMatch)
     } else {
-        let (index, _) = candidates.next()?;
-        candidates.next().is_none().then_some(index)
+        let (index, _) = candidates.next().ok_or(RecoverySelectionFailure::NoMatch)?;
+        if candidates.next().is_some() {
+            Err(RecoverySelectionFailure::Ambiguous)
+        } else {
+            Ok(index)
+        }
     }
 }
 
@@ -577,6 +594,10 @@ fn removable_transaction_count(state: &LockMaintenanceState) -> usize {
             ),
         })
         .count()
+}
+
+fn lock_requires_repair(state: &LockMaintenanceState) -> bool {
+    matches!(state.live, LiveLockState::Invalid { .. }) || has_preserved_transaction_state(state)
 }
 
 fn has_preserved_transaction_state(state: &LockMaintenanceState) -> bool {
@@ -764,6 +785,129 @@ mod tests {
     }
 
     #[test]
+    fn repair_plan_retains_invalid_state_alongside_disposable_scratch() {
+        for invalid_live in [false, true] {
+            for malformed in [false, true] {
+                let live = if invalid_live {
+                    LiveLockState::Invalid {
+                        reason: LiveLockInvalidReason::NeitherFileNorShardTree,
+                    }
+                } else {
+                    LiveLockState::Valid {
+                        shard_levels: LockShardLevels::FLAT,
+                        entries: 0,
+                    }
+                };
+                let mut transactions = vec![TransactionState {
+                    id: "scratch".into(),
+                    kind: TransactionKind::ScratchOnly,
+                }];
+                if malformed {
+                    transactions.push(TransactionState {
+                        id: "malformed".into(),
+                        kind: TransactionKind::Malformed {
+                            reason: TransactionMalformedReason::UnrecognizedPhase,
+                        },
+                    });
+                }
+                let plan = build_lock_repair_plan(
+                    LockMaintenanceState { live, transactions },
+                    &LockRepairRequest {
+                        choice: None,
+                        transaction: None,
+                    },
+                );
+                if invalid_live || malformed {
+                    let LockRepairPlan::Report(LockRepair::Unresolved { state }) = plan else {
+                        panic!("invalid state must remain in an unresolved report");
+                    };
+                    assert_eq!(
+                        matches!(state.live, LiveLockState::Invalid { .. }),
+                        invalid_live
+                    );
+                    assert_eq!(state.transactions.len(), 1 + usize::from(malformed));
+                    assert_eq!(state.transactions[0].id, "scratch");
+                } else {
+                    assert!(matches!(
+                        plan,
+                        LockRepairPlan::Report(LockRepair::CleanScratch { count: 1 })
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_selection_distinguishes_ambiguity_from_no_match() {
+        let candidate = |choice| gat_io::RecoveryCandidateState {
+            choice,
+            outcome: CandidateOutcome::Valid {
+                shard_levels: LockShardLevels::FLAT,
+                entries: 1,
+            },
+        };
+        let transaction = |id: &str| TransactionState {
+            id: id.into(),
+            kind: TransactionKind::Prepared(Box::new(gat_io::PreparedReshapeState {
+                backup: candidate(RecoveryChoice::RestoreBackup),
+                staged: candidate(RecoveryChoice::PromoteStaged),
+                status: PreparedTxnStatus::AmbiguousRecovery,
+            })),
+        };
+        let mut state = LockMaintenanceState {
+            live: LiveLockState::Missing,
+            transactions: vec![transaction("first"), transaction("second")],
+        };
+        for choice in [RecoveryChoice::RestoreBackup, RecoveryChoice::PromoteStaged] {
+            assert_eq!(
+                select_explicit_transaction(&state, None, choice),
+                Err(RecoverySelectionFailure::Ambiguous)
+            );
+            assert_eq!(
+                select_explicit_transaction(&state, Some("second"), choice),
+                Ok(1)
+            );
+            assert_eq!(
+                select_explicit_transaction(&state, Some("unknown"), choice),
+                Err(RecoverySelectionFailure::NoMatch)
+            );
+        }
+        state.transactions.pop();
+        assert_eq!(
+            select_explicit_transaction(&state, None, RecoveryChoice::RestoreBackup),
+            Ok(0)
+        );
+        state.transactions.clear();
+        assert_eq!(
+            select_explicit_transaction(&state, None, RecoveryChoice::RestoreBackup),
+            Err(RecoverySelectionFailure::NoMatch)
+        );
+    }
+
+    #[test]
+    fn unmatched_recovery_preserves_the_inspected_transactions() {
+        let plan = build_lock_repair_plan(
+            LockMaintenanceState {
+                live: LiveLockState::Missing,
+                transactions: vec![TransactionState {
+                    id: "scratch".into(),
+                    kind: TransactionKind::ScratchOnly,
+                }],
+            },
+            &LockRepairRequest {
+                choice: Some(RecoveryChoice::RestoreBackup),
+                transaction: Some("missing".into()),
+            },
+        );
+        let LockRepairPlan::Report(LockRepair::RecoveryNotSelected { state, reason }) = plan else {
+            panic!("expected an unmatched recovery report");
+        };
+        assert_eq!(reason, RecoverySelectionFailure::NoMatch);
+        assert_eq!(state.transactions.len(), 1);
+        assert_eq!(state.transactions[0].id, "scratch");
+    }
+
+    #[test]
     fn repair_lock_requires_an_explicit_choice_for_ambiguous_recovery() {
         let (tmp, repo) = tracked_repo();
         let transaction = simulated_txn(tmp.path(), &repo, LockShardLevels::new(2).unwrap());
@@ -776,11 +920,12 @@ mod tests {
             })
             .unwrap();
 
-        let LockRepair::ExplicitChoiceRequired { unresolved, .. } = report else {
+        let LockRepair::Unresolved { state } = report else {
             panic!("expected explicit recovery choice");
         };
         assert!(
-            unresolved
+            state
+                .transactions
                 .iter()
                 .any(|candidate| candidate.id == txn_id(&transaction))
         );
@@ -800,6 +945,7 @@ mod tests {
             })
             .unwrap();
 
+        assert!(report.is_complete());
         assert!(matches!(
             report,
             LockRepair::Recovered {
@@ -812,6 +958,35 @@ mod tests {
             Some(LockShardLevels::FLAT)
         );
         assert!(transaction.exists());
+    }
+
+    #[test]
+    fn explicit_recovery_retains_unrelated_malformed_transactions() {
+        let (tmp, repo) = tracked_repo();
+        let transaction = simulated_txn(tmp.path(), &repo, LockShardLevels::new(2).unwrap());
+        let other = transaction.parent().unwrap().join("unrelated");
+        fs::create_dir(&other).unwrap();
+        let malformed = b"not a transaction record";
+        fs::write(other.join("txn.json"), malformed).unwrap();
+
+        let report = repo
+            .maintenance()
+            .repair_lock(&LockRepairRequest {
+                choice: Some(RecoveryChoice::RestoreBackup),
+                transaction: Some(txn_id(&transaction)),
+            })
+            .unwrap();
+
+        assert!(!report.is_complete());
+        let LockRepair::Recovered { state, .. } = report else {
+            panic!("the requested transaction should still be recovered");
+        };
+        assert!(matches!(state.live, LiveLockState::Valid { .. }));
+        assert!(
+            state.transactions.iter().any(|txn| txn.id == "unrelated"
+                && matches!(txn.kind, TransactionKind::Malformed { .. }))
+        );
+        assert_eq!(fs::read(other.join("txn.json")).unwrap(), malformed);
     }
 
     #[test]
@@ -828,6 +1003,7 @@ mod tests {
             })
             .unwrap();
 
+        assert!(report.is_complete());
         assert!(matches!(
             report,
             LockRepair::Recovered {

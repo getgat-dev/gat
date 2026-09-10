@@ -12,8 +12,8 @@ impl From<AddError> for Failure {
                 Diagnostic::new(ErrorCode::Conflict, "This path is already tracked by git")
                     .with_subject(UserLine::gat_path(path))
                     .with_hint(UserLine::compose([
-                        UserLine::authored("run `git rm --cached "),
-                        UserLine::gat_path(path),
+                        UserLine::authored("run `"),
+                        UserLine::compose([UserLine::authored("git rm --cached "), UserLine::gat_path(path)]).unbroken(),
                         UserLine::authored("` first if you want gat to manage it"),
                     ])),
             ),

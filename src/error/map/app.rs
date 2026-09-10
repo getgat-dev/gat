@@ -12,11 +12,19 @@ impl From<AppError> for Failure {
                 ErrorCode::InvalidArgumentValue,
                 "History flags require `--remote`",
             )
-            .with_detail(
-                "local `gat status` has no history concept; history selection only makes \
+            .with_detail(UserLine::compose([
+                UserLine::authored("local "),
+                UserLine::authored("`gat status`").unbroken(),
+                UserLine::authored(
+                    " has no history concept; history selection only makes \
                  sense when comparing against a remote's history.",
-            )
-            .with_hint("Add `--remote <name>`, or remove the history flag(s)."),
+                ),
+            ]))
+            .with_hint(UserLine::compose([
+                UserLine::authored("Add "),
+                UserLine::authored("`--remote <name>`").unbroken(),
+                UserLine::authored(", or remove the history flag(s)."),
+            ])),
             AppError::DryRunConflictsWithFetch => Diagnostic::new(
                 ErrorCode::InvalidArgumentValue,
                 "`--dry-run` cannot be combined with `--fetch`",
@@ -32,12 +40,8 @@ impl From<AppError> for Failure {
     }
 }
 
-/// Builds the `Failure` `crate::app::exit_result` reports when a
-/// `sync`/`pull`/`hook` outcome finished but left conflicts/missing
-/// objects/corruption behind: accepts the structured
-/// [`gat_command::SyncCompletionStatus::Incomplete`] counts directly
-/// (never a caller-composed `String`) and authors the one Gat-owned
-/// summary text here, at this single rendering boundary.
+/// Summarizes an incomplete sync returned as an error before a report exists.
+/// Completed sync outcomes retain their own presentation and exit status.
 pub fn sync_completion_conflict(conflicts: usize, missing: usize, corrupted: usize) -> Failure {
     Failure::expected(Diagnostic::new(
         ErrorCode::Conflict,

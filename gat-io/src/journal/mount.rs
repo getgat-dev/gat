@@ -169,27 +169,23 @@ pub type Result<T> = std::result::Result<T, MountJournalError>;
 
 #[derive(Debug, Clone)]
 pub struct MountJournal {
-    cache_root: PathBuf,
+    directory: std::sync::Arc<crate::local_directory::LocalDirectory>,
 }
 
 impl MountJournal {
     #[must_use]
     pub fn open(repository: &RepositoryLayout) -> Self {
-        Self::new_in(repository.cache_root_path())
-    }
-
-    fn new_in(cache_root: &Path) -> Self {
         Self {
-            cache_root: cache_root.to_path_buf(),
+            directory: std::sync::Arc::clone(repository.local_directory()),
         }
     }
 
     fn path(&self) -> PathBuf {
-        self.cache_root.join("mount-transaction.json")
+        self.directory.path().join("mount-transaction.json")
     }
 
     fn staged_rows_dir(&self) -> PathBuf {
-        self.cache_root.join("mount-transaction-rows")
+        self.directory.path().join("mount-transaction-rows")
     }
 
     fn staged_window_path(&self, window: usize) -> PathBuf {
@@ -253,11 +249,19 @@ impl MountJournal {
         };
         let body = serde_json::to_string_pretty(&encoded)
             .map_err(|source| MountJournalError::serde("serializing", &path, source))?;
+        self.ensure_directory()?;
         crate::atomic::write_atomic(&path, &body)?;
         Ok(())
     }
 
+    fn ensure_directory(&self) -> Result<()> {
+        self.directory
+            .ensure()
+            .map_err(|error| MountJournalError::io("initializing", error.path, error.source))
+    }
+
     pub fn reset_staged_rows(&self) -> Result<()> {
+        self.ensure_directory()?;
         let rows_dir = self.staged_rows_dir();
         remove_dir_if_exists(&rows_dir, "clearing")?;
         std::fs::create_dir_all(&rows_dir)
@@ -268,6 +272,7 @@ impl MountJournal {
         let path = self.staged_window_path(window);
         let body = serde_json::to_string(rows)
             .map_err(|source| MountJournalError::serde("serializing", &path, source))?;
+        self.ensure_directory()?;
         crate::atomic::write_atomic(&path, &body)?;
         Ok(())
     }

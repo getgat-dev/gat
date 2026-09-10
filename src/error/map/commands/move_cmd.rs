@@ -99,7 +99,7 @@ impl From<MoveError> for Failure {
                         .with_detail(UserLine::compose([
                             UserLine::authored("Original path: "), UserLine::gat_path(src),
                         ]))
-                        .with_hint("Preserve the moved files and inspect gat.lock. If the original path is still tracked, use gat rm --cached for that path, then gat add for the destination to reconcile tracking."),
+                        .with_hint(UserLine::compose([UserLine::authored("Preserve the moved files and inspect gat.lock. If the original path is still tracked, use "), UserLine::authored("`gat rm --cached`").unbroken(), UserLine::authored(" for that path, then "), UserLine::authored("`gat add`").unbroken(), UserLine::authored(" for the destination to reconcile tracking.")])),
                     err,
                 )
             }
@@ -113,7 +113,7 @@ impl From<MoveError> for Failure {
                         UserLine::gat_path(&src), UserLine::authored(" to "), UserLine::gat_path(&dst),
                         UserLine::authored("; metadata cleanup is incomplete."),
                     ]))
-                    .with_hint("Repeating the original move does not resume metadata cleanup. Inspect the moved files and tracking state before running gat sync.");
+                    .with_hint(UserLine::compose([UserLine::authored("Repeating the original move does not resume metadata cleanup. Inspect the moved files and tracking state before running "), UserLine::authored("`gat sync`").unbroken(), UserLine::authored(".")]));
                 failure
             }
         }
