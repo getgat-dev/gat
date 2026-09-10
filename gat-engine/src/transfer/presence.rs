@@ -253,15 +253,15 @@ pub(crate) fn fair_request_order(by_remote: &BTreeMap<RemoteId, Vec<usize>>) -> 
         by_remote.values().map(|indices| indices.iter()).collect();
     let total = columns.iter().map(std::iter::ExactSizeIterator::len).sum();
     let mut ordered = Vec::with_capacity(total);
-    let mut advanced = true;
-    while advanced {
-        advanced = false;
-        for column in &mut columns {
+    // Retire exhausted remotes so a long tail costs one visit per remaining
+    // request, rather than scanning every originally configured remote.
+    while !columns.is_empty() {
+        columns.retain_mut(|column| {
             if let Some(&index) = column.next() {
                 ordered.push(index);
-                advanced = true;
             }
-        }
+            !column.as_slice().is_empty()
+        });
     }
     ordered
 }
@@ -647,6 +647,20 @@ mod tests {
             // round-robin must interleave them as encountered instead.
             let ordered = fair_request_order(&by_remote(&obligations));
             assert_eq!(ordered, vec![0, 1, 2, 3, 4, 5]);
+        });
+    }
+
+    #[test]
+    fn fair_request_order_preserves_uneven_tails_and_skips_empty_remotes() {
+        with_runtime(|| {
+            let (_dir, obligations, _handles) = two_remote_fixture(3);
+            let mut requests = by_remote(&obligations);
+            requests.values_mut().nth(1).unwrap().truncate(1);
+            assert_eq!(fair_request_order(&requests), [0, 1, 2, 4]);
+            requests.values_mut().next().unwrap().clear();
+            assert_eq!(fair_request_order(&requests), [1]);
+            requests.clear();
+            assert!(fair_request_order(&requests).is_empty());
         });
     }
 

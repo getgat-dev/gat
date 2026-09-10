@@ -63,7 +63,7 @@ fn walk(
                 || name.starts_with("test-support-");
             let mut checker = Checker {
                 name: &name,
-                text: &text,
+                lines: text.lines().collect(),
                 aliases: BTreeMap::new(),
                 test,
                 architecture,
@@ -79,7 +79,7 @@ fn walk(
 
 struct Checker<'a> {
     name: &'a str,
-    text: &'a str,
+    lines: Vec<&'a str>,
     aliases: BTreeMap<String, String>,
     test: bool,
     architecture: bool,
@@ -210,24 +210,22 @@ impl Checker<'_> {
     }
 
     fn justified(&self, line: usize, marker: &str) -> bool {
-        self.text
-            .lines()
-            .take(line.saturating_sub(1))
-            .skip(line.saturating_sub(5))
-            .any(|line| {
-                line.trim_start()
-                    .strip_prefix("//")
-                    .and_then(|comment| comment.split_once(marker))
-                    .is_some_and(|(_, reason)| !reason.trim().is_empty())
-            })
+        let end = line.saturating_sub(1).min(self.lines.len());
+        self.lines[end.saturating_sub(4)..end].iter().any(|line| {
+            line.trim_start()
+                .strip_prefix("//")
+                .and_then(|comment| comment.split_once(marker))
+                .is_some_and(|(_, reason)| !reason.trim().is_empty())
+        })
     }
 
     fn path(&mut self, path: &syn::Path) {
         let resolved = self.resolve(path);
         let span = path.span();
-        let ambient = ["var", "var_os", "vars", "vars_os"]
-            .iter()
-            .any(|name| resolved == format!("std::env::{name}"));
+        let ambient = matches!(
+            resolved.as_str(),
+            "std::env::var" | "std::env::var_os" | "std::env::vars" | "std::env::vars_os"
+        );
         let mutation = matches!(
             resolved.as_str(),
             "std::env::set_var" | "std::env::remove_var"
@@ -443,30 +441,69 @@ impl<'ast> Visit<'ast> for Checker<'_> {
             && let syn::Expr::Path(function) = call.func.as_ref()
         {
             let path = self.resolve(&function.path);
-            let boundary = path.starts_with("std::fs::")
-                || path.starts_with("tokio::fs::")
-                || path.ends_with("::bind")
-                || path.contains("RemoteClient::open");
-            if boundary && !self.justified(call.span().start().line, "hygiene-ok:") {
-                for argument in &call.args {
+            if let Some(boundary) = IsolationBoundary::for_path(&path)
+                && !self.justified(call.span().start().line, "hygiene-ok:")
+            {
+                for argument in call.args.iter().take(boundary.arguments()) {
                     if let syn::Expr::Lit(syn::ExprLit {
                         lit: syn::Lit::Str(value),
                         ..
                     }) = argument
+                        && boundary.rejects(&value.value())
                     {
-                        let value = value.value();
-                        if shared_path(&value)
-                            || value.starts_with("http://")
-                            || value.starts_with("https://")
-                            || (path.ends_with("::bind") && !isolated_bind(&value))
-                        {
-                            self.report(call.span(), "tests/isolation", "use fixture-owned paths/endpoints; justify deliberate boundary tests with hygiene-ok:");
-                        }
+                        self.report(call.span(), "tests/isolation", "use fixture-owned paths/endpoints; justify deliberate boundary tests with hygiene-ok:");
                     }
                 }
             }
         }
         visit::visit_expr_call(self, call);
+    }
+}
+
+/// Only path/endpoint positions are inputs to isolation policy. Payloads are data.
+enum IsolationBoundary {
+    Filesystem { paths: usize },
+    Bind,
+    Remote,
+}
+
+impl IsolationBoundary {
+    fn for_path(path: &str) -> Option<Self> {
+        if path.starts_with("std::fs::") || path.starts_with("tokio::fs::") {
+            let paths = if matches!(
+                path.rsplit("::").next(),
+                Some("copy" | "rename" | "hard_link")
+            ) {
+                2
+            } else {
+                1
+            };
+            Some(Self::Filesystem { paths })
+        } else if path.ends_with("::bind") {
+            Some(Self::Bind)
+        } else if path.contains("RemoteClient::open") {
+            Some(Self::Remote)
+        } else {
+            None
+        }
+    }
+
+    const fn arguments(&self) -> usize {
+        match self {
+            Self::Filesystem { paths } => *paths,
+            Self::Bind => 1,
+            Self::Remote => usize::MAX,
+        }
+    }
+
+    fn rejects(&self, value: &str) -> bool {
+        match self {
+            Self::Filesystem { .. } => shared_path(value),
+            Self::Bind => !isolated_bind(value),
+            Self::Remote => {
+                shared_path(value) || value.starts_with("http://") || value.starts_with("https://")
+            }
+        }
     }
 }
 
@@ -499,7 +536,7 @@ mod tests {
         let mut findings = Vec::new();
         let mut checker = Checker {
             name,
-            text,
+            lines: text.lines().collect(),
             aliases: BTreeMap::new(),
             test: name.starts_with("tests/"),
             architecture: true,
@@ -509,6 +546,50 @@ mod tests {
         checker.imports(&syntax.items);
         checker.visit_file(&syntax);
         findings.into_iter().map(|finding| finding.rule).collect()
+    }
+
+    #[test]
+    fn filesystem_payload_is_data_but_both_copy_paths_are_boundaries() {
+        for operation in ["std::fs::write", "tokio::fs::write"] {
+            assert!(rules("tests/x.rs", &format!(r#"fn f(){{ {operation}("fixture.txt", "https://example.test /tmp/data"); }}"#)).is_empty());
+        }
+        for operation in ["copy", "rename", "hard_link"] {
+            for arguments in [
+                r#""/tmp/source", "fixture""#,
+                r#""fixture", "/tmp/destination""#,
+            ] {
+                assert_eq!(
+                    rules(
+                        "tests/x.rs",
+                        &format!("fn f(){{ std::fs::{operation}({arguments}); }}")
+                    ),
+                    ["tests/isolation"]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn waivers_have_a_bounded_nonempty_comment_window() {
+        let call = "fn f(){ std::thread::sleep(todo!()); }";
+        assert_eq!(
+            rules("tests/x.rs", &format!("// sleep-ok:\n{call}")),
+            ["tests/sleep"]
+        );
+        assert!(
+            rules(
+                "tests/x.rs",
+                &format!("// sleep-ok: exercise deadline\n\n\n\n{call}")
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            rules(
+                "tests/x.rs",
+                &format!("// sleep-ok: too far away\n\n\n\n\n{call}")
+            ),
+            ["tests/sleep"]
+        );
     }
 
     #[test]

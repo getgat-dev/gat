@@ -80,23 +80,31 @@ fn parse_size(s: &str) -> Result<u64, String> {
         .find(|c: char| !c.is_ascii_digit() && c != '.')
         .unwrap_or(s.len());
     let (num, suffix) = s.split_at(split_at);
-    let num: f64 = num.parse().map_err(|_| {
-        format!(
-            "invalid size `{s}`: expected a number, optionally followed by B/KB/KiB/MB/MiB/GB/GiB"
-        )
-    })?;
-    let multiplier: f64 = match suffix.trim().to_ascii_lowercase().as_str() {
-        "" | "b" => 1.0,
-        "kb" | "kib" => 1024.0,
-        "mb" | "mib" => 1024.0 * 1024.0,
-        "gb" | "gib" => 1024.0 * 1024.0 * 1024.0,
+    let multiplier: u32 = match suffix.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1,
+        "kb" | "kib" => 1024,
+        "mb" | "mib" => 1024 * 1024,
+        "gb" | "gib" => 1024 * 1024 * 1024,
         other => {
             return Err(format!(
                 "unknown size suffix `{other}` in `{s}` (expected B/KB/KiB/MB/MiB/GB/GiB)"
             ));
         }
     };
-    let bytes = (num * multiplier).round();
+    // Integer byte counts must remain exact above f64's 53-bit precision.
+    if !num.contains('.') {
+        return num
+            .parse::<u64>()
+            .ok()
+            .and_then(|value| value.checked_mul(u64::from(multiplier)))
+            .ok_or_else(|| format!("invalid or out-of-range integer size `{s}`"));
+    }
+    let num: f64 = num.parse().map_err(|_| {
+        format!(
+            "invalid size `{s}`: expected a number, optionally followed by B/KB/KiB/MB/MiB/GB/GiB"
+        )
+    })?;
+    let bytes = (num * f64::from(multiplier)).round();
     if !bytes.is_finite() || !(0.0..18_446_744_073_709_551_616.0).contains(&bytes) {
         return Err(format!("size `{s}` is outside the supported byte range"));
     }
@@ -124,9 +132,8 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-/// Tiny stdlib-only PRNG (splitmix64) so generated file content is
-/// deterministic given a seed but never byte-identical across files or
-/// across a re-run with the same seed.
+/// Tiny stdlib-only PRNG (splitmix64). Distinct per-file seeds vary the content;
+/// reusing a seed reproduces the same bytes.
 struct Splitmix64(u64);
 
 impl Splitmix64 {
@@ -150,20 +157,28 @@ impl Splitmix64 {
     }
 }
 
-/// Write `size` bytes of PRNG-filled content to `path`, ticking `pb` (if
-/// given) once per 64KiB chunk written — the same chunk size gat's own
-/// `storage::ingest` streams in, so a large-file progress bar here behaves
-/// like the one users see during a real `gat add`.
+const WRITE_BUFFER_SIZE: usize = 64 * 1024;
+
+fn write_buffer() -> Box<[u8; WRITE_BUFFER_SIZE]> {
+    vec![0; WRITE_BUFFER_SIZE]
+        .into_boxed_slice()
+        .try_into()
+        .expect("buffer allocation has the fixed write size")
+}
+
+/// Write deterministic content using a reusable, nonempty buffer. Tick the
+/// progress bar once per chunk; resetting the seed makes reuse independent of
+/// previous writes and Rayon scheduling.
 fn write_random_file(
     path: &std::path::Path,
     size: u64,
     seed: u64,
     pb: Option<&ProgressBar>,
+    buf: &mut [u8; WRITE_BUFFER_SIZE],
 ) -> Result<()> {
     let mut rng = Splitmix64::new(seed);
     let mut file =
         std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
-    let mut buf = vec![0u8; 64 * 1024];
     let mut remaining = size;
     while remaining > 0 {
         let n = usize::try_from(remaining)
@@ -204,7 +219,7 @@ fn main() -> Result<()> {
 
     // No explicit `--path`: generate into a fresh OS temp directory rather
     // than defaulting to a relative path that would clutter (or collide
-    // with an existing) current working directory. `into_path()` hands
+    // with an existing) current working directory. `keep()` hands
     // over ownership so the directory outlives this `TempDir` guard and
     // is left for the user to inspect/clean up.
     let path = match cli.path {
@@ -246,19 +261,20 @@ fn main() -> Result<()> {
     small_pb.set_style(spinner_style());
     small_pb.set_message("small files");
     small_pb.enable_steady_tick(std::time::Duration::from_millis(100));
-    (0..cli.small_files)
-        .into_par_iter()
-        .try_for_each(|i| -> Result<()> {
+    (0..cli.small_files).into_par_iter().try_for_each_init(
+        write_buffer,
+        |buffer, i| -> Result<()> {
             // Jitter +/-20% so small files aren't all identical length either.
             let mut jitter_rng = Splitmix64::new(seed ^ i ^ 0xA5A5_A5A5_A5A5_A5A5);
             let percent = 80 + jitter_rng.next_u64() % 41;
             let bytes = (u128::from(cli.small_size) * u128::from(percent) + 50) / 100;
             let size = u64::try_from(bytes).unwrap_or(u64::MAX);
             let path = small_dir.join(format!("file-{i:06}.bin"));
-            write_random_file(&path, size, seed ^ i, None)?;
+            write_random_file(&path, size, seed ^ i, None, buffer)?;
             small_pb.inc(1);
             Ok(())
-        })?;
+        },
+    )?;
     small_pb.finish_and_clear();
 
     println!(
@@ -266,17 +282,24 @@ fn main() -> Result<()> {
         cli.large_files,
         format_size(cli.large_size)
     );
-    (0..cli.large_files)
-        .into_par_iter()
-        .try_for_each(|i| -> Result<()> {
+    (0..cli.large_files).into_par_iter().try_for_each_init(
+        write_buffer,
+        |buffer, i| -> Result<()> {
             let path = large_dir.join(format!("large-{i:03}.bin"));
             let pb = mp.add(ProgressBar::new(cli.large_size));
             pb.set_style(bytes_style());
             pb.set_message(format!("large-{i:03}.bin"));
-            write_random_file(&path, cli.large_size, seed ^ i ^ 0xDEAD_BEEF_u64, Some(&pb))?;
+            write_random_file(
+                &path,
+                cli.large_size,
+                seed ^ i ^ 0xDEAD_BEEF_u64,
+                Some(&pb),
+                buffer,
+            )?;
             pb.finish_and_clear();
             Ok(())
-        })?;
+        },
+    )?;
 
     println!("🔧 git init …");
     let status = std::process::Command::new("git")
@@ -333,6 +356,20 @@ mod tests {
     }
 
     #[test]
+    fn integer_sizes_preserve_precision_and_check_unit_multiplication() {
+        assert_eq!(
+            parse_size("9007199254740993").unwrap(),
+            9_007_199_254_740_993
+        );
+        assert_eq!(parse_size("18446744073709551615 B").unwrap(), u64::MAX);
+        assert_eq!(
+            parse_size("17592186044415 MiB").unwrap(),
+            17_592_186_044_415 * 1024 * 1024
+        );
+        assert!(parse_size("17592186044416 MiB").is_err());
+    }
+
+    #[test]
     fn parse_size_rejects_unknown_suffix() {
         assert!(parse_size("4XB").is_err());
     }
@@ -368,18 +405,19 @@ mod tests {
     #[test]
     fn write_random_file_produces_deterministic_distinct_content() {
         let tmp = tempfile::tempdir().unwrap();
+        let mut buffer = write_buffer();
         let a = tmp.path().join("a.bin");
         let b = tmp.path().join("b.bin");
-        write_random_file(&a, 10_000, 1, None).unwrap();
-        write_random_file(&b, 10_000, 2, None).unwrap();
+        write_random_file(&a, 65_537, 1, None, &mut buffer).unwrap();
+        write_random_file(&b, 65_537, 2, None, &mut buffer).unwrap();
         let content_a = std::fs::read(&a).unwrap();
         let content_b = std::fs::read(&b).unwrap();
-        assert_eq!(content_a.len(), 10_000);
+        assert_eq!(content_a.len(), 65_537);
         assert_ne!(content_a, content_b, "distinct seeds must not collide");
 
         // same seed => same bytes (reproducible benchmark content)
         let a2 = tmp.path().join("a2.bin");
-        write_random_file(&a2, 10_000, 1, None).unwrap();
+        write_random_file(&a2, 65_537, 1, None, &mut buffer).unwrap();
         assert_eq!(content_a, std::fs::read(&a2).unwrap());
     }
 }

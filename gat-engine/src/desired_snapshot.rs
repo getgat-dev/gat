@@ -13,16 +13,9 @@
 //! read inside one [`gat_io::RepoLock`] acquisition, so they always
 //! describe the same `gat.lock` generation.
 //!
-//! Constructs no `Selection` or glob errors of its own:
-//! [`DesiredView::visit_entries`]/[`DesiredSnapshot::with_store`] are
-//! generic closure plumbing over [`StateStore`]'s already-typed
-//! `SQLite` errors, independent of whichever
-//! `Selection`/`GlobFilter` the caller applied to narrow `query` before
-//! calling in. [`DesiredSnapshot::with_store`] returns the caller's
-//! closure result typed directly as `StateStoreError` (it is only used
-//! from test code, which never needs to widen it into a command's own
-//! error enum); production callers should prefer [`DesiredSnapshot::view`]
-//! instead.
+//! [`DesiredView::visit_entries`] streams semantic entries through the caller's
+//! typed error surface. Storage errors become [`crate::RepositoryStateError`];
+//! callback errors retain their original type.
 
 use crate::repository::Repository as Repo;
 use gat_core::lock::Entry;
@@ -47,10 +40,8 @@ impl DesiredSnapshot {
 
     /// A narrow, read-only [`DesiredView`] over this snapshot's store:
     /// selection/reconciliation callers that only
-    /// legitimately need to visit current desired rows should go through
-    /// this rather than [`Self::with_store`], which still hands out the
-    /// full `StateStore` (including its materialized-ledger/write
-    /// API) to any caller that happens to close over it.
+    /// legitimately need to visit current desired rows use this capability.
+    /// It does not expose the state store's materialized-ledger or write APIs.
     pub(crate) const fn view(&self) -> DesiredView<'_> {
         DesiredView { store: &self.store }
     }
@@ -144,7 +135,7 @@ pub(crate) fn visit_current_desired_entries(
 mod tests {
     use super::*;
 
-    /// [`DesiredView::visit_rows`] must
+    /// [`DesiredView::visit_entries`] must
     /// observe the same rows a direct [`StateStore::with_desired_rows`]
     /// call would, proving the narrower view is not silently missing rows.
     #[test]

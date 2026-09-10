@@ -34,7 +34,9 @@ literals are not API references. Cargo supplies dependency metadata, including
 renamed, target-specific, optional, and build dependencies; dev-dependencies are
 handled separately. Every package must declare the same MSRV as the application.
 
-Hygiene checks operations, not every URL/path-shaped string. Parser test data
+Hygiene checks operations, not every URL/path-shaped string. Filesystem calls
+check path arguments (including both paths for copy/rename/hard-link), not
+write payloads. Parser test data
 needs no waiver. Direct filesystem, remote-opening, or bind calls with literal
 shared paths or fixed endpoints are checked; IPv4/IPv6 loopback port zero is
 allowed. Wildcard and public bind addresses are rejected, even at port zero.

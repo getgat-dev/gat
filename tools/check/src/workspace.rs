@@ -1,6 +1,6 @@
 use crate::{Finding, Result};
 use serde_json::Value;
-use std::{path::Path, process::Command};
+use std::{collections::BTreeSet, path::Path, process::Command};
 
 pub fn check(root: &Path, findings: &mut Vec<Finding>) -> Result<()> {
     let output = Command::new("cargo")
@@ -29,7 +29,14 @@ fn inspect(metadata: &Value, findings: &mut Vec<Finding>) -> Result<()> {
     let root_msrv = packages
         .iter()
         .find(|package| package["name"] == "gat")
-        .and_then(|package| package["rust_version"].as_str());
+        .and_then(|package| package["rust_version"].as_str())
+        .ok_or(
+            "application package must declare rust-version before workspace MSRV can be checked",
+        )?;
+    let package_names = packages
+        .iter()
+        .map(|package| package["name"].as_str().ok_or("package has no name"))
+        .collect::<std::result::Result<BTreeSet<_>, _>>()?;
     for package in packages {
         let name = package["name"].as_str().ok_or("package has no name")?;
         let allowed: Option<&[&str]> = match name {
@@ -64,12 +71,10 @@ fn inspect(metadata: &Value, findings: &mut Vec<Finding>) -> Result<()> {
                 "developer tools must not be default workspace members".into(),
             );
         }
-        if let Some(msrv) = root_msrv
-            && package["rust_version"].as_str() != Some(msrv)
-        {
+        if package["rust_version"].as_str() != Some(root_msrv) {
             report(
                 "workspace/msrv",
-                format!("declare rust-version = {msrv:?} to match the application MSRV"),
+                format!("declare rust-version = {root_msrv:?} to match the application MSRV"),
             );
         }
         for dependency in package["dependencies"]
@@ -82,7 +87,7 @@ fn inspect(metadata: &Value, findings: &mut Vec<Finding>) -> Result<()> {
             let dependency_name = dependency["name"]
                 .as_str()
                 .ok_or("dependency has no name")?;
-            let internal = packages.iter().any(|p| p["name"] == dependency_name);
+            let internal = package_names.contains(dependency_name);
             if internal && allowed.is_some_and(|allowed| !allowed.contains(&dependency_name)) {
                 report(
                     "workspace/direction",
@@ -104,6 +109,17 @@ fn inspect(metadata: &Value, findings: &mut Vec<Finding>) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn missing_application_msrv_cannot_silently_disable_policy() {
+        for packages in [
+            json!([]),
+            json!([{"name":"gat", "id":"app", "dependencies":[]}]),
+        ] {
+            let metadata = json!({"workspace_default_members": [], "packages":packages});
+            assert!(inspect(&metadata, &mut Vec::new()).is_err());
+        }
+    }
 
     #[test]
     fn workspace_packages_share_the_declared_application_msrv() {
@@ -132,8 +148,8 @@ mod tests {
         let metadata = json!({
             "workspace_default_members": ["checker"],
             "packages": [
-                {"name":"gat-check", "id":"checker", "dependencies":[]},
-                {"name":"gat", "id":"app", "dependencies":[
+                {"name":"gat-check", "id":"checker", "rust_version":"1.91", "dependencies":[]},
+                {"name":"gat", "id":"app", "rust_version":"1.91", "dependencies":[
                     {"name":"external", "kind":null, "optional":true}
                 ]}
             ]
@@ -156,10 +172,11 @@ mod tests {
             let metadata = json!({
                 "workspace_default_members": [],
                 "packages": [
-                    {"name":"gat-core", "id":"core", "dependencies":[
+                    {"name":"gat", "id":"app", "rust_version":"1.91", "dependencies":[]},
+                    {"name":"gat-core", "id":"core", "rust_version":"1.91", "dependencies":[
                         {"name":"gat-io", "rename":"storage", "kind":kind, "target":"cfg(windows)", "optional":false}
                     ]},
-                    {"name":"gat-io", "id":"io", "dependencies":[]}
+                    {"name":"gat-io", "id":"io", "rust_version":"1.91", "dependencies":[]}
                 ]
             });
             let mut findings = Vec::new();
