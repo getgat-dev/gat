@@ -1,7 +1,13 @@
 //! Durable rendering of completed command outcomes to borrowed writers.
-//! This module owns wording, styling, and stream ordering; the process adapter
-//! owns destinations, color policy, and write-failure exit codes.
+//! This module authors command wording, report structure, and stream ordering.
+//! Shared list mechanics live in `list`; styling lives in `terminal`. The process
+//! adapter owns destinations, color policy, and write-failure exit codes.
 
+use super::layout::DetailMode;
+use super::list::{
+    begin_row_section, render_projected_rows, render_rows, render_selected_items,
+    render_selected_rows,
+};
 use crate::app::Outcome;
 use crate::output::rows;
 use crate::output::rows::RowDetail;
@@ -33,7 +39,7 @@ fn render_message(output: &mut Output<'_>, message: &rows::Message) -> Result<()
 /// steady states, not something the user needs to act on.
 fn render_git_integration_step(
     output: &mut Output<'_>,
-    label: &str,
+    label: &'static str,
     outcome: gat_command::InitGitIntegrationOutcome,
 ) -> Result<(), WriteFailure> {
     let (prefix, suffix) = match outcome {
@@ -46,7 +52,7 @@ fn render_git_integration_step(
         output,
         &UserLine::compose([
             UserLine::authored(prefix),
-            UserLine::identifier(label),
+            UserLine::authored(label),
             UserLine::authored(suffix),
         ]),
     )
@@ -131,12 +137,18 @@ fn render_config_values(
     source: gat_command::ConfigSource,
 ) -> Result<(), WriteFailure> {
     resource_heading(output, "Config", UserLine::authored(key.as_str()))?;
-    output.stdout(format_args!(""))?;
+    ui::section(output, Stream::Stdout)?;
     if values.is_empty() {
-        output.stdout(format_args!("  (empty)"))?;
+        ui::paragraph(
+            output,
+            Stream::Stdout,
+            &UserLine::authored("(empty)"),
+            2,
+            ui::Emphasis::Normal,
+        )?;
     } else {
         for value in values {
-            output.stdout(format_args!("  {value}"))?;
+            ui::paragraph(output, Stream::Stdout, value, 2, ui::Emphasis::Normal)?;
         }
     }
     let source = match source {
@@ -147,7 +159,7 @@ fn render_config_values(
         }
     };
     let metadata = UserLine::compose([UserLine::authored("Source: "), source]);
-    output.stdout(format_args!("  {}", ui::dim(metadata.as_str())))
+    ui::paragraph(output, Stream::Stdout, &metadata, 2, ui::Emphasis::Muted)
 }
 
 fn resource_heading(
@@ -155,10 +167,7 @@ fn resource_heading(
     label: &'static str,
     value: UserLine,
 ) -> Result<(), WriteFailure> {
-    output.stdout(format_args!(
-        "{}",
-        ui::success_heading(&UserLine::authored(label), &value)
-    ))
+    ui::success_heading(output, Stream::Stdout, &UserLine::authored(label), &value)
 }
 
 fn resource_details(
@@ -174,22 +183,23 @@ fn resource_details(
     for (label, scope) in [("Chosen in: ", chosen_in), ("Defined in: ", defined_in)] {
         if let Some(scope) = scope {
             if !scopes.is_empty() {
-                scopes.push(UserLine::authored("  ·  "));
+                scopes.push(UserLine::authored(" · "));
             }
             scopes.extend([UserLine::authored(label), scope_line(scope)]);
         }
     }
     if !scopes.is_empty() {
-        output.stdout(format_args!(
-            "  {}",
-            ui::dim(UserLine::compose(scopes).as_str())
-        ))?;
+        ui::paragraph(
+            output,
+            Stream::Stdout,
+            &UserLine::compose(scopes),
+            2,
+            ui::Emphasis::Muted,
+        )?;
     }
     if !fields.is_empty() {
-        output.stdout(format_args!(""))?;
-        for line in ui::fields(fields) {
-            output.stdout(format_args!("{line}"))?;
-        }
+        ui::section(output, Stream::Stdout)?;
+        ui::fields(output, Stream::Stdout, fields)?;
     }
     Ok(())
 }
@@ -198,7 +208,7 @@ fn resource_list(
     output: &mut Output<'_>,
     label: &'static str,
     configured: usize,
-    empty_hint: &'static str,
+    empty_command: &'static str,
     rows: &[rows::ListRow],
 ) -> Result<(), WriteFailure> {
     resource_heading(
@@ -211,15 +221,20 @@ fn resource_list(
         },
     )?;
     if !rows.is_empty() {
-        output.stdout(format_args!(""))?;
+        ui::section(output, Stream::Stdout)?;
         render_rows(output, rows, Stream::Stdout)?;
     }
     if configured == 0 {
-        output.stdout(format_args!(""))?;
-        output.stdout(format_args!(
-            "{}",
-            ui::list_hint(&UserLine::authored(empty_hint))
-        ))?;
+        ui::section(output, Stream::Stdout)?;
+        ui::list_hint(
+            output,
+            Stream::Stdout,
+            &UserLine::compose([
+                UserLine::authored("Run `"),
+                UserLine::authored(empty_command).unbroken(),
+                UserLine::authored("`"),
+            ]),
+        )?;
     }
     Ok(())
 }
@@ -305,7 +320,7 @@ fn render_saved_selection(
                 output,
                 "Selections",
                 records.len(),
-                "Run `gat selection add <name>`",
+                "gat selection add <name>",
                 &rows,
             )?;
         }
@@ -493,7 +508,7 @@ fn with_mount_metadata(metadata: UserLine, mount: Option<&gat_core::name::MountN
 }
 
 /// Authors the CLI-facing label/wording for one `gat status` row, keeping
-/// "new, cached"/"missing from cache; run `gat fetch`" prose in root
+/// "new, cached"/"uncached" wording in root
 /// presentation rather than the command crate that only computes the typed
 /// change and cache presence.
 fn status_row_to_list_row(row: &gat_command::StatusRow) -> rows::ListRow {
@@ -519,7 +534,7 @@ fn status_row_to_list_row(row: &gat_command::StatusRow) -> rows::ListRow {
         .expect("a non-removed row has an oid to check the cache for")
     {
         gat_command::CachePresence::Present => "cached",
-        gat_command::CachePresence::Missing => "missing from cache; run `gat fetch`",
+        gat_command::CachePresence::Missing => "uncached",
     };
     rows::ListRow::with_metadata(
         status,
@@ -537,41 +552,7 @@ fn render_hints(
     hints: &[UserLine],
     stream: Stream,
 ) -> Result<(), WriteFailure> {
-    if !hints.is_empty() {
-        match stream {
-            Stream::Stdout => output.stdout(format_args!(""))?,
-            Stream::Stderr => output.stderr(format_args!(""))?,
-        }
-    }
-    for hint in hints {
-        let line = ui::list_hint(hint);
-        match stream {
-            Stream::Stdout => output.stdout(format_args!("{line}"))?,
-            Stream::Stderr => output.stderr(format_args!("{line}"))?,
-        }
-    }
-    Ok(())
-}
-
-fn render_rows(
-    output: &mut Output<'_>,
-    rows: &[rows::ListRow],
-    stream: Stream,
-) -> Result<(), WriteFailure> {
-    let items = rows.iter().map(|row| {
-        let status = row.status();
-        match row.metadata() {
-            Some(detail) => ui::ListItem::with_metadata(status, row.path(), detail),
-            None => ui::ListItem::new(status, row.path()),
-        }
-    });
-    for line in ui::list_items(items) {
-        match stream {
-            Stream::Stdout => output.stdout(format_args!("{line}"))?,
-            Stream::Stderr => output.stderr(format_args!("{line}"))?,
-        }
-    }
-    Ok(())
+    ui::hints(output, stream, hints)
 }
 
 fn render_system(
@@ -586,31 +567,52 @@ fn render_system(
         SystemStatus::Warning => ui::Status::Warning,
         SystemStatus::Error => ui::Status::Error,
     };
-    output.stdout(format_args!(
-        "{}",
-        ui::status_heading(status_of(outcome.status), &outcome.title, &outcome.summary)
-    ))?;
+    ui::status_heading(
+        output,
+        Stream::Stdout,
+        status_of(outcome.status),
+        &outcome.title,
+        &outcome.summary,
+    )?;
+    let layout = output.layout(Stream::Stdout);
+    let mut budget = layout.budget(outcome.groups.iter().map(|group| group.rows.len()).sum());
     for group in &outcome.groups {
-        output.stdout(format_args!(""))?;
-        output.stdout(format_args!(
-            "{}",
-            ui::status_group(status_of(group.status), &group.title)
-        ))?;
-        let items = group.rows.iter().map(|row| match &row.detail {
-            Some(detail) => {
-                ui::ListItem::with_metadata(status_of(row.status), &row.label, detail.line())
-            }
-            None => ui::ListItem::new(status_of(row.status), &row.label),
+        ui::section(output, Stream::Stdout)?;
+        ui::status_group(
+            output,
+            Stream::Stdout,
+            status_of(group.status()),
+            &group.title,
+        )?;
+        let items = group.rows.iter().map(|row| {
+            ui::ListItem::with_metadata(
+                status_of(row.status),
+                &row.label,
+                row.metadata(layout.detail_mode()),
+            )
         });
-        for line in ui::list_items(items) {
-            output.stdout(format_args!("{line}"))?;
+        let selection = budget.take(group.rows.len());
+        begin_row_section(output, Stream::Stdout, &selection)?;
+        render_selected_items(output, items, Stream::Stdout, selection)?;
+        let mut explanations = group.explanations().peekable();
+        if explanations.peek().is_some() {
+            ui::section(output, Stream::Stdout)?;
+        }
+        for explanation in explanations {
+            ui::paragraph(
+                output,
+                Stream::Stdout,
+                &explanation,
+                2,
+                ui::Emphasis::Normal,
+            )?;
         }
         render_hints(output, &group.hints, Stream::Stdout)?;
     }
     if !outcome.footer.is_empty() {
-        output.stdout(format_args!(""))?;
+        ui::section(output, Stream::Stdout)?;
         for line in &outcome.footer {
-            output.stdout(format_args!("{line}"))?;
+            ui::paragraph(output, Stream::Stdout, line, 0, ui::Emphasis::Normal)?;
         }
     }
     Ok(())
@@ -622,9 +624,11 @@ fn push_skip_row(skip: &gat_command::PushSkip) -> Option<rows::ListRow> {
         gat_command::PushSkipReason::CacheMissing => RowDetail::authored(
             "not in cache; run `gat add` or `gat fetch` (fetch the selected history first for \
              a historical object)",
-        ),
+        )
+        .with_annotation("uncached"),
         gat_command::PushSkipReason::CacheCorrupt => {
             RowDetail::authored("cached object corrupt; re-add or re-fetch it before pushing")
+                .with_annotation("corrupt")
         }
     };
     Some(rows::ListRow::with_metadata(
@@ -634,79 +638,106 @@ fn push_skip_row(skip: &gat_command::PushSkip) -> Option<rows::ListRow> {
     ))
 }
 
-fn missing_rows(outcome: &gat_engine::SyncOutcome) -> Vec<rows::ListRow> {
-    outcome
-        .missing
-        .iter()
-        .map(|(path, oid)| {
-            rows::ListRow::with_metadata(
-                rows::ListStatus::Conflict,
-                UserLine::gat_path(path),
-                RowDetail::message(UserLine::compose([
-                    UserLine::authored("object "),
-                    UserLine::oid_value(oid),
-                    UserLine::authored(
-                        " missing from cache; run `gat fetch`/`gat pull`, or configure a remote",
-                    ),
-                ])),
-            )
-        })
-        .collect()
+fn missing_rows(
+    outcome: &gat_engine::SyncOutcome,
+) -> impl ExactSizeIterator<Item = rows::ListRow> + '_ {
+    outcome.missing.iter().map(|(path, oid)| {
+        rows::ListRow::with_metadata(
+            rows::ListStatus::Conflict,
+            UserLine::gat_path(path),
+            RowDetail::message(UserLine::compose([
+                UserLine::authored("object "),
+                UserLine::oid_value(oid),
+                UserLine::authored(" missing from cache; run "),
+                UserLine::authored("`gat fetch`").unbroken(),
+                UserLine::authored(" or "),
+                UserLine::authored("`gat pull`").unbroken(),
+                UserLine::authored(", or configure a remote"),
+            ]))
+            .with_annotation("uncached"),
+        )
+    })
 }
 
-fn conflict_rows(outcome: &gat_engine::SyncOutcome) -> Vec<rows::ListRow> {
-    outcome
-        .conflicts
-        .iter()
-        .map(|path| {
-            rows::ListRow::with_metadata(
-                rows::ListStatus::Conflict,
-                UserLine::gat_path(path),
-                RowDetail::authored(
-                    "locally modified; left untouched (use `gat sync --force` to overwrite)",
-                ),
+fn conflict_rows(
+    outcome: &gat_engine::SyncOutcome,
+) -> impl ExactSizeIterator<Item = rows::ListRow> + '_ {
+    outcome.conflicts.iter().map(|path| {
+        rows::ListRow::with_metadata(
+            rows::ListStatus::Conflict,
+            UserLine::gat_path(path),
+            RowDetail::authored(
+                "locally modified; left untouched (use `gat sync --force` to overwrite)",
             )
-        })
-        .collect()
+            .with_annotation("conflict"),
+        )
+    })
 }
 
-fn corrupted_rows(outcome: &gat_engine::SyncOutcome) -> Vec<rows::ListRow> {
-    outcome
-        .corrupted
-        .iter()
-        .map(|(path, oid)| {
-            rows::ListRow::with_metadata(
-                rows::ListStatus::Conflict,
-                UserLine::gat_path(path),
-                RowDetail::message(UserLine::compose([
-                    UserLine::authored("cache object "),
-                    UserLine::oid_value(oid),
-                    UserLine::authored(
-                        " is corrupted; run `gat sync --repair` to re-fetch it from a remote",
-                    ),
-                ])),
-            )
-        })
-        .collect()
+fn corrupted_rows(
+    outcome: &gat_engine::SyncOutcome,
+) -> impl ExactSizeIterator<Item = rows::ListRow> + '_ {
+    outcome.corrupted.iter().map(|(path, oid)| {
+        rows::ListRow::with_metadata(
+            rows::ListStatus::Conflict,
+            UserLine::gat_path(path),
+            RowDetail::message(UserLine::compose([
+                UserLine::authored("cache object "),
+                UserLine::oid_value(oid),
+                UserLine::authored(" is corrupted; run "),
+                UserLine::authored("`gat sync --repair`").unbroken(),
+                UserLine::authored(" to re-fetch it from a remote"),
+            ]))
+            .with_annotation("corrupt"),
+        )
+    })
 }
 
-fn repair_failure_rows(repair_failures: &[gat_command::RepairFailure]) -> Vec<rows::ListRow> {
-    repair_failures
-        .iter()
-        .map(|failure| {
-            let problem = crate::error::map::problem::repair_problem(failure.error.clone());
-            let prefix = UserLine::compose([
-                UserLine::authored("repair of object "),
-                UserLine::oid_value(&failure.oid),
-                UserLine::authored(" failed: "),
-            ]);
-            rows::ListRow::with_metadata(
-                rows::ListStatus::Conflict,
-                UserLine::gat_path(&failure.path),
-                RowDetail::composed(prefix, problem, ""),
-            )
-        })
-        .collect()
+fn repair_failure_rows(
+    repair_failures: &[gat_command::RepairFailure],
+) -> impl ExactSizeIterator<Item = rows::ListRow> + '_ {
+    repair_failures.iter().map(|failure| {
+        let problem = crate::error::map::problem::repair_problem(failure.error.clone());
+        let prefix = UserLine::compose([
+            UserLine::authored("repair of object "),
+            UserLine::oid_value(&failure.oid),
+            UserLine::authored(" failed: "),
+        ]);
+        rows::ListRow::with_metadata(
+            rows::ListStatus::Conflict,
+            UserLine::gat_path(&failure.path),
+            RowDetail::composed(prefix, problem, "").with_annotation("repair failed"),
+        )
+    })
+}
+
+/// Retain headings for omitted groups, but only separate a row block when it
+/// contains visible rows or the report's omission marker.
+fn render_sync_group(
+    output: &mut Output<'_>,
+    label: &'static str,
+    rows: impl ExactSizeIterator<Item = rows::ListRow>,
+    budget: &mut super::layout::RowBudget,
+    preceding_output: &mut bool,
+) -> Result<(), WriteFailure> {
+    let total = rows.len();
+    if total == 0 {
+        return Ok(());
+    }
+    if *preceding_output {
+        ui::section(output, Stream::Stderr)?;
+    }
+    ui::caution_heading(
+        output,
+        Stream::Stderr,
+        &UserLine::authored(label),
+        &UserLine::number(total as i64),
+    )?;
+    let selection = budget.take(total);
+    begin_row_section(output, Stream::Stderr, &selection)?;
+    render_selected_rows(output, rows, Stream::Stderr, selection)?;
+    *preceding_output = true;
+    Ok(())
 }
 
 fn render_sync(
@@ -715,9 +746,21 @@ fn render_sync(
 ) -> Result<(), WriteFailure> {
     let sync = &outcome.outcome;
     let repair_failures = repair_failure_rows(&outcome.repair_failures);
-    render_rows(output, &repair_failures, Stream::Stderr)?;
+    let mut budget = output.layout(Stream::Stderr).budget(
+        repair_failures.len() + sync.missing.len() + sync.conflicts.len() + sync.corrupted.len(),
+    );
+    let repair_count = repair_failures.len();
+    render_selected_rows(
+        output,
+        repair_failures,
+        Stream::Stderr,
+        budget.take(repair_count),
+    )?;
 
     if let Some(levels) = outcome.reshaped {
+        if repair_count > 0 {
+            ui::section(output, Stream::Stderr)?;
+        }
         let levels = levels.get();
         let shape = if levels == 0 {
             UserLine::authored("a flat gat.lock file")
@@ -738,31 +781,60 @@ fn render_sync(
         )?;
     }
 
-    let mut preceding_output = !repair_failures.is_empty() || outcome.reshaped.is_some();
-    for (label, rows) in [
-        ("Missing objects", missing_rows(sync)),
-        ("Conflicts", conflict_rows(sync)),
-        ("Corrupted objects", corrupted_rows(sync)),
-    ] {
-        if rows.is_empty() {
-            continue;
-        }
-        if preceding_output {
-            output.stderr(format_args!(""))?;
-        }
-        output.stderr(format_args!(
-            "{}",
-            ui::caution_heading(
-                &UserLine::authored(label),
-                &UserLine::number(rows.len() as i64)
-            )
-        ))?;
-        output.stderr(format_args!(""))?;
-        render_rows(output, &rows, Stream::Stderr)?;
-        preceding_output = true;
+    let mut preceding_output = repair_count > 0 || outcome.reshaped.is_some();
+    render_sync_group(
+        output,
+        "Missing objects",
+        missing_rows(sync),
+        &mut budget,
+        &mut preceding_output,
+    )?;
+    render_sync_group(
+        output,
+        "Conflicts",
+        conflict_rows(sync),
+        &mut budget,
+        &mut preceding_output,
+    )?;
+    render_sync_group(
+        output,
+        "Corrupted objects",
+        corrupted_rows(sync),
+        &mut budget,
+        &mut preceding_output,
+    )?;
+    let mut hints = Vec::new();
+    if !sync.missing.is_empty() {
+        hints.push(UserLine::compose([
+            UserLine::authored("Run "),
+            UserLine::authored("`gat fetch`").unbroken(),
+            UserLine::authored(" or "),
+            UserLine::authored("`gat pull`").unbroken(),
+            UserLine::authored(" to retrieve missing objects, or configure a remote."),
+        ]));
     }
-    if !sync.missing.is_empty() || !sync.conflicts.is_empty() || !sync.corrupted.is_empty() {
-        output.stderr(format_args!(""))?;
+    if !sync.conflicts.is_empty() {
+        hints.push(UserLine::compose([
+            UserLine::authored("Locally modified files were left untouched. Use "),
+            UserLine::authored("`gat sync --force`").unbroken(),
+            UserLine::authored(" to overwrite them."),
+        ]));
+    }
+    if !sync.corrupted.is_empty() {
+        hints.push(UserLine::compose([
+            UserLine::authored("Run "),
+            UserLine::authored("`gat sync --repair`").unbroken(),
+            UserLine::authored(" to re-fetch corrupted objects from a remote."),
+        ]));
+    }
+    if repair_count > 0 && output.layout(Stream::Stderr).detail_mode() == DetailMode::Compact {
+        hints.push(UserLine::authored(
+            "Use --full-output to inspect individual repair failures.",
+        ));
+    }
+    render_hints(output, &hints, Stream::Stderr)?;
+    if preceding_output {
+        ui::section(output, Stream::Stderr)?;
     }
 
     let mut parts: Vec<UserLine> = [
@@ -835,9 +907,13 @@ fn render_sync(
 fn selection_scope_note(scope: gat_command::SelectionScope) -> Option<UserLine> {
     match scope {
         gat_command::SelectionScope::Unrestricted => None,
-        gat_command::SelectionScope::Configured => Some(UserLine::authored(
-            "Configured path selection applied; other paths were not checked. Use --path . to select the whole repository.",
-        )),
+        gat_command::SelectionScope::Configured => Some(UserLine::compose([
+            UserLine::authored(
+                "Configured path selection applied; other paths were not checked. Use ",
+            ),
+            UserLine::authored("--path .").unbroken(),
+            UserLine::authored(" to select the whole repository."),
+        ])),
         gat_command::SelectionScope::Explicit => Some(UserLine::authored(
             "Results cover selected paths only; other paths were not checked.",
         )),
@@ -891,20 +967,23 @@ pub fn render(output: &mut Output<'_>, outcome: Outcome) -> Result<(), WriteFail
             )?;
             match &outcome.hooks {
                 gat_command::InitHooksOutcome::Installed(installed) => {
-                    let installed = installed
-                        .iter()
-                        .map(|hook| hook.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ");
+                    let installed = UserLine::join(
+                        installed
+                            .iter()
+                            .map(|hook| UserLine::identifier(hook.as_str())),
+                        ", ",
+                    );
                     render_message(
                         output,
                         &rows::Message::new(
                             rows::MessageKind::Success,
                             UserLine::compose([
                                 UserLine::authored("Installed Git hooks: "),
-                                UserLine::identifier(&installed),
+                                installed,
+                                UserLine::authored(". "),
+                                UserLine::authored("`gat sync`").unbroken(),
                                 UserLine::authored(
-                                    ". `gat sync` now runs automatically after checkout, merge/pull, and rebase/amend.",
+                                    " now runs automatically after checkout, merge/pull, and rebase/amend.",
                                 ),
                             ]),
                         ),
@@ -920,18 +999,19 @@ pub fn render(output: &mut Output<'_>, outcome: Outcome) -> Result<(), WriteFail
                     )?;
                 }
                 gat_command::InitHooksOutcome::Removed(removed) => {
-                    let removed = removed
-                        .iter()
-                        .map(|hook| hook.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ");
+                    let removed = UserLine::join(
+                        removed
+                            .iter()
+                            .map(|hook| UserLine::identifier(hook.as_str())),
+                        ", ",
+                    );
                     render_message(
                         output,
                         &rows::Message::new(
                             rows::MessageKind::Success,
                             UserLine::compose([
                                 UserLine::authored("Removed Git hooks: "),
-                                UserLine::identifier(&removed),
+                                removed,
                                 UserLine::authored("."),
                             ]),
                         ),
@@ -976,73 +1056,66 @@ pub fn render(output: &mut Output<'_>, outcome: Outcome) -> Result<(), WriteFail
             }
             render_message(
                 output,
-                &rows::Message::authored(
-                    rows::MessageKind::Action,
-                    "Next: `gat add <path>` then `gat remote add origin s3://bucket/prefix`.",
-                ),
+                &rows::Message::new(rows::MessageKind::Action, initialization_guidance()),
             )?;
         }
         Outcome::Added(outcome) => {
-            output.stdout(format_args!(
-                "{}",
-                ui::success_heading(
-                    &UserLine::authored("Added"),
-                    &count_line(outcome.added_count as i64, " file(s)")
-                )
-            ))?;
-            let rows: Vec<rows::ListRow> = outcome
+            ui::success_heading(
+                output,
+                Stream::Stdout,
+                &UserLine::authored("Added"),
+                &count_line(outcome.added_count as i64, " file(s)"),
+            )?;
+            let mut eligible = outcome
                 .rows
                 .iter()
                 .filter(|row| row.file_count != Some(0))
-                .map(|row| {
-                    let path = match &row.path {
-                        gat_core::path_scope::PathScope::Root => UserLine::authored("."),
-                        gat_core::path_scope::PathScope::Path(path) => UserLine::gat_path(path),
-                    };
-                    match row.file_count {
-                        Some(count) => rows::ListRow::with_metadata(
-                            rows::ListStatus::Added,
-                            path,
-                            RowDetail::message(count_line(count as i64, " file(s)")),
-                        ),
-                        None => rows::ListRow::new(rows::ListStatus::Added, path),
-                    }
-                })
-                .collect();
-            if !rows.is_empty() {
-                output.stdout(format_args!(""))?;
-                render_rows(output, &rows, Stream::Stdout)?;
+                .peekable();
+            if eligible.peek().is_some() {
+                ui::section(output, Stream::Stdout)?;
             }
+            render_projected_rows(output, eligible, Stream::Stdout, |row| {
+                let path = match &row.path {
+                    gat_core::path_scope::PathScope::Root => UserLine::authored("."),
+                    gat_core::path_scope::PathScope::Path(path) => UserLine::gat_path(path),
+                };
+                match row.file_count {
+                    Some(count) => rows::ListRow::with_metadata(
+                        rows::ListStatus::Added,
+                        path,
+                        RowDetail::message(count_line(count as i64, " file(s)")),
+                    ),
+                    None => rows::ListRow::new(rows::ListStatus::Added, path),
+                }
+            })?;
             let hints = add_hints(outcome);
             render_hints(output, &hints, Stream::Stdout)?;
-            output.stdout(format_args!(""))?;
-            output.stdout(format_args!(
-                "{}",
-                ui::list_footer(&count_line(outcome.added_count as i64, " file(s)"))
-            ))?;
+            ui::section(output, Stream::Stdout)?;
+            ui::list_footer(
+                output,
+                Stream::Stdout,
+                &count_line(outcome.added_count as i64, " file(s)"),
+            )?;
         }
         Outcome::Removed(outcome) => {
-            let rows: Vec<rows::ListRow> = outcome
-                .paths
-                .iter()
-                .map(|path| rows::ListRow::new(rows::ListStatus::Deleted, UserLine::gat_path(path)))
-                .collect();
-            output.stdout(format_args!(
-                "{}",
-                ui::success_heading(
-                    &UserLine::authored("Removed"),
-                    &count_line(rows.len() as i64, " file(s)")
-                )
-            ))?;
-            if !rows.is_empty() {
-                output.stdout(format_args!(""))?;
-                render_rows(output, &rows, Stream::Stdout)?;
+            ui::success_heading(
+                output,
+                Stream::Stdout,
+                &UserLine::authored("Removed"),
+                &count_line(outcome.paths.len() as i64, " file(s)"),
+            )?;
+            if !outcome.paths.is_empty() {
+                ui::section(output, Stream::Stdout)?;
+                render_projected_rows(output, outcome.paths.iter(), Stream::Stdout, |path| {
+                    rows::ListRow::new(rows::ListStatus::Deleted, UserLine::gat_path(path))
+                })?;
             }
-            output.stdout(format_args!(""))?;
-            output.stdout(format_args!(
-                "{}",
-                ui::list_footer(&count_line(rows.len() as i64, " file(s)"))
-            ))?;
+            ui::section(output, Stream::Stdout)?;
+            ui::list_footer(
+                output,
+                Stream::Stdout,
+                &count_line(outcome.paths.len() as i64, " file(s)"),
+            )?;
         }
         Outcome::Selection(outcome) => render_saved_selection(output, outcome)?,
         Outcome::Remote(outcome) => match outcome {
@@ -1105,7 +1178,7 @@ pub fn render(output: &mut Output<'_>, outcome: Outcome) -> Result<(), WriteFail
                     output,
                     "Remotes",
                     records.len(),
-                    "Run `gat remote add <name> <url>`",
+                    "gat remote add <name> <url>",
                     &rows,
                 )?;
             }
@@ -1180,16 +1253,21 @@ pub fn render(output: &mut Output<'_>, outcome: Outcome) -> Result<(), WriteFail
                 )?;
             }
             gat_command::ConfigOutcome::SetList { key, values } => {
-                output.stderr(format_args!(
-                    "{}",
-                    ui::success_heading(
-                        &UserLine::authored("Config updated"),
-                        &UserLine::authored(key.as_str())
-                    )
-                ))?;
-                output.stderr(format_args!(""))?;
+                ui::success_heading(
+                    output,
+                    Stream::Stderr,
+                    &UserLine::authored("Config updated"),
+                    &UserLine::authored(key.as_str()),
+                )?;
+                ui::section(output, Stream::Stderr)?;
                 for value in values {
-                    output.stderr(format_args!("  {}", UserLine::identifier(value)))?;
+                    ui::paragraph(
+                        output,
+                        Stream::Stderr,
+                        &UserLine::identifier(value),
+                        2,
+                        ui::Emphasis::Normal,
+                    )?;
                 }
             }
             gat_command::ConfigOutcome::Cleared { key } => render_message(
@@ -1214,137 +1292,137 @@ pub fn render(output: &mut Output<'_>, outcome: Outcome) -> Result<(), WriteFail
             )?,
         },
         Outcome::Status(outcome) => match outcome {
-            gat_command::StatusOutcome::NoMatchingFiles { .. } => output.stdout(format_args!(
-                "{}",
-                ui::success_heading(
-                    &UserLine::authored("Selected paths"),
-                    &UserLine::authored("no tracked files match the current selection")
-                )
-            ))?,
-            gat_command::StatusOutcome::NoTrackedFiles => output.stdout(format_args!(
-                "{}",
-                ui::success_heading(
-                    &UserLine::authored("Gat lock"),
-                    &UserLine::authored("no gat-tracked files")
-                )
-            ))?,
+            gat_command::StatusOutcome::NoMatchingFiles { .. } => ui::success_heading(
+                output,
+                Stream::Stdout,
+                &UserLine::authored("Selected paths"),
+                &UserLine::authored("no tracked files match the current selection"),
+            )?,
+            gat_command::StatusOutcome::NoTrackedFiles => ui::success_heading(
+                output,
+                Stream::Stdout,
+                &UserLine::authored("Gat lock"),
+                &UserLine::authored("no gat-tracked files"),
+            )?,
             gat_command::StatusOutcome::WorkingTree { rows, changes, .. } => {
-                let heading = if *changes > 0 {
+                if *changes > 0 {
                     ui::action_heading(
+                        output,
+                        Stream::Stdout,
                         &UserLine::authored("Gat lock"),
                         &count_line(*changes as i64, " change(s)"),
                     )
                 } else {
-                    ui::success_heading(&UserLine::authored("Gat lock"), &no_changes_summary(scope))
-                };
-                output.stdout(format_args!("{heading}"))?;
+                    ui::success_heading(
+                        output,
+                        Stream::Stdout,
+                        &UserLine::authored("Gat lock"),
+                        &no_changes_summary(scope),
+                    )
+                }?;
                 if !rows.is_empty() {
-                    output.stdout(format_args!(""))?;
+                    ui::section(output, Stream::Stdout)?;
                 }
-                let rendered: Vec<rows::ListRow> =
-                    rows.iter().map(status_row_to_list_row).collect();
-                render_rows(output, &rendered, Stream::Stdout)?;
-                render_hints(
+                render_projected_rows(output, rows.iter(), Stream::Stdout, status_row_to_list_row)?;
+                let mut hints: Vec<_> = selection_scope_note(scope).into_iter().collect();
+                if rows
+                    .iter()
+                    .any(|row| row.cache_presence == Some(gat_command::CachePresence::Missing))
+                {
+                    hints.push(UserLine::compose([
+                        UserLine::authored("Run "),
+                        UserLine::authored("`gat fetch`").unbroken(),
+                        UserLine::authored(" to retrieve missing cache objects."),
+                    ]));
+                }
+                render_hints(output, &hints, Stream::Stdout)?;
+                ui::section(output, Stream::Stdout)?;
+                ui::list_footer(
                     output,
-                    selection_scope_note(scope).as_slice(),
                     Stream::Stdout,
-                )?;
-                output.stdout(format_args!(""))?;
-                output.stdout(format_args!(
-                    "{}",
-                    ui::list_footer(&UserLine::compose([
+                    &UserLine::compose([
                         UserLine::number(*changes as i64),
                         UserLine::authored(" change(s) across "),
                         UserLine::number(rows.len() as i64),
                         UserLine::authored(" file(s)"),
-                    ]))
-                ))?;
+                    ]),
+                )?;
             }
         },
         Outcome::RemoteStatus(outcome) => {
             if outcome.missing.is_empty() {
-                output.stdout(format_args!(
-                    "{}",
-                    ui::success_heading(
-                        &UserLine::authored("Remote status"),
-                        &UserLine::compose([
-                            UserLine::authored("up to date ("),
-                            UserLine::number(outcome.checked as i64),
-                            UserLine::authored(" object(s) checked)"),
-                        ])
-                    )
-                ))?;
+                ui::success_heading(
+                    output,
+                    Stream::Stdout,
+                    &UserLine::authored("Remote status"),
+                    &UserLine::compose([
+                        UserLine::authored("up to date ("),
+                        UserLine::number(outcome.checked as i64),
+                        UserLine::authored(" object(s) checked)"),
+                    ]),
+                )?;
             } else {
-                output.stdout(format_args!(
-                    "{}",
-                    ui::action_heading(
-                        &UserLine::authored("Remote status"),
-                        &UserLine::compose([
-                            UserLine::number(outcome.missing.len() as i64),
-                            UserLine::authored(" of "),
-                            UserLine::number(outcome.checked as i64),
-                            UserLine::authored(" object(s) missing"),
-                        ])
+                ui::action_heading(
+                    output,
+                    Stream::Stdout,
+                    &UserLine::authored("Remote status"),
+                    &UserLine::compose([
+                        UserLine::number(outcome.missing.len() as i64),
+                        UserLine::authored(" of "),
+                        UserLine::number(outcome.checked as i64),
+                        UserLine::authored(" object(s) missing"),
+                    ]),
+                )?;
+                ui::section(output, Stream::Stdout)?;
+                render_projected_rows(output, outcome.missing.iter(), Stream::Stdout, |obj| {
+                    let metadata = match &obj.route {
+                        Some(route) => UserLine::compose([
+                            UserLine::oid_value(&obj.object.oid),
+                            UserLine::authored(" (remote `"),
+                            UserLine::identifier(obj.remote_name.as_str()),
+                            UserLine::authored("` via route `"),
+                            UserLine::identifier(route.as_str()),
+                            UserLine::authored("`)"),
+                        ]),
+                        None => UserLine::compose([
+                            UserLine::oid_value(&obj.object.oid),
+                            UserLine::authored(" (remote `"),
+                            UserLine::identifier(obj.remote_name.as_str()),
+                            UserLine::authored("`)"),
+                        ]),
+                    };
+                    rows::ListRow::with_metadata(
+                        rows::ListStatus::Skipped,
+                        UserLine::gat_path(&obj.object.representative_path),
+                        RowDetail::message(metadata),
                     )
-                ))?;
-                output.stdout(format_args!(""))?;
-                let rows: Vec<rows::ListRow> = outcome
-                    .missing
-                    .iter()
-                    .map(|obj| {
-                        let metadata = match &obj.route {
-                            Some(route) => UserLine::compose([
-                                UserLine::oid_value(&obj.object.oid),
-                                UserLine::authored(" (remote `"),
-                                UserLine::identifier(obj.remote_name.as_str()),
-                                UserLine::authored("` via route `"),
-                                UserLine::identifier(route.as_str()),
-                                UserLine::authored("`)"),
-                            ]),
-                            None => UserLine::compose([
-                                UserLine::oid_value(&obj.object.oid),
-                                UserLine::authored(" (remote `"),
-                                UserLine::identifier(obj.remote_name.as_str()),
-                                UserLine::authored("`)"),
-                            ]),
-                        };
-                        rows::ListRow::with_metadata(
-                            rows::ListStatus::Skipped,
-                            UserLine::gat_path(&obj.object.representative_path),
-                            RowDetail::message(metadata),
-                        )
-                    })
-                    .collect();
-                render_rows(output, &rows, Stream::Stdout)?;
+                })?;
                 render_hints(
                     output,
                     selection_scope_note(scope).as_slice(),
                     Stream::Stdout,
                 )?;
-                output.stdout(format_args!(""))?;
-                output.stdout(format_args!(
-                    "{}",
-                    ui::list_footer(&count_line(
-                        outcome.missing.len() as i64,
-                        " object(s) missing"
-                    ))
-                ))?;
+                ui::section(output, Stream::Stdout)?;
+                ui::list_footer(
+                    output,
+                    Stream::Stdout,
+                    &count_line(outcome.missing.len() as i64, " object(s) missing"),
+                )?;
             }
             render_shallow_caution(output, outcome.shallow)?;
         }
         Outcome::Diff(outcome) => match outcome {
-            DiffOutcome::NoChanges { from, to, .. } => output.stdout(format_args!(
-                "{}",
-                ui::success_heading(
-                    &UserLine::compose([
-                        UserLine::authored("Diff "),
-                        UserLine::identifier(from.as_str()),
-                        UserLine::authored(".."),
-                        UserLine::identifier(diff_target_label(to)),
-                    ]),
-                    &no_changes_summary(scope)
-                )
-            ))?,
+            DiffOutcome::NoChanges { from, to, .. } => ui::success_heading(
+                output,
+                Stream::Stdout,
+                &UserLine::compose([
+                    UserLine::authored("Diff "),
+                    UserLine::identifier(from.as_str()),
+                    UserLine::authored(".."),
+                    UserLine::identifier(diff_target_label(to)),
+                ]),
+                &no_changes_summary(scope),
+            )?,
             DiffOutcome::Changes {
                 from,
                 to,
@@ -1352,49 +1430,45 @@ pub fn render(output: &mut Output<'_>, outcome: Outcome) -> Result<(), WriteFail
                 changes,
                 ..
             } => {
-                output.stdout(format_args!(
-                    "{}",
-                    ui::action_heading(
-                        &UserLine::compose([
-                            UserLine::authored("Diff "),
-                            UserLine::identifier(from.as_str()),
-                            UserLine::authored(".."),
-                            UserLine::identifier(diff_target_label(to)),
-                        ]),
-                        &count_line(*changes as i64, " change(s)")
+                ui::action_heading(
+                    output,
+                    Stream::Stdout,
+                    &UserLine::compose([
+                        UserLine::authored("Diff "),
+                        UserLine::identifier(from.as_str()),
+                        UserLine::authored(".."),
+                        UserLine::identifier(diff_target_label(to)),
+                    ]),
+                    &count_line(*changes as i64, " change(s)"),
+                )?;
+                ui::section(output, Stream::Stdout)?;
+                render_projected_rows(output, rows.iter(), Stream::Stdout, |row| {
+                    let (status, metadata) = diff_row_metadata(&row.change);
+                    rows::ListRow::with_metadata(
+                        status,
+                        UserLine::gat_path(&row.path),
+                        RowDetail::message(with_mount_metadata(
+                            UserLine::authored(metadata),
+                            row.mount.as_ref(),
+                        )),
                     )
-                ))?;
-                output.stdout(format_args!(""))?;
-                let rendered: Vec<rows::ListRow> = rows
-                    .iter()
-                    .map(|row| {
-                        let (status, metadata) = diff_row_metadata(&row.change);
-                        rows::ListRow::with_metadata(
-                            status,
-                            UserLine::gat_path(&row.path),
-                            RowDetail::message(with_mount_metadata(
-                                UserLine::authored(metadata),
-                                row.mount.as_ref(),
-                            )),
-                        )
-                    })
-                    .collect();
-                render_rows(output, &rendered, Stream::Stdout)?;
+                })?;
                 render_hints(
                     output,
                     selection_scope_note(scope).as_slice(),
                     Stream::Stdout,
                 )?;
-                output.stdout(format_args!(""))?;
-                output.stdout(format_args!(
-                    "{}",
-                    ui::list_footer(&UserLine::compose([
+                ui::section(output, Stream::Stdout)?;
+                ui::list_footer(
+                    output,
+                    Stream::Stdout,
+                    &UserLine::compose([
                         UserLine::number(*changes as i64),
                         UserLine::authored(" change(s) across "),
                         UserLine::number(rows.len() as i64),
                         UserLine::authored(" file(s)"),
-                    ]))
-                ))?;
+                    ]),
+                )?;
             }
         },
         Outcome::ListedFiles(outcome) => {
@@ -1404,15 +1478,10 @@ pub fn render(output: &mut Output<'_>, outcome: Outcome) -> Result<(), WriteFail
                 UserLine::number(outcome.paths.len() as i64),
             )?;
             if !outcome.paths.is_empty() {
-                output.stdout(format_args!(""))?;
-                let rows: Vec<_> = outcome
-                    .paths
-                    .iter()
-                    .map(|path| {
-                        rows::ListRow::new(rows::ListStatus::Success, UserLine::gat_path(path))
-                    })
-                    .collect();
-                render_rows(output, &rows, Stream::Stdout)?;
+                ui::section(output, Stream::Stdout)?;
+                render_projected_rows(output, outcome.paths.iter(), Stream::Stdout, |path| {
+                    rows::ListRow::new(rows::ListStatus::Success, UserLine::gat_path(path))
+                })?;
             }
             let mut hints = Vec::new();
             if outcome.paths.is_empty() && scope != gat_command::SelectionScope::Unrestricted {
@@ -1422,17 +1491,21 @@ pub fn render(output: &mut Output<'_>, outcome: Outcome) -> Result<(), WriteFail
             }
             hints.extend(selection_scope_note(scope));
             render_hints(output, &hints, Stream::Stdout)?;
-            output.stdout(format_args!(""))?;
-            output.stdout(format_args!(
-                "{}",
-                ui::list_footer(&count_line(outcome.paths.len() as i64, " file(s)"))
-            ))?;
+            ui::section(output, Stream::Stdout)?;
+            ui::list_footer(
+                output,
+                Stream::Stdout,
+                &count_line(outcome.paths.len() as i64, " file(s)"),
+            )?;
         }
         Outcome::Pushed(outcome) => {
             if !outcome.skipped.is_empty() {
                 let rows: Vec<rows::ListRow> =
                     outcome.skipped.iter().filter_map(push_skip_row).collect();
                 render_rows(output, &rows, Stream::Stderr)?;
+                if !rows.is_empty() {
+                    ui::section(output, Stream::Stderr)?;
+                }
             }
             let completion =
                 UserLine::authored(if scope == gat_command::SelectionScope::Unrestricted {
@@ -1488,6 +1561,30 @@ pub fn render(output: &mut Output<'_>, outcome: Outcome) -> Result<(), WriteFail
                     ])
                 })
                 .collect();
+            if outcome
+                .skipped
+                .iter()
+                .any(|skip| matches!(skip.reason, gat_command::PushSkipReason::CacheMissing))
+            {
+                hints.push(UserLine::compose([
+                    UserLine::authored("Objects not in cache; run "),
+                    UserLine::authored("`gat add`").unbroken(),
+                    UserLine::authored(" or "),
+                    UserLine::authored("`gat fetch`").unbroken(),
+                    UserLine::authored(
+                        " (fetch the selected history first for a historical object).",
+                    ),
+                ]));
+            }
+            if outcome
+                .skipped
+                .iter()
+                .any(|skip| matches!(skip.reason, gat_command::PushSkipReason::CacheCorrupt))
+            {
+                hints.push(UserLine::authored(
+                    "Cached objects are corrupt; re-add or re-fetch them before pushing.",
+                ));
+            }
             hints.extend(selection_scope_note(scope));
             render_hints(output, &hints, Stream::Stderr)?;
             render_shallow_caution(output, outcome.shallow)?;
@@ -1605,7 +1702,7 @@ pub fn render(output: &mut Output<'_>, outcome: Outcome) -> Result<(), WriteFail
                     output,
                     "Mounts",
                     records.len(),
-                    "Run `gat mount add <name> <url> <target>`",
+                    "gat mount add <name> <url> <target>",
                     &rows,
                 )?;
             }
@@ -1705,8 +1802,12 @@ pub fn render(output: &mut Output<'_>, outcome: Outcome) -> Result<(), WriteFail
                                 UserLine::identifier(name.as_str()),
                                 UserLine::authored("` still configured at `"),
                                 UserLine::identifier(target.as_str()),
-                                UserLine::authored("`; run `gat route remove "),
-                                UserLine::identifier(name.as_str()),
+                                UserLine::authored("`; run `"),
+                                UserLine::compose([
+                                    UserLine::authored("gat route remove "),
+                                    UserLine::identifier(name.as_str()),
+                                ])
+                                .unbroken(),
                                 UserLine::authored("` to remove it separately."),
                             ]),
                         ),
@@ -1755,7 +1856,7 @@ pub fn render(output: &mut Output<'_>, outcome: Outcome) -> Result<(), WriteFail
                     output,
                     "Routes",
                     routes.len(),
-                    "Run `gat route add <name> <remote> <path>`",
+                    "gat route add <name> <remote> <path>",
                     &rows,
                 )?;
             }
@@ -1889,9 +1990,62 @@ fn add_hints(outcome: &gat_command::AddOutcome) -> Vec<UserLine> {
     hints
 }
 
+fn initialization_guidance() -> UserLine {
+    UserLine::compose([
+        UserLine::authored("Next: "),
+        UserLine::authored("`gat add <path>`").unbroken(),
+        UserLine::authored(" then "),
+        UserLine::authored("`gat remote add origin s3://bucket/prefix`").unbroken(),
+        UserLine::authored("."),
+    ])
+}
+
 #[cfg(test)]
 mod resource_hint_tests {
     use super::*;
+
+    #[test]
+    fn initialization_commands_remain_intact_at_narrow_widths() {
+        for width in [20, 40, 60] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut output = Output::new(&mut stdout, &mut stderr);
+            output.set_layouts(
+                crate::output::OutputLayout::default(),
+                crate::output::OutputLayout::bounded(width),
+            );
+            render_message(
+                &mut output,
+                &rows::Message::new(rows::MessageKind::Action, initialization_guidance()),
+            )
+            .unwrap();
+            assert!(stdout.is_empty());
+            let plain = crate::output::strip_ansi(&String::from_utf8(stderr).unwrap());
+            assert!(plain.contains("`gat add <path>`"));
+            assert!(plain.contains("`gat remote add origin s3://bucket/prefix`"));
+        }
+    }
+
+    #[test]
+    fn empty_resource_guidance_keeps_the_command_together_at_narrow_widths() {
+        let mut bytes = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut bytes, &mut stderr);
+        output.set_layouts(
+            crate::output::OutputLayout::bounded(40),
+            crate::output::OutputLayout::default(),
+        );
+        resource_list(
+            &mut output,
+            "Routes",
+            0,
+            "gat route add <name> <remote> <path>",
+            &[],
+        )
+        .unwrap();
+        let rendered = crate::output::strip_ansi(&String::from_utf8(bytes).unwrap());
+        assert!(rendered.contains("`gat route add <name> <remote> <path>`"));
+    }
 
     #[test]
     fn config_source_is_dimmed_below_full_contrast_escaped_values() {
@@ -1911,7 +2065,7 @@ mod resource_hint_tests {
         assert_eq!(lines.len(), 5);
         assert_eq!(lines[2], "  a,b");
         assert!(!lines[3].contains("\x1b[2m"));
-        assert_eq!(lines[4], format!("  {}", ui::dim("Source: global")));
+        assert_eq!(lines[4], ui::dim("  Source: global"));
     }
 
     #[test]
@@ -1921,7 +2075,7 @@ mod resource_hint_tests {
             (
                 Some(Local),
                 Some(Project),
-                "Chosen in: local  ·  Defined in: project",
+                "Chosen in: local · Defined in: project",
             ),
             (None, Some(Project), "Defined in: project"),
             (Some(Local), None, "Chosen in: local"),
@@ -1943,7 +2097,7 @@ mod resource_hint_tests {
                 assert_eq!(lines.len(), 1);
             } else {
                 assert_eq!(lines.len(), 2);
-                assert_eq!(lines[1], format!("  {}", ui::dim(expected)));
+                assert_eq!(lines[1], ui::dim(&format!("  {expected}")));
             }
         }
     }
@@ -1961,7 +2115,7 @@ mod resource_hint_tests {
                 &mut Output::new(&mut stdout, &mut Vec::new()),
                 "Routes",
                 configured,
-                "Run `gat route add <name> <remote> <path>`",
+                "gat route add <name> <remote> <path>",
                 &rows,
             )
             .unwrap();
@@ -2128,6 +2282,102 @@ mod outcome_tests {
     use gat_core::lexical_path::{GatPath, GatSubpath};
 
     #[test]
+    fn sync_projects_only_visible_rows_and_omitted_groups_do_not_add_empty_blocks() {
+        for full in [false, true] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut output = Output::new(&mut stdout, &mut stderr);
+            output.set_full_output(full);
+            let mut budget = output.layout(Stream::Stderr).budget(2500);
+            let mut preceding = false;
+            let mut projected = 0;
+            for (label, total) in [
+                ("Missing objects", 1000_i32),
+                ("Conflicts", 1000),
+                ("Corrupted objects", 500),
+            ] {
+                let rows = (0..total).map(|index| {
+                    projected += 1;
+                    rows::ListRow::new(
+                        rows::ListStatus::Conflict,
+                        UserLine::number(i64::from(index)),
+                    )
+                });
+                render_sync_group(&mut output, label, rows, &mut budget, &mut preceding).unwrap();
+            }
+            let text = crate::output::strip_ansi(&String::from_utf8(stderr).unwrap());
+            assert_eq!(projected, if full { 2500 } else { 19 });
+            assert!(!text.contains("\n\n\n"));
+            assert_eq!(text.contains("(... 2481 more rows)"), !full);
+            assert!(text.contains("! Conflicts: 1000"));
+            assert!(text.contains("! Corrupted objects: 500"));
+            assert!(stdout.is_empty());
+        }
+    }
+
+    #[test]
+    fn sync_heading_failure_prevents_row_projection() {
+        struct RejectWrites;
+        impl std::io::Write for RejectWrites {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut stdout = Vec::new();
+        let mut writer = RejectWrites;
+        let mut output = Output::new(&mut stdout, &mut writer);
+        let mut budget = output.layout(Stream::Stderr).budget(1000);
+        let rows = (0..1000)
+            .map(|_| -> rows::ListRow { panic!("a failed heading must not project rows") });
+        assert!(
+            render_sync_group(
+                &mut output,
+                "Missing objects",
+                rows,
+                &mut budget,
+                &mut false
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn repair_only_reports_separate_the_summary_in_both_detail_modes() {
+        let outcome = gat_command::SyncOutcome {
+            scope: gat_command::SelectionScope::Unrestricted,
+            outcome: gat_engine::SyncOutcome::default(),
+            fetched: 0,
+            repaired: 0,
+            reshaped: None,
+            shallow: false,
+            completion: gat_command::SyncCompletionStatus::Clean,
+            repair_failures: vec![gat_command::RepairFailure {
+                path: GatPath::parse_canonical("data.bin").unwrap(),
+                oid: gat_core::oid::Oid::from_bytes([0xaa; 32]),
+                error: std::sync::Arc::new(gat_command::RepairError::UnknownRemoteOverride(
+                    gat_engine::UnknownRemoteOverrideError {
+                        name: "missing".into(),
+                    },
+                )),
+            }],
+        };
+        for full in [false, true] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut output = Output::new(&mut stdout, &mut stderr);
+            output.set_full_output(full);
+            render_sync(&mut output, &outcome).unwrap();
+            let text = crate::output::strip_ansi(&String::from_utf8(stderr).unwrap());
+            assert!(text.ends_with("\n\n✓ Sync complete (no changes)\n"));
+            assert!(!text.contains("\n\n\n"));
+            assert_eq!(text.contains("hint: Use --full-output"), !full);
+        }
+    }
+
+    #[test]
     fn config_list_confirmation_preserves_individual_values() {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -2147,6 +2397,108 @@ mod outcome_tests {
     }
 
     #[test]
+    fn temporary_cleanup_guidance_survives_narrow_and_omitted_rows() {
+        use gat_command::{
+            CacheClean, CacheDbState, CacheFact, CacheInspect, DomainFact, LiveLockState, LockFact,
+            LockState, SystemOutcome, SystemVerb, TemporaryCleanOutcome, TransactionKind,
+            TransactionState,
+        };
+        let command = "`gat system clean cache --purge-temporary`";
+        for width in [20, 40, 100] {
+            for full in [false, true] {
+                for inspect in [false, true] {
+                    let mut facts = Vec::new();
+                    let (verb, cache) = if inspect {
+                        // Exhaust the shared row budget before the cache group.
+                        facts.push(DomainFact::Lock(LockFact::Inspect(LockState {
+                            live: LiveLockState::Missing,
+                            transactions: (0..21)
+                                .map(|id| TransactionState {
+                                    id: format!("txn-{id}"),
+                                    kind: TransactionKind::ScratchOnly,
+                                })
+                                .collect(),
+                        })));
+                        (
+                            SystemVerb::Inspect,
+                            CacheFact::Inspect(CacheInspect {
+                                db: CacheDbState::Healthy,
+                                temporary: 2,
+                            }),
+                        )
+                    } else {
+                        (
+                            SystemVerb::Clean,
+                            CacheFact::Clean(CacheClean {
+                                temporary: TemporaryCleanOutcome::Preserved { count: 2 },
+                                objects_purged: None,
+                            }),
+                        )
+                    };
+                    facts.push(DomainFact::Cache(cache));
+                    let mut stdout = Vec::new();
+                    let mut stderr = Vec::new();
+                    let mut output = Output::new(&mut stdout, &mut stderr);
+                    output.set_layouts(
+                        crate::output::OutputLayout::bounded(width).with_full_output(full),
+                        crate::output::OutputLayout::default(),
+                    );
+                    render_system(&mut output, SystemOutcome { verb, facts }).unwrap();
+                    assert!(stderr.is_empty());
+                    let styled = String::from_utf8(stdout).unwrap();
+                    let plain = crate::output::strip_ansi(&styled);
+                    assert_eq!(plain.matches(command).count(), 1);
+                    assert_eq!(plain.contains("more rows"), inspect && !full);
+                    assert!(
+                        !styled
+                            .lines()
+                            .find(|line| line.contains(command))
+                            .unwrap()
+                            .contains("\x1b[2m")
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn schema_recovery_prose_wraps_and_is_present_after_repair() {
+        use gat_command::{
+            CacheFact, CacheRepair, DomainFact, StateFact, StateRepair, SystemOutcome, SystemVerb,
+        };
+        for fact in [
+            DomainFact::Cache(CacheFact::Repair(CacheRepair::UnsupportedVersion {
+                version: 99,
+            })),
+            DomainFact::State(StateFact::Repair(StateRepair::NewerVersion { version: 99 })),
+        ] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut output = Output::new(&mut stdout, &mut stderr);
+            output.set_layouts(
+                crate::output::OutputLayout::bounded(30),
+                crate::output::OutputLayout::default(),
+            );
+            render_system(
+                &mut output,
+                SystemOutcome {
+                    verb: SystemVerb::Repair,
+                    facts: vec![fact],
+                },
+            )
+            .unwrap();
+            let plain = crate::output::strip_ansi(&String::from_utf8(stdout).unwrap());
+            assert!(plain.contains("`gat`"));
+            assert!(
+                plain
+                    .lines()
+                    .all(|line| unicode_width::UnicodeWidthStr::width(line) <= 30)
+            );
+            assert!(plain.contains("repair"));
+        }
+    }
+
+    #[test]
     fn system_cleanup_advice_is_dim_but_required_recovery_remains_plain() {
         use gat_command::{DomainFact, LockClean, LockFact, LockRepair, SystemOutcome, SystemVerb};
         for (fact, optional) in [
@@ -2158,6 +2510,13 @@ mod outcome_tests {
                 LockFact::Repair(LockRepair::Recovered {
                     txn_id: "txn".into(),
                     choice: gat_command::RecoveryChoice::RestoreBackup,
+                    state: gat_command::LockState {
+                        live: gat_command::LiveLockState::Valid {
+                            shard_levels: gat_core::lock::LockShardLevels::FLAT,
+                            entries: 0,
+                        },
+                        transactions: Vec::new(),
+                    },
                 }),
                 true,
             ),
@@ -2240,7 +2599,7 @@ mod outcome_tests {
             (
                 gat_engine::RowChange::Unchanged { oid },
                 Some(gat_command::CachePresence::Missing),
-                "missing from cache; run `gat fetch` (mount models)",
+                "uncached (mount models)",
             ),
             (gat_engine::RowChange::Removed, None, "(mount models)"),
         ] {
@@ -2258,7 +2617,7 @@ mod outcome_tests {
             )
             .unwrap();
             let styled = String::from_utf8(stdout).unwrap();
-            assert!(styled.ends_with(&format!("{}\n", ui::dim(expected))));
+            assert!(styled.ends_with(&format!("{}\n", ui::dim(&ui::truncate(expected, 24)))));
         }
         assert_eq!(
             with_mount_metadata(UserLine::authored("new"), Some(&"models".into())).as_str(),
@@ -2314,14 +2673,23 @@ mod outcome_tests {
             let plain = crate::output::strip_ansi(&styled);
             assert!(!plain.contains("vendor/a.bin"));
             assert!(!plain.contains("vendor/b.bin"));
-            assert_eq!(plain.matches("hint:").count(), 2);
-            assert!(styled.contains(&ui::list_hint(&UserLine::authored(
-                "2 path(s) owned by mount 'vendor' at target 'vendor'"
-            ))));
-            assert!(plain.ends_with(&format!(
+            assert_eq!(
+                plain.matches("hint:").count(),
+                2 + usize::from(include_cache_problem)
+            );
+            assert!(styled.contains(&ui::list_hint_text(
+                &UserLine::authored("2 path(s) owned by mount 'vendor' at target 'vendor'"),
+                100
+            )));
+            assert!(plain.contains(&format!(
                 "! Push complete ({} item(s) skipped).\n\nhint: 1 path(s) owned by mount 'assets' at target 'data assets'\nhint: 2 path(s) owned by mount 'vendor' at target 'vendor'\n",
                 if include_cache_problem { 4 } else { 3 }
             )));
+            if include_cache_problem {
+                assert!(plain.contains("\n\n! Push complete"));
+            } else {
+                assert!(plain.starts_with("! Push complete"));
+            }
             assert_eq!(plain.contains("data.bin"), include_cache_problem);
             assert_eq!(
                 plain.contains("not in cache; run `gat add`"),
@@ -2374,6 +2742,104 @@ mod outcome_tests {
     }
 
     #[test]
+    fn sync_groups_share_one_limit_and_retain_hidden_group_guidance() {
+        let oid = gat_core::oid::Oid::from_bytes([0xaa; 32]);
+        let outcome = gat_command::SyncOutcome {
+            scope: gat_command::SelectionScope::Unrestricted,
+            outcome: gat_engine::SyncOutcome {
+                missing: (0..25)
+                    .map(|index| {
+                        (
+                            GatPath::parse_canonical(&format!("missing-{index}.bin")).unwrap(),
+                            oid,
+                        )
+                    })
+                    .collect(),
+                conflicts: vec![GatPath::parse_canonical("hidden-conflict.bin").unwrap()],
+                ..Default::default()
+            },
+            fetched: 0,
+            repaired: 0,
+            repair_failures: Vec::new(),
+            reshaped: None,
+            shallow: false,
+            completion: gat_command::SyncCompletionStatus::Incomplete {
+                conflicts: 1,
+                missing: 25,
+                corrupted: 0,
+            },
+        };
+        let mut stderr = Vec::new();
+        render_sync(&mut Output::new(&mut Vec::new(), &mut stderr), &outcome).unwrap();
+        let text = crate::output::strip_ansi(&String::from_utf8(stderr).unwrap());
+        assert_eq!(
+            text.lines().filter(|line| line.starts_with("!  ")).count(),
+            19
+        );
+        assert_eq!(text.matches("(... 7 more rows)").count(), 1);
+        assert!(!text.contains("hidden-conflict.bin"));
+        assert!(text.contains("! Conflicts: 1"));
+        assert!(text.contains("Use `gat sync --force`"));
+    }
+
+    #[test]
+    fn hidden_status_rows_still_contribute_recovery_hints_and_totals() {
+        let oid = gat_core::oid::Oid::from_bytes([0xaa; 32]);
+        let rows = (0..25)
+            .map(|index| gat_command::StatusRow {
+                path: GatPath::parse_canonical(&format!("file-{index:02}.bin")).unwrap(),
+                change: gat_engine::RowChange::Unchanged { oid },
+                cache_presence: Some(if index == 24 {
+                    gat_command::CachePresence::Missing
+                } else {
+                    gat_command::CachePresence::Present
+                }),
+                mount: None,
+            })
+            .collect();
+        let mut stdout = Vec::new();
+        render(
+            &mut Output::new(&mut stdout, &mut Vec::new()),
+            Outcome::Status(gat_command::StatusOutcome::WorkingTree {
+                scope: gat_command::SelectionScope::Unrestricted,
+                rows,
+                changes: 0,
+            }),
+        )
+        .unwrap();
+        let text = crate::output::strip_ansi(&String::from_utf8(stdout).unwrap());
+        assert!(text.contains("(... 6 more rows)"));
+        assert!(!text.contains("file-24.bin"));
+        assert_eq!(text.matches("Run `gat fetch`").count(), 1);
+        assert!(text.ends_with("0 change(s) across 25 file(s)\n"));
+    }
+
+    #[test]
+    fn full_output_preserves_problem_details() {
+        let row = rows::ListRow::with_metadata(
+            rows::ListStatus::Conflict,
+            UserLine::authored("data.bin"),
+            RowDetail::authored("a complete explanation for this particular failure")
+                .with_annotation("failed"),
+        );
+        for full in [false, true] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut output = Output::new(&mut stdout, &mut stderr);
+            if full {
+                output.set_layouts(
+                    super::super::OutputLayout::full(),
+                    super::super::OutputLayout::full(),
+                );
+            }
+            render_rows(&mut output, std::slice::from_ref(&row), Stream::Stdout).unwrap();
+            let text = crate::output::strip_ansi(&String::from_utf8(stdout).unwrap());
+            assert_eq!(text.contains("complete explanation"), full);
+            assert_eq!(text.contains("failed"), !full);
+        }
+    }
+
+    #[test]
     fn cache_metadata_is_dimmed_on_unchanged_files() {
         let outcome = Outcome::Status(gat_command::StatusOutcome::WorkingTree {
             scope: gat_command::SelectionScope::Unrestricted,
@@ -2394,11 +2860,8 @@ mod outcome_tests {
             .lines()
             .find(|line| line.contains("data.bin"))
             .unwrap();
-        assert!(row.contains("\x1b[2mmissing from cache; run `gat fetch`"));
-        assert_eq!(
-            crate::output::strip_ansi(row),
-            "✓  data.bin  missing from cache; run `gat fetch`"
-        );
+        assert!(row.contains("\x1b[2muncached"));
+        assert_eq!(crate::output::strip_ansi(row), "✓  data.bin  uncached");
     }
 
     #[test]
@@ -2496,7 +2959,7 @@ mod outcome_tests {
                         .iter()
                         .position(|line| line.contains("hint:"))
                         .unwrap();
-                    let hint = ui::list_hint(&note);
+                    let hint = ui::list_hint_text(&note, 100);
                     let hint_lines: Vec<_> = hint.lines().collect();
                     let end = index + hint_lines.len();
                     assert_eq!(&lines[index..end], hint_lines.as_slice());
@@ -2551,7 +3014,7 @@ mod outcome_tests {
                 );
                 assert_eq!(
                     lines[2..].join("\n"),
-                    ui::list_hint(&selection_scope_note(scope).unwrap())
+                    ui::list_hint_text(&selection_scope_note(scope).unwrap(), 100)
                 );
                 assert!(lines[2].starts_with("\x1b[2mhint: "));
             }
@@ -2654,5 +3117,113 @@ mod outcome_tests {
         assert_eq!(includes.len(), 2);
         assert!(includes[0].ends_with("**/*, final.bin"));
         assert!(includes[1].ends_with("**/*.onnx"));
+    }
+}
+
+#[cfg(test)]
+mod complete_report_tests {
+    use super::*;
+    use gat_command::{
+        DomainFact, GitFact, GitInspect, LiveLockInvalidReason, LiveLockState, LockFact, LockState,
+        SystemOutcome, SystemVerb, TransactionKind, TransactionState,
+    };
+    use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn system_explanations_survive_hidden_rows_and_full_mode_without_duplication() {
+        for width in [20, 39, 40, 60, 100, 120] {
+            for full in [false, true] {
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                let mut output = Output::new(&mut stdout, &mut stderr);
+                output.set_layouts(
+                    super::super::OutputLayout::bounded(width).with_full_output(full),
+                    super::super::OutputLayout::bounded(1),
+                );
+                render_system(
+                    &mut output,
+                    SystemOutcome {
+                        verb: SystemVerb::Inspect,
+                        facts: vec![
+                            DomainFact::Lock(LockFact::Inspect(LockState {
+                                live: LiveLockState::Invalid {
+                                    reason: LiveLockInvalidReason::NeitherFileNorShardTree,
+                                },
+                                transactions: (0..25)
+                                    .map(|index| TransactionState {
+                                        id: format!("txn-{index}"),
+                                        kind: TransactionKind::ScratchOnly,
+                                    })
+                                    .collect(),
+                            })),
+                            DomainFact::Git(GitFact::Inspect(GitInspect::PresentButUnvalidated)),
+                        ],
+                    },
+                )
+                .unwrap();
+                assert!(stderr.is_empty());
+                let styled = String::from_utf8(stdout).unwrap();
+                let text = crate::output::strip_ansi(&styled);
+                let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                assert!(
+                    words.contains(
+                        "gat.lock: live gat.lock path is neither a file nor a shard tree"
+                    )
+                );
+                assert_eq!(
+                    words
+                        .matches("excludes: present but could not be validated")
+                        .count(),
+                    1
+                );
+                assert!(words.contains("25 findings: incomplete transaction scratch remains"));
+                assert_eq!(
+                    words
+                        .matches("incomplete transaction scratch remains")
+                        .count(),
+                    1
+                );
+                assert_eq!(text.contains("more rows"), !full);
+                assert!(text.contains("\n\n✗ Lock\n\n"));
+                assert!(!text.contains("\n\n\n"));
+                assert!(
+                    text.lines().all(|line| {
+                        // Full list rows are deliberately unbounded; prose is not.
+                        (full && (line.starts_with("✗  ") || line.starts_with("!  ")))
+                            || line.width() <= width.min(100)
+                    }),
+                    "{text}"
+                );
+                for line in styled
+                    .lines()
+                    .filter(|line| line.contains("excludes:") || line.contains("gat.lock:"))
+                {
+                    assert!(!line.contains("\x1b[2m"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn integration_step_prose_wraps_instead_of_becoming_a_protected_phrase() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut stderr);
+        output.set_layouts(
+            super::super::OutputLayout::default(),
+            super::super::OutputLayout::bounded(20),
+        );
+        render_git_integration_step(
+            &mut output,
+            "gat.lock semantic merge driver",
+            gat_command::InitGitIntegrationOutcome::Installed,
+        )
+        .unwrap();
+        let text = crate::output::strip_ansi(&String::from_utf8(stderr).unwrap());
+        assert!(text.lines().all(|line| line.width() <= 20), "{text}");
+        assert_eq!(
+            text.split_whitespace().collect::<Vec<_>>().join(" "),
+            "✓ Installed gat.lock semantic merge driver."
+        );
     }
 }

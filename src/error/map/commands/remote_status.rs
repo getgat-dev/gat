@@ -28,10 +28,14 @@ impl From<gat_command::MissingRemoteConfigError> for Failure {
         Self::expected(
             Diagnostic::new(ErrorCode::RemoteNotConfigured, "No remote configured")
                 .with_subject(UserLine::path_text(err.path.as_str()))
-                .with_hint(
-                    "Run `gat remote add <name> <url>`, or set `remotes.default` to an \
+                .with_hint(UserLine::compose([
+                    UserLine::authored("Run "),
+                    UserLine::authored("`gat remote add <name> <url>`").unbroken(),
+                    UserLine::authored(
+                        ", or set `remotes.default` to an \
                      already-configured remote.",
-                ),
+                    ),
+                ])),
         )
     }
 }

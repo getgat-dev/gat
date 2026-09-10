@@ -134,17 +134,6 @@ mod tests {
             .0
     }
 
-    /// RAII guard clearing [`race_test_hooks`] on drop (including on
-    /// panic/early return), so a test that injects a mid-read race can
-    /// never leak its hook into a later test sharing the same OS thread.
-    struct RaceHookGuard;
-
-    impl Drop for RaceHookGuard {
-        fn drop(&mut self) {
-            race_test_hooks::clear();
-        }
-    }
-
     fn refresh_with_threads(
         repo: &Repo,
         store: &mut StateStore,
@@ -595,7 +584,6 @@ mod tests {
     /// test flaky) instead of relying on a second thread.
     #[test]
     fn refresh_fails_closed_when_a_shard_is_rewritten_mid_read() {
-        let _guard = RaceHookGuard;
         let tmp = git_repo();
         let repo = Repo::at(tmp.path().to_path_buf());
         let mut lock = gat_io::LockStore::load_repository(repo.layout()).unwrap();
@@ -618,18 +606,9 @@ mod tests {
         // different -- this is the exact race the coherent-observation
         // primitive exists to detect.
         //
-        // `race_test_hooks` is process-wide, so
-        // under a parallel test run it also fires for every *other*
-        // test's concurrently-running `shard_change()` calls, not just
-        // this test's own. Without this path guard, the hook would
-        // clobber an unrelated test's shard file with these rewritten
-        // bytes any time the two tests' reads happened to overlap --
-        // exactly the kind of nondeterministic cross-test corruption
-        // this primitive exists to make deterministic, not introduce.
-        // Gating on the exact shard path this test cares about keeps the
-        // injected race scoped to this test's own fixture.
+        // The guard registers only this fixture's shard across Rayon workers.
         let target_path = tmp.path().join("gat.lock");
-        race_test_hooks::set(move |path: &Path| {
+        let race_guard = race_test_hooks::install(target_path.clone(), move |path: &Path| {
             if path == target_path {
                 std::fs::write(path, rewritten_bytes.as_bytes()).unwrap();
             }
@@ -637,7 +616,7 @@ mod tests {
 
         let mut store = StateStore::open(repo.layout()).unwrap();
         let result = refresh(&repo, &mut store);
-        race_test_hooks::clear();
+        drop(race_guard);
         assert!(
             result.is_err(),
             "a shard observed through a changed pre-read/post-read stat pair must fail \

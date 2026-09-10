@@ -12,14 +12,23 @@ impl From<RemoteCatalogError> for Failure {
                 Diagnostic::new(ErrorCode::RemoteNotFound, "Unknown default remote")
                     .with_subject(UserLine::identifier(&name))
                     .with_hint(UserLine::compose([
-                        UserLine::authored("add it with `gat remote add "),
-                        UserLine::identifier(&name),
-                        UserLine::authored(" <url>` or fix remotes.default"),
+                        UserLine::authored("add it with `"),
+                        UserLine::compose([
+                            UserLine::authored("gat remote add "),
+                            UserLine::identifier(&name),
+                            UserLine::authored(" <url>"),
+                        ])
+                        .unbroken(),
+                        UserLine::authored("` or fix remotes.default"),
                     ])),
             ),
             RemoteCatalogError::NoRemoteConfigured => Self::expected(
-                Diagnostic::new(ErrorCode::RemoteNotFound, "No remote configured")
-                    .with_hint("run `gat remote add <name> <url>`"),
+                Diagnostic::new(ErrorCode::RemoteNotFound, "No remote configured").with_hint(
+                    UserLine::compose([
+                        UserLine::authored("run "),
+                        UserLine::authored("`gat remote add <name> <url>`").unbroken(),
+                    ]),
+                ),
             ),
         }
     }

@@ -96,10 +96,10 @@ pub use system::{
     CacheClean, CacheDbState, CacheFact, CacheInspect, CacheRepair, CandidateInvalidReason,
     CandidateOutcome, DbUnreadableReason, DomainFact, GitClean, GitFact, GitInspect, GitRepair,
     LiveLockInvalidReason, LiveLockState, LockClean, LockFact, LockRepair, LockState,
-    PreparedTxnStatus, RecoveryChoice, StateClean, StateDbState, StateFact, StateInspect,
-    StateRepair, SystemError, SystemOutcome, SystemRequest, SystemScope, SystemVerb,
-    TemporaryCleanOutcome, TransactionKind, TransactionMalformedReason, TransactionState, system,
-    system_with_lifecycle_observer,
+    PreparedTxnStatus, RecoveryChoice, RecoverySelectionFailure, StateClean, StateDbState,
+    StateFact, StateInspect, StateRepair, SystemError, SystemOutcome, SystemRequest, SystemScope,
+    SystemVerb, TemporaryCleanOutcome, TransactionKind, TransactionMalformedReason,
+    TransactionState, system, system_with_lifecycle_observer,
 };
 
 #[cfg(any(test, feature = "test-support"))]

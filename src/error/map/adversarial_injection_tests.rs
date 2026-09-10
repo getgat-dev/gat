@@ -67,7 +67,6 @@ fn mount_already_exists_name_never_forges_an_extra_rendered_line() {
 fn unknown_config_key_never_forges_an_extra_rendered_line() {
     let failure: Failure = ConfigError::UnknownKey {
         key: PAYLOAD.to_string(),
-        supported: "cache.dir, git.exclude_patterns".to_string(),
     }
     .into();
     assert_no_forged_line(&failure);

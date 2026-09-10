@@ -258,7 +258,7 @@ pub fn current_desired_identity_with_prior(
 
 /// Test-only deterministic race injection for
 /// `current_desired_identity_with_prior`'s per-shard content read,
-/// mirroring `engine::workspace::sync::desired_index`'s own `race_test_hooks` of
+/// supporting `engine::workspace::sync::desired_index` tests of
 /// the same shape: production code never
 /// needs this -- it exists so `commands::operation_tests` can prove
 /// `Operation::mutate`'s revalidation gate (which calls
@@ -268,42 +268,89 @@ pub fn current_desired_identity_with_prior(
 /// thread-timing race.
 #[cfg(any(test, feature = "test-support"))]
 pub mod race_test_hooks {
-    use std::path::Path;
-    use std::sync::Mutex;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, LazyLock, Mutex};
 
-    type Hook = Box<dyn FnMut(&Path) + Send>;
+    type Hook = Arc<Mutex<Box<dyn FnMut(&Path) + Send>>>;
 
-    // Process-wide (not thread-local): the content read may run on any
-    // Rayon worker thread, not necessarily the test's own thread.
-    static BEFORE_READ: Mutex<Option<Hook>> = Mutex::new(None);
+    // Reads run on Rayon workers. Key hooks by fixture path so parallel tests
+    // cannot replace or clear one another's injections.
+    static BEFORE_READ: LazyLock<Mutex<HashMap<PathBuf, Hook>>> = LazyLock::new(Mutex::default);
 
-    /// Install a hook that runs immediately before the content read.
-    /// Tests must pair this with [`clear`] (a guard is recommended) so
-    /// the hook never leaks into an unrelated test running later in the
-    /// same process. Because this hook is process-wide, callers must
-    /// filter on the exact path they expect inside their closure -- see
-    /// `engine::workspace::sync::desired_index::race_test_hooks::set`'s docs for
-    /// why.
-    ///
-    /// # Panics
-    /// Panics if the test hook mutex is poisoned.
-    pub fn set(hook: impl FnMut(&Path) + Send + 'static) {
-        *BEFORE_READ.lock().unwrap() = Some(Box::new(hook));
+    /// Owns one fixture's injection, including cleanup during unwinding.
+    #[must_use]
+    pub struct HookGuard {
+        path: PathBuf,
     }
 
-    /// Remove any installed hook.
+    impl Drop for HookGuard {
+        fn drop(&mut self) {
+            BEFORE_READ.lock().unwrap().remove(&self.path);
+        }
+    }
+
+    /// Install a fixture-scoped hook, visible to reads on any worker thread.
     ///
     /// # Panics
-    /// Panics if the test hook mutex is poisoned.
-    pub fn clear() {
-        *BEFORE_READ.lock().unwrap() = None;
+    /// Panics if the path already has a hook or the registry is poisoned.
+    pub fn install(path: PathBuf, hook: impl FnMut(&Path) + Send + 'static) -> HookGuard {
+        let installed = {
+            let mut hooks = BEFORE_READ.lock().unwrap();
+            match hooks.entry(path.clone()) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(Arc::new(Mutex::new(Box::new(hook))));
+                    true
+                }
+                std::collections::hash_map::Entry::Occupied(_) => false,
+            }
+        };
+        assert!(installed, "a fixture may install only one hook per path");
+        HookGuard { path }
     }
 
     /// # Panics
-    /// Panics if the test hook mutex is poisoned.
+    /// Panics if this fixture's hook or a hook mutex is poisoned.
     pub fn fire_before_read(path: &Path) {
-        if let Some(hook) = BEFORE_READ.lock().unwrap().as_mut() {
-            hook(path);
+        let hook = BEFORE_READ.lock().unwrap().get(path).cloned();
+        if let Some(hook) = hook {
+            // Do not run user callbacks under the registry lock. A callback
+            // panic must not poison another fixture's registration or cleanup.
+            hook.lock().unwrap()(path);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[test]
+        fn fixture_guards_are_independent_and_visible_on_workers() {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let first_calls = calls.clone();
+            let first = install(PathBuf::from("first-test-shard"), move |_| {
+                first_calls.fetch_add(1, Ordering::SeqCst);
+            });
+            let second_calls = calls.clone();
+            let second = install(PathBuf::from("second-test-shard"), move |_| {
+                second_calls.fetch_add(10, Ordering::SeqCst);
+            });
+            std::thread::spawn(|| {
+                fire_before_read(Path::new("first-test-shard"));
+                fire_before_read(Path::new("second-test-shard"));
+                fire_before_read(Path::new("unregistered-test-shard"));
+            })
+            .join()
+            .unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), 11);
+            drop(first);
+            fire_before_read(Path::new("first-test-shard"));
+            fire_before_read(Path::new("second-test-shard"));
+            assert_eq!(calls.load(Ordering::SeqCst), 21);
+            drop(second);
+            fire_before_read(Path::new("second-test-shard"));
+            assert_eq!(calls.load(Ordering::SeqCst), 21);
         }
     }
 }

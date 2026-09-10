@@ -302,6 +302,11 @@ pub const COMMAND_DOCS: &[CommandDoc] = &[
         ),
         [
             example!(
+                "Complete output",
+                ["status", "-o"],
+                "Show every row with complete paths and metadata."
+            ),
+            example!(
                 "Local",
                 ["status"],
                 "Compare tracked files with staged desired state."

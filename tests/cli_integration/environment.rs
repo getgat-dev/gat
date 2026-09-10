@@ -244,7 +244,11 @@ fn remote_template_display_does_not_depend_on_environment() {
         format!("remotes:\n  default: origin\n  origin:\n    url: '{template}'\n"),
     )
     .unwrap();
-    for args in [vec!["remote", "show", "origin"], vec!["remote", "list"]] {
+    for args in [
+        vec!["remote", "show", "origin"],
+        vec!["remote", "list"],
+        vec!["remote", "list", "--full-output"],
+    ] {
         let unset = common::gat_with_env(
             tmp.path(),
             &args,
@@ -267,7 +271,13 @@ fn remote_template_display_does_not_depend_on_environment() {
         assert_ok(&populated, "display with populated variables");
         assert_eq!(unset.stdout, populated.stdout);
         assert_eq!(unset.stderr, populated.stderr);
-        assert!(String::from_utf8_lossy(&unset.stdout).contains(template));
+        let displayed = String::from_utf8_lossy(&unset.stdout);
+        if args == ["remote", "list"] {
+            assert!(displayed.contains("azblob://"));
+            assert!(displayed.contains("..."));
+        } else {
+            assert!(displayed.contains(template));
+        }
     }
 }
 

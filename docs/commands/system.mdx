@@ -5,7 +5,7 @@ tag: "Experimental"
 ---
 
 <Warning>
-`gat system` is **Experimental**: its interface or behavior may change or be removed between releases. See [Feature lifecycle](/references/feature-lifecycle).
+`gat system` is **Experimental**: its interface or behavior may change. See [Feature lifecycle](/references/feature-lifecycle).
 </Warning>
 
 Inspect and maintain <Tooltip tip="Clone-specific bookkeeping, cache data, and Git integration. These commands operate on local maintenance concerns rather than publishing new asset versions." cta="Understand the local files" href="/concepts/how-gat-works#what-lives-where">local repository state</Tooltip> with these experimental commands.
@@ -25,16 +25,28 @@ For missing working files or damaged cached content, start with
 [missing and corrupted objects](/concepts/automatic-sync#missing-and-corrupted-objects).
 To remove unneeded stored content using history-based protection, see [gat gc](/commands/gc).
 
+If lock repair cannot resolve invalid lock or transaction state, the report retains
+the inspection findings and any validated recovery choices. `repair all` stops at
+that lock report before repairing other domains.
+
+Recovering one transaction can leave other transaction problems unresolved. The
+report shows both the completed recovery and remaining findings; `repair all`
+continues only once blocking lock state is resolved.
+
+If several transactions support a recovery choice, specify `--transaction` using
+one of the recovery commands shown in the report. This is distinct from a request
+that matches no eligible transaction.
+
 ## Usage
 
 ```text
-Usage: gat system <COMMAND>
+Usage: gat system [OPTIONS] <COMMAND>
 ```
 
 <Accordion title="All options" id="gat-system-options">
 
 ```text
-Usage: gat system <COMMAND>
+Usage: gat system [OPTIONS] <COMMAND>
 
 Commands:
   inspect  Read-only inspection of Gat-managed maintenance state. Never writes
@@ -50,6 +62,9 @@ Commands:
   help     Print this message or the help of the given subcommand(s)
 
 Options:
+  -o, --full-output
+          Show all rows and complete details
+
   -h, --help
           Print help (see a summary with '-h')
 ```
@@ -86,6 +101,9 @@ Arguments:
           [possible values: lock, state, cache, git, all]
 
 Options:
+  -o, --full-output
+          Show all rows and complete details
+
       --purge-temporary
           Also remove unverified `tmp-*` cache ingest scratch files, in addition
           to the ordinary proven-safe cleanup `gat system clean` does by
@@ -146,13 +164,13 @@ Check repository state without changing it. Omit the domain to inspect all domai
 ### Usage
 
 ```text
-Usage: gat system inspect [SCOPE]
+Usage: gat system inspect [OPTIONS] [SCOPE]
 ```
 
 <Accordion title="All options" id="gat-system-inspect-options">
 
 ```text
-Usage: gat system inspect [SCOPE]
+Usage: gat system inspect [OPTIONS] [SCOPE]
 
 Arguments:
   [SCOPE]
@@ -161,6 +179,9 @@ Arguments:
           [possible values: lock, state, cache, git, all]
 
 Options:
+  -o, --full-output
+          Show all rows and complete details
+
   -h, --help
           Print help (see a summary with '-h')
 ```
@@ -212,6 +233,9 @@ Arguments:
           [possible values: lock, state, cache, git, all]
 
 Options:
+  -o, --full-output
+          Show all rows and complete details
+
       --restore-backup
           Explicitly restore the validated backup representation left by an
           interrupted `gat.lock` reshape (`.gat/lock-reshape/<txn>/backup`)

@@ -1,7 +1,7 @@
 //! The only place outside `crate::error` itself permitted to construct a
 //! [`super::super::UserProblem`] -- `UserProblem::new`/`with_source` are
-//! `pub(in crate::error)`, so `commands::system::*` (the only current
-//! caller) goes through the semantic constructors below instead. This
+//! `pub(in crate::error)`, so output renderers go through the semantic
+//! constructors below instead. This
 //! mirrors the `Diagnostic`/`Failure` boundary rule for the
 //! non-fatal counterpart: presentation text is authored at one reviewable
 //! seam, not scattered across every place a non-fatal finding is
@@ -92,7 +92,7 @@ pub fn candidate_invalid_problem(reason: CandidateInvalidReason) -> UserProblem 
 
 /// Authors a short, safe [`UserProblem`] for a
 /// [`gat_command::RepairError`], for
-/// `commands::sync::repair_failure_rows` -- structured per variant, never
+/// `output::render` -- structured per variant, never
 /// the typed error's own `Display` (which may echo third-party
 /// opendal/rusqlite/io text through unfiltered). Only the identifying
 /// oid/path/remote-name fields already carried on the corresponding
@@ -156,7 +156,7 @@ pub fn authored(summary: &'static str) -> UserProblem {
 /// a `*_problem` reason enum solely for that purpose.
 #[cfg(test)]
 pub(crate) fn with_source_for_test(
-    summary: &'static str,
+    summary: impl Into<UserLine>,
     source: impl std::error::Error + Send + Sync + 'static,
 ) -> UserProblem {
     UserProblem::with_source(summary, source)

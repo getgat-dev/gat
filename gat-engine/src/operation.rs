@@ -533,17 +533,8 @@ mod contract_tests {
         );
     }
 
-    struct DesiredIdentityRaceHookGuard;
-
-    impl Drop for DesiredIdentityRaceHookGuard {
-        fn drop(&mut self) {
-            gat_io::lock_race_test_hooks::clear();
-        }
-    }
-
     #[test]
     fn mutate_revalidation_fails_closed_on_a_shard_rewritten_mid_read() {
-        let _race_guard = DesiredIdentityRaceHookGuard;
         let (tmp, repo) = tracked_repo();
         let mut store = StateStore::open(repo.layout()).unwrap();
         crate::workspace::sync::refresh_desired_index(&repo, &mut store).unwrap();
@@ -554,7 +545,7 @@ mod contract_tests {
         touched.push(b'\n');
         std::fs::write(&target, &touched).unwrap();
 
-        gat_io::lock_race_test_hooks::set(move |path| {
+        let _race_guard = gat_io::lock_race_test_hooks::install(target.clone(), move |path| {
             if path == target {
                 std::fs::write(path, b"rewritten-mid-read-different-length-payload").unwrap();
             }

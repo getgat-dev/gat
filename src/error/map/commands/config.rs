@@ -7,12 +7,17 @@ use gat_command::ConfigError;
 impl From<ConfigError> for Failure {
     fn from(err: ConfigError) -> Self {
         match err {
-            ConfigError::UnknownKey { key, supported } => Self::expected(
+            ConfigError::UnknownKey { key } => Self::expected(
                 Diagnostic::new(ErrorCode::InvalidArgumentValue, "Unknown config key")
                     .with_subject(UserLine::config_key(&key))
                     .with_detail(UserLine::compose([
                         UserLine::authored("Expected one of: "),
-                        UserLine::identifier(&supported),
+                        UserLine::join(
+                            gat_core::config_keys::ConfigKey::CANONICAL
+                                .into_iter()
+                                .map(|key| UserLine::config_key(key.as_str())),
+                            ", ",
+                        ),
                     ])),
             ),
             ConfigError::WrongValueCount { key, got } => Self::expected(
@@ -26,9 +31,14 @@ impl From<ConfigError> for Failure {
                         UserLine::authored(")"),
                     ]))
                     .with_hint(UserLine::compose([
-                        UserLine::authored("Use `gat config "),
-                        UserLine::identifier(key.as_str()),
-                        UserLine::authored(" <value>`."),
+                        UserLine::authored("Use `"),
+                        UserLine::compose([
+                            UserLine::authored("gat config "),
+                            UserLine::identifier(key.as_str()),
+                            UserLine::authored(" <value>"),
+                        ])
+                        .unbroken(),
+                        UserLine::authored("`."),
                     ])),
             ),
             ConfigError::ClearNotSupportedForScalar { key } => Self::expected(
@@ -45,10 +55,7 @@ impl From<ConfigError> for Failure {
                     "At least one value is required",
                 )
                 .with_subject(UserLine::config_key(key.as_str()))
-                .with_hint(
-                    "Use `--clear` to persist an explicit empty list instead of `Set` with \
-                         zero values.",
-                ),
+                .with_hint("Use `--clear` to persist an explicit empty list."),
             ),
             ConfigError::ClearAlwaysInvalid { key, source } => Self::infrastructure(
                 Diagnostic::new(
@@ -68,41 +75,23 @@ impl From<ConfigError> for Failure {
 mod tests {
     use super::*;
 
-    /// [`ConfigError::InvalidGlobPattern`] retention: the mapper
-    /// must keep the whole typed error (key + source) as
-    /// `Failure`'s hidden technical source, not merely the inner
-    /// `GlobError` -- otherwise the key this failure was raised for is
-    /// lost from anything inspecting the technical source.
-    /// An unknown key containing an embedded newline must never fabricate
-    /// an extra rendered diagnostic line.
     #[test]
-    fn unknown_key_detail_never_splits_on_an_embedded_newline_in_the_key() {
-        let err = ConfigError::UnknownKey {
-            key: "selection.include\nSENTINEL_INJECTED_LINE".to_string(),
-            supported: "a, b".to_string(),
-        };
-        let failure: Failure = err.into();
-        let detail = failure
-            .diagnostic()
-            .detail()
-            .expect("UnknownKey attaches a detail");
-        assert_eq!(detail.lines().count(), 1);
-        assert!(!detail.contains('\n'));
-    }
-
-    /// Same guarantee for [`ConfigError::UnknownKey`]'s supported-key list.
-    #[test]
-    fn unknown_key_detail_never_splits_on_an_embedded_newline_in_supported() {
-        let err = ConfigError::UnknownKey {
-            key: "sync.bogus".to_string(),
-            supported: "a, b\nSENTINEL_INJECTED_LINE".to_string(),
-        };
-        let failure: Failure = err.into();
-        let detail = failure
-            .diagnostic()
-            .detail()
-            .expect("UnknownKey attaches a detail");
-        assert_eq!(detail.lines().count(), 1);
-        assert!(!detail.contains('\n'));
+    fn unknown_keys_retain_canonical_choices_as_separate_words() {
+        let failure: Failure = ConfigError::UnknownKey {
+            key: "selection\nSENTINEL".to_string(),
+        }
+        .into();
+        let diagnostic = failure.diagnostic();
+        assert!(!diagnostic.subject_line().unwrap().as_str().contains('\n'));
+        let detail = &diagnostic.detail_lines()[0];
+        let words: Vec<_> = detail.wrapping_words().collect();
+        for key in gat_core::config_keys::ConfigKey::CANONICAL {
+            assert!(
+                words
+                    .iter()
+                    .any(|word| word.trim_end_matches(',') == key.as_str())
+            );
+        }
+        assert!(!detail.as_str().contains("git.exclude_patterns"));
     }
 }

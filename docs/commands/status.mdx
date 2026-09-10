@@ -17,6 +17,10 @@ With `--remote`, check whether required objects exist. A bare
 See [remote routing](/guides/using-multiple-remotes#remote-selection-at-a-glance)
 for storage precedence. [History flags](/concepts/history-selection) apply only to remote checks. Mount-owned entries show their mount name.
 
+Missing cache objects use the short `uncached` annotation, with recovery guidance
+below the rows. [Human output limits](/references/cli-output) apply to these
+lists; use `gat status --full-output` (or `gat status -o`) to inspect every row and complete metadata.
+
 Without path flags, use the default named selection, or all paths if none is set.
 Explicit filters replace that selection; `--path .` selects the whole repository.
 
@@ -43,6 +47,9 @@ Usage: gat status [OPTIONS]
 Usage: gat status [OPTIONS]
 
 Options:
+  -o, --full-output
+          Show all rows and complete details
+
       --selection <NAME>
           Use this saved selection for this operation without changing the
           default
@@ -181,6 +188,15 @@ Options:
 ## Examples
 
 <Tabs sync={false}>
+<Tab title="Complete output">
+
+Show every row with complete paths and metadata.
+
+```sh
+gat status -o
+```
+
+</Tab>
 <Tab title="Local">
 
 Compare tracked files with staged desired state.

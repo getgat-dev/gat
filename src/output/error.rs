@@ -7,56 +7,73 @@
 //! technical source, so there is no way for third-party/OS/parser error
 //! text to reach this renderer even by mistake.
 
+use super::flow;
 use crate::error::Diagnostic;
 use crate::output::terminal::{self, ERROR};
-use crate::output::{Output, WriteFailure};
+use crate::output::{Output, Stream, WriteFailure};
+use crate::presentation::UserLine;
 
 /// Renders a diagnostic to borrowed stderr: a wrapped summary, optional detail,
 /// and hints. Stops on the first write failure without rendering another error.
 pub fn render(output: &mut Output<'_>, diagnostic: &Diagnostic) -> Result<(), WriteFailure> {
-    let width = terminal::wrap_width();
-
-    output.stderr(format_args!(
-        "{} {} {}",
-        terminal::red(ERROR),
-        terminal::bold_red("error:"),
-        render_subject_aware(diagnostic.summary(), diagnostic.subject(), width)
-    ))?;
-
-    if !diagnostic.detail_lines().is_empty() {
-        output.stderr(format_args!(""))?;
-        for detail in diagnostic.detail_lines() {
+    let width = output.prose_width(Stream::Stderr);
+    let summary = summary_with_subject(diagnostic.summary_line(), diagnostic.subject_line());
+    for (index, line) in flow::lines("✗ error: ", "         ", &summary, width).enumerate() {
+        if index == 0 {
             output.stderr(format_args!(
-                "{}",
-                terminal::wrap_user_line("", detail, width)
+                "{} {}{}{}",
+                terminal::red(ERROR),
+                terminal::bold_red("error:"),
+                if line.body.is_empty() { "" } else { " " },
+                line.body
             ))?;
+        } else {
+            output.stderr(format_args!("{line}"))?;
         }
     }
 
-    if !diagnostic.hint_lines().is_empty() {
-        output.stderr(format_args!(""))?;
+    if !diagnostic.detail_lines().is_empty() {
+        terminal::section(output, Stream::Stderr)?;
+        for detail in diagnostic.detail_lines() {
+            terminal::paragraph(
+                output,
+                Stream::Stderr,
+                detail,
+                2,
+                terminal::Emphasis::Normal,
+            )?;
+        }
     }
-    for hint in diagnostic.hint_lines() {
-        let wrapped = terminal::wrap_user_line("hint: ", hint, width);
-        output.stderr(format_args!("{}", terminal::dim(&wrapped)))?;
-    }
+
+    terminal::hints(output, Stream::Stderr, diagnostic.hint_lines())?;
+
     Ok(())
 }
 
-/// Wraps `summary` for display, appending `subject` (a path/remote
-/// name/config key) undecorated and un-wrapped if present -- paths and
-/// other machine-readable identifiers must never be split mid-wrap, so
-/// they're kept out of the greedy word-wrap pass entirely and appended
-/// after it.
-fn render_subject_aware(summary: &str, subject: Option<&str>, width: usize) -> String {
-    let prefix = format!("{ERROR} error: ");
-    let wrapped = terminal::wrap_with_hanging_indent(&prefix, summary, width);
-    // The caller styles the prefix separately; retain the shared helper's indent.
-    let body = wrapped.strip_prefix(&prefix).unwrap_or(&wrapped);
+/// Compose before placement: subjects stay atomic but can move to the next line.
+fn summary_with_subject(summary: &UserLine, subject: Option<&UserLine>) -> UserLine {
     match subject {
-        Some(subject) => format!("{body} `{subject}`"),
-        None => body.to_owned(),
+        Some(subject) => UserLine::compose([
+            summary.clone(),
+            UserLine::authored(" `"),
+            subject.clone(),
+            UserLine::authored("`"),
+        ]),
+        None => summary.clone(),
     }
+}
+
+#[cfg(test)]
+fn render_subject_aware(summary: &'static str, subject: Option<&str>, width: usize) -> String {
+    let text = summary_with_subject(
+        &UserLine::authored(summary),
+        subject.map(UserLine::identifier).as_ref(),
+    );
+    let wrapped = terminal::wrap_user_line("✗ error: ", &text, width);
+    wrapped
+        .strip_prefix("✗ error: ")
+        .unwrap_or(&wrapped)
+        .to_owned()
 }
 
 #[cfg(test)]
@@ -82,6 +99,24 @@ mod tests {
             .lines()
             .map(str::to_owned)
             .collect()
+    }
+
+    #[test]
+    fn subject_moves_to_a_continuation_line_before_exceeding_width() {
+        let diagnostic = Diagnostic::new_for_test(ErrorCode::Internal, "Read failed")
+            .with_subject_for_test("data/file.bin");
+        let mut bytes = Vec::new();
+        let mut stdout = Vec::new();
+        let mut output = Output::new(&mut stdout, &mut bytes);
+        output.set_layouts(
+            crate::output::OutputLayout::default(),
+            crate::output::OutputLayout::bounded(28),
+        );
+        render(&mut output, &diagnostic).unwrap();
+        assert_eq!(
+            crate::output::strip_ansi(&String::from_utf8(bytes).unwrap()),
+            "✗ error: Read failed\n         `data/file.bin`\n"
+        );
     }
 
     #[test]
@@ -126,7 +161,7 @@ mod tests {
             vec![
                 "error: gat.yaml is invalid".to_string(),
                 String::new(),
-                "The `mounts` section has an unrecognized key.".to_string(),
+                "  The `mounts` section has an unrecognized key.".to_string(),
             ]
         );
     }
@@ -143,8 +178,8 @@ mod tests {
             vec![
                 "error: Move rollback failed".to_owned(),
                 String::new(),
-                "The moved file was not restored.".to_owned(),
-                path.clone(),
+                "  The moved file was not restored.".to_owned(),
+                format!("  {path}"),
                 String::new(),
                 format!("hint: {path}"),
             ]
@@ -177,7 +212,7 @@ mod tests {
             vec![
                 "error: Invalid configuration",
                 "",
-                "The requested scope differs.",
+                "  The requested scope differs.",
                 "",
                 "hint: Update the defining scope.",
             ]
@@ -205,8 +240,7 @@ mod tests {
     #[test]
     fn wraps_long_summary_at_given_width() {
         let long = "this summary is deliberately long enough that it must wrap across more than one line at a narrow width";
-        let diagnostic = Diagnostic::new_for_test(ErrorCode::Internal, long);
-        let wrapped = terminal::wrap_with_hanging_indent("", diagnostic.summary(), 20);
+        let wrapped = terminal::wrap_user_line("", &UserLine::authored(long), 20);
         for line in wrapped.lines() {
             assert!(line.len() <= 20, "line too long: {line:?}");
         }
@@ -225,7 +259,11 @@ mod tests {
             "Path is outside the repository",
         )
         .with_subject_for_test(long_path);
-        let rendered = render_subject_aware(diagnostic.summary(), diagnostic.subject(), 20);
+        let rendered = terminal::wrap_user_line(
+            "✗ error: ",
+            &summary_with_subject(diagnostic.summary_line(), diagnostic.subject_line()),
+            20,
+        );
         // The subject appears intact, not split across a wrap boundary.
         assert!(rendered.contains(long_path));
     }
