@@ -13,5 +13,5 @@ See [remote routing](/guides/using-multiple-remotes#remote-selection-at-a-glance
 for storage precedence. [History flags](/concepts/history-selection) apply only to remote checks. Mount-owned entries show their mount name.
 
 Missing cache objects use the short `uncached` annotation, with recovery guidance
-below the rows. [Human output limits](/references/cli-output) apply to these
-lists; use `gat status --full-output` (or `gat status -o`) to inspect every row and complete metadata.
+below the rows. Rows and long metadata are limited by default; use `gat status --full-output`
+(or `gat status -o`) to inspect every row and complete metadata.

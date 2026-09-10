@@ -137,6 +137,39 @@ pub enum ValueCardinality {
     List,
 }
 
+/// A named-resource namespace managed through its own command family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigResource {
+    Remote,
+    Route,
+    Mount,
+    Selection,
+}
+
+impl ConfigResource {
+    /// Recognizes resource namespaces, including unknown fields within them,
+    /// so callers can direct users to the owning command's help.
+    #[must_use]
+    pub fn from_key(key: &str) -> Option<Self> {
+        let namespace = key.split('.').next()?;
+        CONFIG_KEYS.iter().find_map(|spec| {
+            let ConfigPath::Named { section, .. } = spec.path else {
+                return None;
+            };
+            if section != namespace {
+                return None;
+            }
+            match spec.write_surface {
+                ConfigWriteSurface::Remote => Some(Self::Remote),
+                ConfigWriteSurface::Route => Some(Self::Route),
+                ConfigWriteSurface::Mount => Some(Self::Mount),
+                ConfigWriteSurface::Selection => Some(Self::Selection),
+                ConfigWriteSurface::Config | ConfigWriteSurface::Automatic => None,
+            }
+        })
+    }
+}
+
 /// A configuration key supported by `gat config`.
 ///
 /// The deprecated [`Self::GitExcludePatterns`] spelling remains accepted,

@@ -239,6 +239,13 @@ fn resource_list(
     Ok(())
 }
 
+fn resource_label(name: &str, is_default: bool) -> UserLine {
+    UserLine::compose([
+        UserLine::identifier(name),
+        UserLine::authored(if is_default { " (default)" } else { "" }),
+    ])
+}
+
 fn scope_line(scope: gat_core::config::ConfigScope) -> UserLine {
     UserLine::authored(match scope {
         gat_core::config::ConfigScope::Global => "global",
@@ -282,6 +289,12 @@ fn selection_fields(record: &gat_command::SelectionRecord) -> Vec<(UserLine, Use
             UserLine::gat_subpath(&record.definition.path),
         ),
     ];
+    if record.definition.is_unrestricted() {
+        fields.push((
+            UserLine::authored("Matches"),
+            UserLine::authored("All tracked paths"),
+        ));
+    }
     for (label, patterns) in [
         ("Include", &record.definition.include),
         ("Exclude", &record.definition.exclude),
@@ -308,11 +321,12 @@ fn render_saved_selection(
                 .map(|record| {
                     rows::ListRow::with_metadata(
                         rows::ListStatus::Success,
-                        UserLine::identifier(record.name.as_str()),
-                        RowDetail::message(UserLine::compose([
-                            UserLine::gat_subpath(&record.definition.path),
-                            UserLine::authored(if record.is_default { "  (default)" } else { "" }),
-                        ])),
+                        resource_label(record.name.as_str(), record.is_default),
+                        RowDetail::message(if record.definition.is_unrestricted() {
+                            UserLine::authored("All tracked paths")
+                        } else {
+                            UserLine::gat_subpath(&record.definition.path)
+                        }),
                     )
                 })
                 .collect();
@@ -320,7 +334,7 @@ fn render_saved_selection(
                 output,
                 "Selections",
                 records.len(),
-                "gat selection add <name>",
+                "gat selection add <name> --path <path>",
                 &rows,
             )?;
         }
@@ -332,10 +346,17 @@ fn render_saved_selection(
             None,
             Some(record.scope),
         )?,
-        O::Saved { name } => resource_confirmation(
+        O::Saved { name, unrestricted } => resource_confirmation(
             output,
             "Saved selection: ",
-            UserLine::identifier(name.as_str()),
+            UserLine::compose([
+                UserLine::identifier(name.as_str()),
+                UserLine::authored(if *unrestricted {
+                    " (all tracked paths)"
+                } else {
+                    ""
+                }),
+            ]),
         )?,
         O::Removed { name, revealed } => {
             resource_confirmation(
@@ -1159,18 +1180,10 @@ pub fn render(output: &mut Output<'_>, outcome: Outcome) -> Result<(), WriteFail
                     .iter()
                     .map(|record| {
                         let display_url = crate::redaction::render_remote_template(&record.url);
-                        let detail = if record.is_default {
-                            UserLine::compose([
-                                UserLine::redacted_url(&display_url),
-                                UserLine::authored("  (default)"),
-                            ])
-                        } else {
-                            UserLine::redacted_url(&display_url)
-                        };
                         rows::ListRow::with_metadata(
                             rows::ListStatus::Success,
-                            UserLine::identifier(record.name.as_str()),
-                            RowDetail::message(detail),
+                            resource_label(record.name.as_str(), record.is_default),
+                            RowDetail::message(UserLine::redacted_url(&display_url)),
                         )
                     })
                     .collect();
@@ -2005,6 +2018,89 @@ mod resource_hint_tests {
     use super::*;
 
     #[test]
+    fn remote_list_uses_stdout_width_and_keeps_redaction_in_full_output() {
+        use gat_command::{RemoteOutcome, RemoteRecord};
+        use gat_core::endpoint::RemoteUrlTemplate;
+        use unicode_width::UnicodeWidthStr;
+
+        let url = format!(
+            "s3://bucket/{}?secret_access_key=NEVER_DISPLAY",
+            "segment/".repeat(16)
+        );
+        for width in [20, 39, 40, 80, 120, 200] {
+            for full in [false, true] {
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                let mut output = Output::new(&mut stdout, &mut stderr);
+                output.set_layouts(
+                    crate::output::OutputLayout::bounded(width).with_full_output(full),
+                    crate::output::OutputLayout::bounded(20),
+                );
+                render(
+                    &mut output,
+                    Outcome::Remote(RemoteOutcome::List(vec![RemoteRecord {
+                        name: "origin".into(),
+                        url: RemoteUrlTemplate::from_string(url.clone()),
+                        is_default: true,
+                    }])),
+                )
+                .unwrap();
+                let styled = String::from_utf8(stdout).unwrap();
+                let text = crate::output::strip_ansi(&styled);
+                assert!(!text.contains("NEVER_DISPLAY"));
+                let row = text
+                    .lines()
+                    .find(|line| line.starts_with("✓  origin"))
+                    .unwrap();
+                assert!(row.starts_with("✓  origin (default)"));
+                if full || width == 200 {
+                    assert!(row.contains(&"segment/".repeat(16)));
+                } else if width < 40 {
+                    assert_eq!(row, "✓  origin (default)");
+                } else {
+                    assert_eq!(row.width(), width);
+                    assert!(row.ends_with("..."));
+                }
+                assert!(stderr.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn selection_default_marker_is_visible_when_details_are_hidden() {
+        for width in [20, 39, 40, 100] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut output = Output::new(&mut stdout, &mut stderr);
+            output.set_layouts(
+                crate::output::OutputLayout::bounded(width),
+                crate::output::OutputLayout::default(),
+            );
+            render(
+                &mut output,
+                Outcome::Selection(gat_command::SelectionOutcome::List(vec![
+                    gat_command::SelectionRecord {
+                        name: "all".into(),
+                        definition: Default::default(),
+                        scope: gat_core::config::ConfigScope::Project,
+                        is_default: true,
+                    },
+                ])),
+            )
+            .unwrap();
+            let styled = String::from_utf8(stdout).unwrap();
+            let text = crate::output::strip_ansi(&styled);
+            let row = text
+                .lines()
+                .find(|line| line.starts_with("✓  all"))
+                .unwrap();
+            assert!(row.starts_with("✓  all (default)"));
+            assert_eq!(row.contains("All tracked paths"), width >= 40);
+            assert!(stderr.is_empty());
+        }
+    }
+
+    #[test]
     fn initialization_commands_remain_intact_at_narrow_widths() {
         for width in [20, 40, 60] {
             let mut stdout = Vec::new();
@@ -2617,7 +2713,7 @@ mod outcome_tests {
             )
             .unwrap();
             let styled = String::from_utf8(stdout).unwrap();
-            assert!(styled.ends_with(&format!("{}\n", ui::dim(&ui::truncate(expected, 24)))));
+            assert!(styled.ends_with(&format!("{}\n", ui::dim(expected))));
         }
         assert_eq!(
             with_mount_metadata(UserLine::authored("new"), Some(&"models".into())).as_str(),

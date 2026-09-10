@@ -54,6 +54,8 @@ pub enum SelectionOutcome {
     Show(SelectionRecord),
     Saved {
         name: SelectionName,
+        /// Extent of the saved definition, not the number of current matches.
+        unrestricted: bool,
     },
     Removed {
         name: SelectionName,
@@ -83,17 +85,13 @@ pub fn named_selection(
     repo: &Repository,
     name: &SelectionName,
 ) -> Result<Selection, SavedSelectionError> {
-    let cfg = repo.load_config()?;
+    let mut cfg = repo.load_config()?;
     let definition = cfg
         .selections
         .by_name
-        .get(name)
+        .remove(name)
         .ok_or_else(|| SavedSelectionError::NotFound { name: name.clone() })?;
-    Ok(Selection::from_scope_patterns(
-        definition.path.clone().into_path_scope(),
-        definition.include.clone().unwrap_or_default(),
-        definition.exclude.clone().unwrap_or_default(),
-    ))
+    Ok(definition.into())
 }
 
 #[allow(
@@ -140,31 +138,33 @@ pub fn saved_selection(
             Ok(SelectionOutcome::Show(record(name, &layers.effective()?)?))
         }
         SelectionRequest::Default { name, unset, scope } => {
+            let outcome = |cfg: &gat_core::config::Config, chosen_in| {
+                Ok(SelectionOutcome::Default {
+                    record: cfg
+                        .selections
+                        .default
+                        .clone()
+                        .map(|name| record(name, cfg))
+                        .transpose()?,
+                    chosen_in,
+                })
+            };
             if name.is_some() || unset {
                 let mut cfg = layers.scoped(scope).clone();
                 cfg.selections.default = name;
-                layers.candidate_effective(scope, &cfg)?;
+                let effective = layers.candidate_effective(scope, &cfg)?;
+                let chosen_in =
+                    crate::resource::candidate_defining_scope(&layers, scope, &cfg, |c| {
+                        c.selections.default.is_some()
+                    });
+                let result = outcome(&effective, chosen_in)?;
                 repo.save_config_scoped(&cfg, scope)?;
-                return saved_selection(
-                    repo,
-                    SelectionRequest::Default {
-                        name: None,
-                        unset: false,
-                        scope,
-                    },
-                );
+                return Ok(result);
             }
-            let cfg = layers.effective()?;
-            let chosen_in = defining_scope(&layers, |c| c.selections.default.is_some());
-            Ok(SelectionOutcome::Default {
-                record: cfg
-                    .selections
-                    .default
-                    .clone()
-                    .map(|name| record(name, &cfg))
-                    .transpose()?,
-                chosen_in,
-            })
+            outcome(
+                &layers.effective()?,
+                defining_scope(&layers, |c| c.selections.default.is_some()),
+            )
         }
         SelectionRequest::Add {
             name,
@@ -185,10 +185,11 @@ pub fn saved_selection(
                 scope,
                 |c| c.selections.by_name.contains_key(&name),
             )?;
+            let unrestricted = definition.is_unrestricted();
             cfg.selections.by_name.insert(name.clone(), definition);
             layers.candidate_effective(scope, &cfg)?;
             repo.save_config_scoped(&cfg, scope)?;
-            Ok(SelectionOutcome::Saved { name })
+            Ok(SelectionOutcome::Saved { name, unrestricted })
         }
         SelectionRequest::Update {
             name,
@@ -219,9 +220,10 @@ pub fn saved_selection(
             if let Some(exclude) = exclude {
                 definition.exclude = Some(exclude);
             }
+            let unrestricted = definition.is_unrestricted();
             layers.candidate_effective(scope, &cfg)?;
             repo.save_config_scoped(&cfg, scope)?;
-            Ok(SelectionOutcome::Saved { name })
+            Ok(SelectionOutcome::Saved { name, unrestricted })
         }
         SelectionRequest::Remove { name, scope } => {
             check_scope(

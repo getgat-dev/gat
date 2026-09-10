@@ -10,15 +10,7 @@ fn main() -> ExitCode {
     let mut stdout = anstream::AutoStream::auto(std::io::stdout());
     let mut stderr = anstream::AutoStream::auto(std::io::stderr());
     let mut output = output::Output::new(&mut stdout, &mut stderr);
-    let layout = |size: Option<(terminal_size::Width, terminal_size::Height)>| {
-        size.map_or_else(output::OutputLayout::default, |(width, _)| {
-            output::OutputLayout::bounded(usize::from(width.0))
-        })
-    };
-    output.set_layouts(
-        layout(terminal_size::terminal_size_of(std::io::stdout())),
-        layout(terminal_size::terminal_size_of(std::io::stderr())),
-    );
+    refresh_output_layouts(&mut output, false);
     match run(&mut output) {
         Ok(code) => ExitCode::from(code),
         Err(ProcessFailure::Usage(error)) => {
@@ -39,6 +31,20 @@ fn main() -> ExitCode {
         Err(ProcessFailure::Command(failure)) => report_failure(&mut output, &failure),
         Err(ProcessFailure::Output(error)) => report_output_failure(&mut output, error, 0),
     }
+}
+
+// Terminal discovery stays at the process boundary; rendering uses injected layouts.
+fn refresh_output_layouts(output: &mut output::Output<'_>, full_output: bool) {
+    let layout = |size: Option<(terminal_size::Width, terminal_size::Height)>| {
+        size.map_or_else(output::OutputLayout::default, |(width, _)| {
+            output::OutputLayout::bounded(usize::from(width.0))
+        })
+        .with_full_output(full_output)
+    };
+    output.set_layouts(
+        layout(terminal_size::terminal_size_of(std::io::stdout())),
+        layout(terminal_size::terminal_size_of(std::io::stderr())),
+    );
 }
 
 fn report_failure(output: &mut output::Output<'_>, failure: &Failure) -> ExitCode {
@@ -98,7 +104,8 @@ fn run(output: &mut output::Output<'_>) -> Result<u8, ProcessFailure> {
     let _guard = rt.enter();
 
     let cli = Cli::try_parse().map_err(ProcessFailure::Usage)?;
-    output.set_full_output(cli.full_output);
+    let full_output = cli.full_output;
+    output.set_full_output(full_output);
     let repo = Repository::discover().map_err(Failure::from)?;
     let context = app::Context::new(repo);
 
@@ -117,6 +124,9 @@ fn run(output: &mut output::Output<'_>) -> Result<u8, ProcessFailure> {
     // durable outcome or error, so final output never interleaves with (or
     // gets clobbered by) a spinner still mid-redraw.
     progress.finish_all();
+    // A long operation may outlive a resize. Refresh after clearing progress so
+    // notices, results, and command failures use the current per-stream widths.
+    refresh_output_layouts(output, full_output);
     // Notices recorded into `context.lifecycle` (by CLI dispatch, `gat
     // config` read/write, or actual consumption of a persisted config
     // value) are emitted unconditionally, before the command's durable

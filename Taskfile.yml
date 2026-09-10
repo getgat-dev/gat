@@ -173,6 +173,7 @@ tasks:
   docs:validate:
     desc: Validate generated docs are current and the Mintlify site is valid
     cmds:
+      - cargo test --locked -p gat-tools --bin generate-docs
       - cargo run --quiet --locked -p gat-tools --bin generate-docs -- --check
       - npm --prefix docs ci
       - npm --prefix docs run check

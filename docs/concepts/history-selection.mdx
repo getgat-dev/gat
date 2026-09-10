@@ -4,7 +4,8 @@ description: "Choose which Git snapshots Gat uses, and how far back to look."
 ---
 
 History selection tells Gat which committed `gat.lock` <Tooltip tip="The complete path-to-content map recorded at one Git commit. Reading a snapshot discovers the content IDs it references; it does not change your checkout." cta="How versions are restored" href="/concepts/how-gat-works#fetch-sync-and-pull">snapshots</Tooltip> to read. Use
-these flags with `gat push`, `gat fetch`, `gat pull`, `gat status --remote`, or `gat gc`.
+these flags with [gat push](/commands/push), [gat fetch](/commands/fetch),
+[gat pull](/commands/pull), [gat status --remote](/commands/status), or [gat gc](/commands/gc).
 
 <Note>
   `gat pull` can prefetch historical objects, but always restores the current
@@ -13,9 +14,11 @@ these flags with `gat push`, `gat fetch`, `gat pull`, `gat status --remote`, or 
 
 **Choose your starting commits, then decide how far back to look.**
 
-Combine history with [path selection](/concepts/path-selection) to choose files
-within those snapshots. Before deleting stored content, review
-[garbage-collection protection rules](/commands/gc).
+For transfers and remote status, combine history with
+[path selection](/concepts/path-selection) to choose files within those snapshots.
+Garbage collection does not accept path filters or use the default named selection;
+it protects every object referenced by its selected locks. Before deleting stored
+content, review [garbage-collection protection rules](/commands/gc).
 
 <Steps>
   <Step title="Choose where to start">

@@ -1,5 +1,6 @@
 pub struct CommandDoc {
     pub path: &'static str,
+    /// Markdown; use checked `{{arg:command path:id}}` references for options.
     pub overview: &'static str,
     pub examples: &'static [CommandExample],
 }
@@ -7,6 +8,7 @@ pub struct CommandDoc {
 pub struct CommandExample {
     pub title: &'static str,
     pub argv: &'static [&'static str],
+    /// Markdown, with the same checked references as command overviews.
     pub explanation: &'static str,
 }
 
@@ -56,26 +58,33 @@ pub const COMMAND_DOCS: &[CommandDoc] = &[
     ),
     command!(
         "selection add",
-        "Save a complete definition. Adding a selection never chooses a default.",
-        [example!(
-            "Save model selection",
-            [
-                "selection",
-                "add",
-                "runtime",
-                "--path",
-                "models",
-                "--include",
-                "**/*.onnx",
-                "--exclude",
-                "experimental/**"
-            ],
-            "Patterns are relative to models."
-        )]
+        "Save a complete definition with at least one of {{arg:selection add:path}}, {{arg:selection add:include}}, or {{arg:selection add:exclude}}. Use `--path .` for all tracked paths. Adding a selection never chooses a default.",
+        [
+            example!(
+                "Save model selection",
+                [
+                    "selection",
+                    "add",
+                    "runtime",
+                    "--path",
+                    "models",
+                    "--include",
+                    "**/*.onnx",
+                    "--exclude",
+                    "experimental/**"
+                ],
+                "Patterns are relative to models."
+            ),
+            example!(
+                "Save an unrestricted selection",
+                ["selection", "add", "all", "--local", "--path", "."],
+                "Explicitly selects all tracked paths. Choose it as the local default to override an inherited working set."
+            )
+        ]
     ),
     command!(
         "selection update",
-        "Update a definition in its existing scope. Omitted fields are preserved; supplied lists replace the saved lists.",
+        "Update a definition in its existing scope. At least one path, pattern, or clear option is required. Omitted fields are preserved; supplied lists replace the saved lists.",
         [example!(
             "Clear exclusions",
             ["selection", "update", "runtime", "--clear-exclude"],
@@ -93,7 +102,7 @@ pub const COMMAND_DOCS: &[CommandDoc] = &[
     ),
     command!(
         "selection default",
-        "Show or choose the optional default. --unset removes this scope's pointer and restores inheritance. It does not select everything when a lower layer has a default.",
+        "Show or choose the optional default. {{arg:selection default:unset}} removes this scope's pointer and restores inheritance. It does not select everything when a lower layer has a default.",
         [
             example!(
                 "Choose default",
@@ -109,7 +118,7 @@ pub const COMMAND_DOCS: &[CommandDoc] = &[
     ),
     command!(
         "remote default",
-        "Show or choose the optional default remote. Adding a remote never chooses a default. --unset restores inheritance from lower layers.",
+        "Show or choose the optional default remote. Adding a remote never chooses a default. {{arg:remote default:unset}} restores inheritance from lower layers.",
         [example!(
             "Choose a default remote",
             ["remote", "default", "origin"],
@@ -240,7 +249,7 @@ pub const COMMAND_DOCS: &[CommandDoc] = &[
     ),
     command!(
         "remote update",
-        "Change a saved URL in its defining scope. Omit `--url` to preserve it.",
+        "Change a saved URL in its defining scope. Omit {{arg:remote update:url}} to preserve it.",
         [example!(
             "Change a remote URL",
             [
@@ -616,7 +625,7 @@ pub const COMMAND_DOCS: &[CommandDoc] = &[
     ),
     command!(
         "mount add",
-        "Import a committed source snapshot under a target directory. Storage setup is automatic unless `--no-setup` is supplied.",
+        "Import a committed source snapshot under a target directory. Storage setup is automatic unless {{arg:mount add:no_setup}} is supplied.",
         [
             example!(
                 "No setup",
@@ -658,8 +667,19 @@ pub const COMMAND_DOCS: &[CommandDoc] = &[
     ),
     command!(
         "mount update",
-        "Refresh the source snapshot. Omitted settings are preserved; supplied filter lists replace the saved lists.",
+        "Refresh the source snapshot. Omitted settings are preserved; supplied filter lists replace the saved lists. Use {{arg:mount update:clear_include}} or {{arg:mount update:clear_exclude}} to clear a saved list independently.",
         [
+            example!(
+                "Clear filters",
+                [
+                    "mount",
+                    "update",
+                    "resnet",
+                    "--clear-include",
+                    "--clear-exclude"
+                ],
+                "Select all paths below the saved source path by clearing both filter lists."
+            ),
             example!(
                 "No setup",
                 ["mount", "update", "resnet", "--no-setup"],
@@ -689,7 +709,7 @@ pub const COMMAND_DOCS: &[CommandDoc] = &[
     ),
     command!(
         "mount remove",
-        "Remove a mount and its imported tracking entries. Use `--detach-only` to retain the entries under local ownership. Routes and remotes are kept.",
+        "Remove a mount and its imported tracking entries. Use {{arg:mount remove:detach_only}} to retain the entries under local ownership. Routes and remotes are kept.",
         [
             example!(
                 "Remove",

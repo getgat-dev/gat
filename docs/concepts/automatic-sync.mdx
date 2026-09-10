@@ -91,7 +91,7 @@ gat sync --dry-run
 
 ## Working-tree validation
 
-Sync checks <Tooltip tip="Filesystem information used to detect possible changes without reading the whole file. It is distinct from tracking metadata in gat.lock, which records paths and content IDs.">file metadata</Tooltip> first and hashes content when needed. `gat status`
+Sync checks <Tooltip tip="Filesystem information used to detect possible changes without reading the whole file. It is distinct from tracking metadata in gat.lock, which records paths and content IDs.">file metadata</Tooltip> first and hashes content when needed. [gat status](/commands/status)
 compares tracking metadata; it does not inspect payload edits.
 
 <Accordion title="Skip file checks with trust-state">

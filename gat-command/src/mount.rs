@@ -214,12 +214,11 @@ pub fn mount(
         }),
         MountRequest::Show { name } => {
             repo.mounts()
-                .with_locked_config(progress, |mount, layers, effective| {
+                .with_locked_config(progress, |mount, layers, mut effective| {
                     let source = effective
                         .mounts
                         .by_name
-                        .get(&name)
-                        .cloned()
+                        .remove(&name)
                         .ok_or_else(|| MountError::NotFound { name: name.clone() })?;
                     let tracked_rows = mount.desired_count(&source.target)?;
                     let route =
@@ -262,6 +261,15 @@ pub fn mount(
             exclude,
             scope,
         } => {
+            // Avoid source preparation for rejected names; recheck under the
+            // mutation lock below because configuration can change meanwhile.
+            {
+                let layers = repo.load_config_layers()?;
+                if layers.scoped(scope).mounts.by_name.contains_key(&name) {
+                    return Err(MountError::AlreadyExists { name });
+                }
+                ensure_add_not_shadowed(&layers, &name, scope)?;
+            }
             let parsed = parse_source(location.clone(), revision.clone())?;
             let target = match target {
                 Some(target) => target,
@@ -281,22 +289,21 @@ pub fn mount(
                     }
                     ensure_add_not_shadowed(&layers, &name, scope)?;
 
-                    let mut candidate = scoped.clone();
-                    candidate.mounts.by_name.insert(
+                    let pre_config = scoped.clone();
+                    scoped.mounts.by_name.insert(
                         name.clone(),
                         MountConfig {
-                            url: location.clone(),
+                            url: location,
                             target: target.clone(),
                             path: path.clone(),
-                            rev: revision.clone(),
-                            rev_lock: None,
+                            rev: revision,
+                            rev_lock: Some(prepared.rev_lock()),
                             include: include.clone(),
                             exclude: exclude.clone(),
                         },
                     );
-                    let effective = layers.candidate_effective(scope, &candidate)?;
+                    let effective = layers.candidate_effective(scope, &scoped)?;
                     check_no_root_owned_assets(mount, &target, None)?;
-                    let pre_config = scoped.clone();
                     let route = if no_setup {
                         None
                     } else {
@@ -311,19 +318,11 @@ pub fn mount(
                             &name,
                         )?
                     };
-                    scoped.mounts.by_name.insert(
-                        name.clone(),
-                        MountConfig {
-                            url: location,
-                            target: target.clone(),
-                            path: path.clone(),
-                            rev: revision,
-                            rev_lock: Some(prepared.rev_lock()),
-                            include: include.clone(),
-                            exclude: exclude.clone(),
-                        },
-                    );
-                    let post_effective = layers.candidate_effective(scope, &scoped)?;
+                    let post_effective = if no_setup {
+                        effective
+                    } else {
+                        layers.candidate_effective(scope, &scoped)?
+                    };
                     let selection =
                         Selection::from_scope_patterns(path.into_path_scope(), include, exclude);
                     let applied = mount.add(MountAdd::new(
@@ -377,17 +376,15 @@ pub fn mount(
         } => repo
             .mounts()
             .with_locked_config(progress, |mount, layers, _effective| {
-                let scoped = layers.scoped(scope).clone();
-                let existing = scoped
+                let scoped = layers.scoped(scope);
+                let mut post_config = scoped.clone();
+                let existing = post_config
                     .mounts
                     .by_name
-                    .get(&name)
-                    .cloned()
+                    .remove(&name)
                     .ok_or_else(|| wrong_scope_or_not_found(&layers, &name, scope))?;
                 ensure_not_shadowed(&layers, &name, scope)?;
 
-                let mut post_config = scoped.clone();
-                post_config.mounts.by_name.remove(&name);
                 let post_effective = layers.candidate_effective(scope, &post_config)?;
                 ensure_removal_does_not_reveal_ownership_change(
                     &layers,
@@ -396,6 +393,8 @@ pub fn mount(
                     scope,
                     &existing.target,
                 )?;
+                let route_remaining = find_route_by_path(&post_effective.routes, &existing.target)
+                    .map(|(name, _)| name.clone());
                 let owned_rows = if detach_only {
                     let count = mount.desired_count(&existing.target)?;
                     mount.detach(scope, &post_config)?;
@@ -406,14 +405,12 @@ pub fn mount(
                             scope,
                             name.clone(),
                             existing.target.clone(),
-                            scoped,
+                            scoped.clone(),
                             post_config,
-                            post_effective.clone(),
+                            post_effective,
                         ))?
                         .removed as u64
                 };
-                let route_remaining = find_route_by_path(&post_effective.routes, &existing.target)
-                    .map(|(name, _)| name.clone());
                 Ok(MountOutcome::Removed {
                     name,
                     target: existing.target,
@@ -443,29 +440,34 @@ fn update_mount(
     request: UpdateRequest,
     progress: &dyn ProgressReporter,
 ) -> Result<MountOutcome> {
-    let provisional = repo
-        .load_config_layers()?
-        .scoped(request.scope)
-        .mounts
-        .by_name
-        .get(&request.name)
-        .cloned();
-    let provisional_location = request
-        .location
-        .clone()
-        .or_else(|| provisional.as_ref().map(|mount| mount.url.clone()));
-    let provisional_revision = request
-        .revision
-        .clone()
-        .or_else(|| provisional.as_ref().and_then(|mount| mount.rev.clone()));
-    let mut prepared = match provisional_location {
-        Some(location) => Some((
-            location.clone(),
-            provisional_revision.clone(),
-            prepare_source(location, provisional_revision.as_ref(), progress)?,
-        )),
-        None => None,
+    // Reject invalid requests before potentially cloning a source. The locked
+    // checks below remain authoritative if configuration changes meanwhile.
+    let (provisional_location, provisional_revision) = {
+        let layers = repo.load_config_layers()?;
+        let provisional = layers
+            .scoped(request.scope)
+            .mounts
+            .by_name
+            .get(&request.name)
+            .ok_or_else(|| wrong_scope_or_not_found(&layers, &request.name, request.scope))?;
+        ensure_not_shadowed(&layers, &request.name, request.scope)?;
+        (
+            request
+                .location
+                .clone()
+                .unwrap_or_else(|| provisional.url.clone()),
+            request.revision.clone().or_else(|| provisional.rev.clone()),
+        )
     };
+    let mut prepared = Some((
+        provisional_location.clone(),
+        provisional_revision.clone(),
+        prepare_source(
+            provisional_location,
+            provisional_revision.as_ref(),
+            progress,
+        )?,
+    ));
 
     enum Attempt {
         Applied(Box<MountOutcome>),
@@ -479,17 +481,15 @@ fn update_mount(
         let attempt = repo.mounts().with_locked_config(
             progress,
             |mount, layers, _effective_config| -> Result<Attempt> {
-                let mut scoped = layers.scoped(request.scope).clone();
-                let existing = scoped
+                let pre_config = layers.scoped(request.scope);
+                let existing = pre_config
                     .mounts
                     .by_name
                     .get(&request.name)
-                    .cloned()
                     .ok_or_else(|| {
                         wrong_scope_or_not_found(&layers, &request.name, request.scope)
                     })?;
                 ensure_not_shadowed(&layers, &request.name, request.scope)?;
-                let pre_config = scoped.clone();
                 let location = request
                     .location
                     .clone()
@@ -520,21 +520,20 @@ fn update_mount(
                     .clone()
                     .unwrap_or_else(|| existing.exclude.clone());
 
-                scoped.mounts.by_name.remove(&request.name);
-                let mut candidate = scoped.clone();
-                candidate.mounts.by_name.insert(
+                let mut scoped = pre_config.clone();
+                scoped.mounts.by_name.insert(
                     request.name.clone(),
                     MountConfig {
-                        url: location.clone(),
+                        url: location,
                         target: target.clone(),
                         path: path.clone(),
-                        rev: revision.clone(),
-                        rev_lock: existing.rev_lock,
+                        rev: revision,
+                        rev_lock: Some(prepared_source.rev_lock()),
                         include: include.clone(),
                         exclude: exclude.clone(),
                     },
                 );
-                let effective = layers.candidate_effective(request.scope, &candidate)?;
+                let effective = layers.candidate_effective(request.scope, &scoped)?;
                 if target != existing.target {
                     check_no_root_owned_assets(mount, &target, Some(&existing.target))?;
                 }
@@ -552,27 +551,19 @@ fn update_mount(
                         &request.name,
                     )?
                 };
-                scoped.mounts.by_name.insert(
-                    request.name.clone(),
-                    MountConfig {
-                        url: location,
-                        target: target.clone(),
-                        path: path.clone(),
-                        rev: revision,
-                        rev_lock: Some(prepared_source.rev_lock()),
-                        include: include.clone(),
-                        exclude: exclude.clone(),
-                    },
-                );
-                let post_effective = layers.candidate_effective(request.scope, &scoped)?;
+                let post_effective = if request.no_setup {
+                    effective
+                } else {
+                    layers.candidate_effective(request.scope, &scoped)?
+                };
                 let selection =
                     Selection::from_scope_patterns(path.into_path_scope(), include, exclude);
                 let applied = mount.update(MountUpdate::new(
                     request.scope,
                     request.name.clone(),
-                    existing.target,
+                    existing.target.clone(),
                     target.clone(),
-                    pre_config,
+                    pre_config.clone(),
                     scoped,
                     post_effective,
                     prepared_source.rows(selection),

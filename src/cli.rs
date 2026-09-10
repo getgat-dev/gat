@@ -591,7 +591,8 @@ pub enum Command {
     Push {
         #[command(flatten)]
         selection: RepositorySelectionArgs,
-        /// Remote to push to. Defaults to the configured default remote.
+        /// Remote to push to. Overrides path routing; when omitted, routes
+        /// choose storage by path, with the configured default remote as fallback.
         #[arg(long)]
         remote: Option<String>,
 
@@ -619,7 +620,8 @@ pub enum Command {
     Fetch {
         #[command(flatten)]
         selection: RepositorySelectionArgs,
-        /// Remote to fetch from. Defaults to the configured default remote.
+        /// Remote to fetch from. Overrides path routing; when omitted, routes
+        /// choose storage by path, with the configured default remote as fallback.
         #[arg(long)]
         remote: Option<String>,
 
@@ -653,7 +655,8 @@ pub enum Command {
     Pull {
         #[command(flatten)]
         selection: RepositorySelectionArgs,
-        /// Remote to pull from. Defaults to the configured default remote.
+        /// Remote to pull from. Overrides path routing; when omitted, routes
+        /// choose storage by path, with the configured default remote as fallback.
         #[arg(long)]
         remote: Option<String>,
 
@@ -758,7 +761,8 @@ pub enum Command {
         repair: bool,
 
         /// Remote to fetch missing/repair corrupted cache objects from.
-        /// Defaults to the configured default remote. Only meaningful
+        /// Overrides path routing; when omitted, routes choose storage by path,
+        /// with the configured default remote as fallback. Only meaningful
         /// with `--fetch`/`--repair` (or `sync.auto_fetch`/
         /// `sync.auto_repair`).
         #[arg(long)]
@@ -1003,7 +1007,17 @@ pub enum SelectionAction {
         name: String,
     },
     /// Save a complete selection without changing the default.
-    #[command(long_about)]
+    ///
+    /// Supply --path, --include, or --exclude. Use --path . to explicitly
+    /// select all tracked paths. Filters may match no files yet.
+    #[command(
+        long_about,
+        group(clap::ArgGroup::new("definition")
+            .args(["path", "include", "exclude"])
+            .required(true)
+            .multiple(true)),
+        after_help = "Use --path . to save an unrestricted selection (all tracked paths)."
+    )]
     Add {
         /// Saved selection name.
         name: String,
@@ -1013,7 +1027,15 @@ pub enum SelectionAction {
         scope: ConfigScopeArgs,
     },
     /// Update a definition in its existing scope; omitted fields are preserved.
-    #[command(long_about)]
+    ///
+    /// Supply at least one path, pattern, or clear option.
+    #[command(
+        long_about,
+        group(clap::ArgGroup::new("changes")
+            .args(["path", "include", "exclude", "clear_include", "clear_exclude"])
+            .required(true)
+            .multiple(true))
+    )]
     Update {
         /// Saved selection name.
         name: String,
@@ -1256,12 +1278,18 @@ pub enum MountAction {
         no_setup: bool,
         /// Replace the mount's `--include` globs (keeps the current ones if
         /// omitted). Repeatable.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "clear_include")]
         include: Vec<String>,
         /// Replace the mount's `--exclude` globs (keeps the current ones if
         /// omitted). Repeatable.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "clear_exclude")]
         exclude: Vec<String>,
+        /// Clear the saved include filters, selecting all source paths not excluded.
+        #[arg(long)]
+        clear_include: bool,
+        /// Clear the saved exclude filters.
+        #[arg(long)]
+        clear_exclude: bool,
 
         #[command(flatten)]
         scope: ConfigScopeArgs,
@@ -1389,6 +1417,81 @@ mod tests {
         let mut full = vec!["gat"];
         full.extend_from_slice(args);
         Cli::try_parse_from(full).unwrap()
+    }
+
+    #[test]
+    fn saved_selection_mutations_require_explicit_fields_not_just_scope() {
+        for action in ["add", "update"] {
+            for scope in [None, Some("--local"), Some("--project"), Some("--global")] {
+                let mut args = vec!["gat", "selection", action, "runtime"];
+                args.extend(scope);
+                let error = Cli::try_parse_from(&args).err().expect("missing fields");
+                assert_eq!(
+                    error.kind(),
+                    clap::error::ErrorKind::MissingRequiredArgument
+                );
+                for fields in [
+                    vec!["--path", "."],
+                    vec!["--include", "**/*.bin"],
+                    vec!["--exclude", "scratch/**"],
+                    vec![
+                        "--path",
+                        "models",
+                        "--include",
+                        "*.bin",
+                        "--exclude",
+                        "old.bin",
+                    ],
+                ] {
+                    let mut explicit = args.clone();
+                    explicit.extend(fields);
+                    assert!(Cli::try_parse_from(explicit).is_ok());
+                }
+                if action == "update" {
+                    for clear in ["--clear-include", "--clear-exclude"] {
+                        let mut explicit = args.clone();
+                        explicit.push(clear);
+                        assert!(Cli::try_parse_from(explicit).is_ok());
+                    }
+                }
+            }
+        }
+        for args in [
+            vec![
+                "selection",
+                "update",
+                "runtime",
+                "--include",
+                "**",
+                "--clear-include",
+            ],
+            vec![
+                "selection",
+                "update",
+                "runtime",
+                "--exclude",
+                "**",
+                "--clear-exclude",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(std::iter::once("gat").chain(args)).is_err());
+        }
+    }
+
+    #[test]
+    fn saved_selection_requirements_do_not_change_operation_or_mount_defaults() {
+        for command in [
+            "ls-files", "status", "diff", "push", "fetch", "pull", "sync",
+        ] {
+            assert!(Cli::try_parse_from(["gat", command]).is_ok());
+        }
+        assert!(Cli::try_parse_from(["gat", "mount", "add", "assets", "../source"]).is_ok());
+        assert!(Cli::try_parse_from(["gat", "mount", "update", "assets"]).is_ok());
+        let help = Cli::try_parse_from(["gat", "selection", "add", "--help"])
+            .err()
+            .expect("help display");
+        assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+        assert!(help.to_string().contains("--path ."));
     }
 
     #[test]

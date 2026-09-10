@@ -38,7 +38,7 @@ impl<'a> Output<'a> {
         }
     }
 
-    /// Set policies once at the process boundary; writers do not inspect terminals.
+    /// Set per-stream policies at the process boundary; writers do not inspect terminals.
     pub const fn set_layouts(&mut self, stdout: super::OutputLayout, stderr: super::OutputLayout) {
         self.layouts = [stdout, stderr];
     }

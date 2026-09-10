@@ -67,7 +67,6 @@
         "icon": "book-open",
         "pages": [
           "references/configuration",
-          "references/cli-output",
           "references/remote-providers",
           "references/feature-lifecycle"
         ]

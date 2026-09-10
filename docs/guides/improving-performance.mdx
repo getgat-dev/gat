@@ -56,10 +56,10 @@ such as `!keep.txt` are unsupported.
   </Accordion>
 </AccordionGroup>
 
-## Shard a very large `gat.lock`
+## Shard a very large Gat lock
 
 A flat lock is simplest for most repositories. If small `add`, `rm`, or `mv`
-operations spend substantial time rewriting it, start with one shard level:
+operations spend substantial time rewriting it, start with one <Tooltip tip="A level of hash-based directories and files that splits the path-to-content map. Sharding changes storage layout, not which files are tracked." cta="Lock sharding format" href="/spec/lock-v1#sharded-representation">shard level</Tooltip>:
 
 ```sh
 gat config lock.shard_levels 1
@@ -99,7 +99,8 @@ Routine sparse updates can then rewrite only affected shards.
 
 ## Avoid unnecessary copying during materialization
 
-Copy-on-write clones share disk blocks until a file changes; edits keep the
+<Tooltip tip="Creating working files from cached content. The chosen strategy determines whether Gat copies bytes or uses filesystem clones or links." cta="Cache and working files" href="/concepts/how-gat-works#content-identity-is-independent-of-path">Materialization</Tooltip>
+can use copy-on-write clones that share disk blocks until a file changes; edits keep the
 cache intact. Try them with an independent-copy fallback:
 
 ```sh

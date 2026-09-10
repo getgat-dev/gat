@@ -2,7 +2,8 @@
 
 /// Below this width, omit the secondary column to preserve readable labels.
 pub(crate) const MIN_TWO_COLUMN_WIDTH: usize = 40;
-pub(crate) const MAX_METADATA_COLUMNS: usize = 24;
+/// Reserve some detail space when labels are long; short labels can yield more.
+pub(crate) const RESERVED_METADATA_COLUMNS: usize = 24;
 const MAX_ROW_LINES: usize = 20;
 const FALLBACK_COLUMNS: usize = 100;
 

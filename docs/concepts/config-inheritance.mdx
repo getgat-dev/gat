@@ -14,6 +14,47 @@ Gat combines three configuration layers. **Local overrides project; project over
 Reads show the <Tooltip tip="The settings Gat actually uses after combining global, project, and local values. A value shown by a read command may be inherited from a different file than the one you are editing.">effective configuration</Tooltip> from all layers. `--global`, `--project`,
 and `--local` choose where a command writes; project is the default <Tooltip tip="The configuration file a change targets. Selecting a write scope does not stop reads from combining all layers, and a higher-priority override can still hide the changed value.">write scope</Tooltip>.
 
+## General settings and managed resources
+
+Configuration contains both **general settings**, which control Gat's behavior,
+and <Tooltip tip="Named definitions such as remotes, routes, mounts, and selections. Their commands validate related fields together and carry out the associated operation.">managed resources</Tooltip>.
+They share the same configuration files and layers, but use different commands.
+
+| What you configure | Examples | Command |
+| --- | --- | --- |
+| General settings | Cache location, automatic fetching, Git exclusion patterns | [gat config](/commands/config) |
+| Remotes | Named storage locations for objects | [gat remote](/commands/remote) |
+| Routes | Named mappings from path prefixes to remotes | [gat route](/commands/route) |
+| Mounts | Named imports from other Git repositories | [gat mount](/commands/mount) |
+| Selections | Named paths and include/exclude filters | [gat selection](/commands/selection) |
+
+Use `gat config` to read or change a general setting. Use a resource's `list`
+or `show` command to inspect it, and `add`, `update`, or `remove` to manage its
+definition. `gat config` does not read or write individual resource fields.
+Choose default remotes and selections through their respective `default` commands.
+
+For example, these commands change a general setting and update a mount:
+
+```sh
+gat config sync.auto_fetch true
+gat mount update models --rev release
+```
+
+Resource commands let you change related fields together and validate the
+resulting definition. They also perform the work associated with the change:
+updating a mount imports a snapshot and updates its owned lock rows, while
+updating a selection changes only its saved filters. Keeping those operations
+in their resource commands makes their effects explicit.
+
+<Accordion title="Gat-managed fields: rev_lock and version">
+  A mount's `rev_lock` records the commit resolved by `gat mount add` or
+  `gat mount update`. Choose a branch, tag, or commit through `rev`; see
+  [pinning an upstream version](/guides/consuming-gat-assets#pin-the-upstream-version).
+
+  The document's `version` identifies its file format. Neither field is an
+  editable `gat config` setting.
+</Accordion>
+
 ## What inherits?
 
 | Configuration | Rule |
@@ -82,10 +123,11 @@ commands select the whole repository.
 Use `gat config` for general settings, and `gat selection`, `gat remote`,
 `gat route`, or `gat mount` for named resources.
 
-An explicit `update` preserves omitted fields within the saved definition being
-edited. Updates require that definition in the selected scope and reject one
-hidden by a higher-priority definition. Use `add --local` with a complete
-definition to create a local override.
+| Intent | How |
+| --- | --- |
+| Edit an existing named definition | Use `update` in its defining scope. Omitted fields are preserved. |
+| Override a shared definition on this machine | Use `add --local` with a complete definition. |
+| Edit a definition hidden by a higher layer | Change the higher-layer override first; updating the hidden entry is rejected. |
 
 Unsetting a default restores inheritance; it does not select an unrestricted
 repository:
@@ -99,10 +141,10 @@ To save an unrestricted selection, add a named selection with `--path .` and no
 filters, then choose it as the default. Removing a selection or remote is rejected
 if it would leave the effective default dangling.
 
-For general list settings, `--clear` writes an empty list where allowed;
-`--unset` removes the key and restores inheritance. For example,
-`gat config git.ignore_patterns --local --unset` restores inherited custom
-ignore patterns.
+For general list settings, [`--clear`](/commands/config) saves an empty list
+where allowed; `--unset` restores inheritance. For example,
+`gat config git.ignore_patterns --local --unset` restores inherited
+[Git exclusion patterns](/guides/improving-performance#combine-file-exclusions).
 
 ## Check what is active
 

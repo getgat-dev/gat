@@ -103,7 +103,7 @@ pub enum ProgressOperation {
     /// known up front. Remote-GC repository cloning is *not* an instance
     /// of this: it reports its activity onto the caller's already-open
     /// `ComputingReachability` task instead of beginning its own
-    /// `CloningSource` task (see `gc/remote.rs::clone_bare_repo`).
+    /// `CloningSource` task (see `gat-engine/src/gc.rs`).
     CloningSource,
 }
 

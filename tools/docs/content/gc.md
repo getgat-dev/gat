@@ -2,7 +2,7 @@
 the current repository's working lock. Local-cache and remote collection use
 the same rules to decide what to keep. See [history selection](/concepts/history-selection)
 for snapshot traversal and [shared caches](/guides/improving-performance#reuse-a-cache-across-repositories)
-for storage used by multiple clones.
+for storage used by multiple clones. To stop tracking a file, use {{command:rm}}.
 
 | History choice | Protected snapshots |
 | --- | --- |
@@ -11,8 +11,6 @@ for storage used by multiple clones.
 | `--no-history` | The current working lock and each additional repository's HEAD lock. |
 
 Use repeatable `--repository <LOCATION>` to protect other Git repositories.
-History flags apply to each repository independently: revision and exclusion
-names must resolve in every repository. Per-repository selectors are not supported.
 
 ```sh
 gat gc --dry-run --repository ../other-project --repository https://example.com/team/project.git
@@ -26,8 +24,12 @@ repositories are protected; their uncommitted changes are not included.
 </Warning>
 
 <Accordion title="How additional repositories are inspected">
-  Local paths, file URLs, and remote Git URLs all use temporary bare clones.
-  Gat removes these clones after inspection.
+  Local paths, file URLs, and remote Git URLs all use temporary
+  <Tooltip tip="A Git copy containing commits and references, without checked-out working files. Gat reads committed locks from it.">bare clones</Tooltip>.
+  Gat removes them after inspection.
+
+  History flags apply to every repository. Revision and exclusion names must
+  resolve in each one; per-repository selectors are not supported.
 </Accordion>
 
 Start with `--dry-run`. Remote deletion requires `--unsafe`:

@@ -45,11 +45,7 @@ pub(crate) fn resolve<'a>(
             None => Default::default(),
         };
         Ok(ResolvedSelection::new(
-            Cow::Owned(Selection::from_scope_patterns(
-                defaults.path.into_path_scope(),
-                defaults.include.unwrap_or_default(),
-                defaults.exclude.unwrap_or_default(),
-            )),
+            Cow::Owned(defaults.into()),
             SelectionScope::Configured,
         ))
     }

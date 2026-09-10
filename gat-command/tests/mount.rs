@@ -168,6 +168,69 @@ fn add_show_list_update_and_remove_share_the_authoritative_path() {
 }
 
 #[test]
+fn clearing_mount_filters_expands_the_snapshot_and_preserves_the_other_list() {
+    use gat_core::globs::GatGlobPattern;
+    let source = source_repo(&[("a.bin", 'a'), ("other.txt", 'b'), ("nested/b.bin", 'c')]);
+    let destination = git_repo();
+    let repo = Repository::at(destination.path().to_path_buf());
+    let mut request = add_request(source.path(), Some("vendor"), ConfigScope::Project);
+    let MountRequest::Add {
+        include, exclude, ..
+    } = &mut request
+    else {
+        panic!("expected add request");
+    };
+    include.push(GatGlobPattern::parse("**/*.bin").unwrap());
+    exclude.push(GatGlobPattern::parse("nested/**").unwrap());
+    mount(&repo, request, &NoopProgress).unwrap();
+    assert_eq!(desired_paths(&repo), vec![gp("vendor/a.bin")]);
+
+    for (clear_include, clear_exclude, expected) in [
+        (false, false, vec!["vendor/a.bin"]),
+        (true, false, vec!["vendor/a.bin", "vendor/other.txt"]),
+        (
+            false,
+            true,
+            vec!["vendor/a.bin", "vendor/nested/b.bin", "vendor/other.txt"],
+        ),
+    ] {
+        mount(
+            &repo,
+            MountRequest::Update {
+                name: "vendor".into(),
+                location: None,
+                target: None,
+                path: None,
+                revision: None,
+                remote: None,
+                no_setup: true,
+                include: clear_include.then(Vec::new),
+                exclude: clear_exclude.then(Vec::new),
+                scope: ConfigScope::Project,
+            },
+            &NoopProgress,
+        )
+        .unwrap();
+        assert_eq!(
+            desired_paths(&repo),
+            expected.into_iter().map(gp).collect::<Vec<_>>()
+        );
+        let MountOutcome::Show(details) = mount(
+            &repo,
+            MountRequest::Show {
+                name: "vendor".into(),
+            },
+            &NoopProgress,
+        )
+        .unwrap() else {
+            panic!("expected mount details");
+        };
+        assert_eq!(details.exclude.is_empty(), clear_exclude);
+        assert_eq!(details.include.is_empty(), clear_include || clear_exclude);
+    }
+}
+
+#[test]
 fn add_infers_the_repository_name_and_explicit_target_wins() {
     let parent = tempfile::tempdir().unwrap();
     let source_path = parent.path().join("source-name.git");
@@ -318,6 +381,99 @@ fn scope_precedence_errors_remain_typed_through_the_public_command() {
             ..
         }
     ));
+}
+
+#[test]
+fn invalid_additions_fail_before_preparing_the_source() {
+    let destination = git_repo();
+    let repo = Repository::at(destination.path().to_path_buf());
+    let mut local = Config::default();
+    local.mounts.by_name.insert(
+        MountName::from_string("vendor".to_string()),
+        mount_config("local-vendor"),
+    );
+    repo.save_config_scoped(&local, ConfigScope::Local).unwrap();
+    let missing_source = destination.path().join("missing-source");
+    for scope in [ConfigScope::Local, ConfigScope::Project] {
+        let error = mount(
+            &repo,
+            add_request(&missing_source, Some("vendor"), scope),
+            &NoopProgress,
+        )
+        .unwrap_err();
+        match scope {
+            ConfigScope::Local => assert!(matches!(error, MountError::AlreadyExists { .. })),
+            ConfigScope::Project => assert!(matches!(error, MountError::ShadowedOnAdd { .. })),
+            ConfigScope::Global => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn invalid_updates_fail_before_preparing_the_source() {
+    let destination = git_repo();
+    let repo = Repository::at(destination.path().to_path_buf());
+    let name = MountName::from_string("vendor".to_string());
+    let mut project = Config::default();
+    let mut local = Config::default();
+
+    for case in 0..3 {
+        if case == 1 {
+            local
+                .mounts
+                .by_name
+                .insert(name.clone(), mount_config("local-vendor"));
+            repo.save_config_scoped(&local, ConfigScope::Local).unwrap();
+        } else if case == 2 {
+            project
+                .mounts
+                .by_name
+                .insert(name.clone(), mount_config("project-vendor"));
+            repo.save_config_scoped(&project, ConfigScope::Project)
+                .unwrap();
+        }
+        let error = mount(
+            &repo,
+            MountRequest::Update {
+                name: name.clone(),
+                location: Some(GitLocationSpec::from_string(
+                    destination
+                        .path()
+                        .join("missing-source")
+                        .display()
+                        .to_string(),
+                )),
+                target: None,
+                path: None,
+                revision: None,
+                remote: None,
+                no_setup: false,
+                include: None,
+                exclude: None,
+                scope: ConfigScope::Project,
+            },
+            &NoopProgress,
+        )
+        .unwrap_err();
+        match case {
+            0 => assert!(matches!(error, MountError::NotFound { .. })),
+            1 => assert!(matches!(
+                error,
+                MountError::WrongScope {
+                    actual_scope: ConfigScope::Local,
+                    ..
+                }
+            )),
+            2 => assert!(matches!(
+                error,
+                MountError::ShadowedOnMutate {
+                    shadowing_scope: ConfigScope::Local,
+                    ..
+                }
+            )),
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[test]

@@ -14,7 +14,7 @@ task build
 task test
 ```
 
-If `task` is unavailable, use `Taskfile.yml` as the command reference. If
+If `task` is unavailable, use [Taskfile.yml](Taskfile.yml) as the command reference. If
 `cargo-nextest` is unavailable, use `cargo test --all-features --locked`.
 
 Common commands:
@@ -34,7 +34,7 @@ task docs:validate  # verify generated docs and the docs site
 
 1. Fork the repository and create a branch from `main`.
 2. Make a focused change and add tests for new or changed behavior.
-3. Run the smallest relevant tests while developing.
+3. Run the smallest relevant tests while developing; follow the [test guidelines](#tests).
 4. Run `task check` before opening a pull request.
 5. Explain what changed and why in the pull request.
 
@@ -58,6 +58,17 @@ When changing a public command:
 When changing persisted configuration, update the typed `Config` model,
 semantic validation, `gat-core/src/config_keys.rs`, and the `gat config`
 handler when the key is directly settable. Then run the same three tasks.
+
+Command descriptions and examples live in
+[command_docs.rs](tools/docs/command_docs.rs); authored explanations live in
+[tools/docs/content](tools/docs/content). Start with [How Gat works](docs/concepts/how-gat-works.mdx)
+for the user-facing model these pages explain.
+
+Overviews and example explanations are Markdown, including strings in
+`command_docs.rs`. Use `{{arg:selection add:path}}` for a checked option reference
+(rendered as inline code), `{{command:selection add}}` for a command link, and
+backticks for literal invocations such as `--path .`. Plain option text is not
+automatically highlighted.
 
 Checked command and argument references intentionally fail generation when a
 referenced CLI surface changes. Update those references and lifecycle
@@ -141,10 +152,14 @@ not restate code. Rustdoc should document contracts and meaningful errors,
 panics, safety requirements, ownership, or side effects. Keep TODOs actionable
 and record historical rationale in an ADR rather than in code comments.
 
+For performance investigations, use the [benchmarking guide](benches/README.md).
+
 ## Releases
 
-See the [developer release guide](docs-dev/RELEASES.md) for preparation,
-validation, publishing, and recovery.
+The [release workflow](.github/workflows/release.yml) defines validation,
+packaging, and publishing. Push a `vX.Y.Z` tag matching the package version
+in `Cargo.toml` to trigger a release. Leave the release-drafter draft unpublished;
+the workflow publishes it only after validation and asset uploads succeed.
 
 ## Issues
 

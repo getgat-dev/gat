@@ -337,6 +337,8 @@ fn resolve_mount_request(action: MountAction) -> Result<MountRequest> {
             no_setup,
             include,
             exclude,
+            clear_include,
+            clear_exclude,
             scope,
         } => {
             let name = MountName::from_string(name);
@@ -348,10 +350,10 @@ fn resolve_mount_request(action: MountAction) -> Result<MountRequest> {
                 revision: rev.map(GitRevisionSpec::from_string),
                 remote: remote.map(RemoteName::from_string),
                 no_setup,
-                include: (!include.is_empty())
+                include: (clear_include || !include.is_empty())
                     .then(|| mount_globs(&name, "include", &include))
                     .transpose()?,
-                exclude: (!exclude.is_empty())
+                exclude: (clear_exclude || !exclude.is_empty())
                     .then(|| mount_globs(&name, "exclude", &exclude))
                     .transpose()?,
                 scope: scope.resolve(),
@@ -927,6 +929,44 @@ mod tests {
     use test_support::{git_repo_with_initial_commit as test_repo, remote_add_with_default};
     use test_support_git::commit_all;
 
+    #[test]
+    fn mount_filter_clearing_preserves_omitted_lists_and_rejects_replacement_conflicts() {
+        for (flags, includes_cleared, excludes_cleared) in [
+            (vec![], false, false),
+            (vec!["--clear-include"], true, false),
+            (vec!["--clear-exclude"], false, true),
+            (vec!["--clear-include", "--clear-exclude"], true, true),
+        ] {
+            let cli = crate::cli::Cli::try_parse_from(
+                ["gat", "mount", "update", "models"]
+                    .into_iter()
+                    .chain(flags),
+            )
+            .unwrap();
+            let Command::Mount { action } = cli.command else {
+                panic!("expected mount command");
+            };
+            let MountRequest::Update {
+                include, exclude, ..
+            } = resolve_mount_request(action).unwrap()
+            else {
+                panic!("expected mount update");
+            };
+            assert_eq!(include, includes_cleared.then(Vec::new));
+            assert_eq!(exclude, excludes_cleared.then(Vec::new));
+        }
+        for (clear, replace) in [
+            ("--clear-include", "--include"),
+            ("--clear-exclude", "--exclude"),
+        ] {
+            let error = crate::cli::Cli::try_parse_from([
+                "gat", "mount", "update", "models", clear, replace, "**/*.bin",
+            ])
+            .err()
+            .expect("clearing and replacing the same mount filter must conflict");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
+    }
     mod selection_conversion {
         use super::*;
         use std::path::PathBuf;

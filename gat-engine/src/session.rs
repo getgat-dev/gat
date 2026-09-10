@@ -157,14 +157,10 @@ mod tests {
 mod structural_tests {
     use super::Session;
 
-    /// Worker closures dispatched onto
-    /// `spawn_blocking`/`tokio::spawn` must never receive `Session`
-    /// itself -- only the coordinator thread may initialize/use its
-    /// mutable runtime services (remote operator construction and the lazy `CacheClient`). `Session` remains `!Sync` (`RemoteSession`'s internal
-    /// map is not exposed for concurrent mutation either), so it still
-    /// cannot be captured by shared reference into any `Send` closure/
-    /// closure. This test pins that invariant.
-    fn assert_not_sync<T: ?Sized>() {
+    /// A shared session reference must not be capturable by a `Send` worker
+    /// closure. This does not assert whether an owned session is `Send`.
+    #[test]
+    fn session_is_not_sync_so_workers_cannot_capture_a_shared_reference() {
         struct Check<T: ?Sized>(std::marker::PhantomData<T>);
         #[allow(dead_code)]
         trait AmbiguousIfSync<A> {
@@ -172,11 +168,8 @@ mod structural_tests {
         }
         impl<T: ?Sized> AmbiguousIfSync<()> for Check<T> {}
         impl<T: ?Sized + Sync> AmbiguousIfSync<u8> for Check<T> {}
-        let _ = <Check<T> as AmbiguousIfSync<_>>::some_item;
-    }
-
-    #[test]
-    fn session_is_not_sync_so_worker_closures_cannot_capture_it() {
-        assert_not_sync::<Session>();
+        // Resolve at the concrete type: a generic helper without a `T: Sync`
+        // bound would select the blanket implementation even for `Sync` types.
+        let _ = <Check<Session> as AmbiguousIfSync<_>>::some_item;
     }
 }

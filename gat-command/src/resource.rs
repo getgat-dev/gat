@@ -22,13 +22,33 @@ pub(crate) fn defining_scope(
     layers: &ConfigLayers,
     contains: impl Fn(&Config) -> bool,
 ) -> Option<ConfigScope> {
+    find_scope(|scope| contains(layers.scoped(scope)))
+}
+
+/// Provenance in a candidate snapshot, without loading configuration again.
+pub(crate) fn candidate_defining_scope(
+    layers: &ConfigLayers,
+    changed: ConfigScope,
+    candidate: &Config,
+    contains: impl Fn(&Config) -> bool,
+) -> Option<ConfigScope> {
+    find_scope(|scope| {
+        contains(if scope == changed {
+            candidate
+        } else {
+            layers.scoped(scope)
+        })
+    })
+}
+
+fn find_scope(contains: impl Fn(ConfigScope) -> bool) -> Option<ConfigScope> {
     [
         ConfigScope::Local,
         ConfigScope::Project,
         ConfigScope::Global,
     ]
     .into_iter()
-    .find(|scope| contains(layers.scoped(*scope)))
+    .find(|scope| contains(*scope))
 }
 
 pub(crate) fn check_scope(
@@ -76,11 +96,5 @@ pub(crate) fn revealed_scope(
     removed: ConfigScope,
     contains: impl Fn(&Config) -> bool,
 ) -> Option<ConfigScope> {
-    [
-        ConfigScope::Local,
-        ConfigScope::Project,
-        ConfigScope::Global,
-    ]
-    .into_iter()
-    .find(|scope| *scope != removed && contains(layers.scoped(*scope)))
+    find_scope(|scope| scope != removed && contains(layers.scoped(scope)))
 }

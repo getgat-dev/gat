@@ -93,26 +93,35 @@ does not check out those versions: Git chooses the revision to restore.
       - exclude
 </FileTree>
 
-Commit `gat.lock` and project `gat.yaml`. The cache, working files, and local
-bookkeeping stay out of Git. Gat owns `.gat/.gitignore`, which ignores the
-directory's contents before local storage files are written. A new command that
-writes local storage recreates this file if it is missing; exclude sync is only
-needed for managed working files. Opening an existing local database also ensures
-this protection, since SQLite can create coordination files even for read-only
-queries. Reading an absent database leaves local storage absent.
+Commit `gat.lock` and project `gat.yaml`. The cache, managed working files, and
+local bookkeeping stay out of Git.
+
+<Accordion title="How Gat keeps local storage out of Git">
+  Gat maintains `.gat/.gitignore` before writing local storage, recreating it
+  if missing. Opening an existing state database also ensures this protection:
+  database reads can create coordination files. Reading an absent database
+  leaves local storage absent.
+
+  Managed working files use separate Git exclusions. See
+  [ignore rules](/guides/improving-performance#combine-file-exclusions) to
+  understand which files Git and Gat each ignore.
+</Accordion>
 
 <AccordionGroup>
   <Accordion title="gat.lock: which content belongs at each path">
     Each entry holds a repository-relative path and a BLAKE3 content ID.
     Checking out another Git revision selects that revision's file versions.
 
-    Large repositories can split the lock into a `gat.lock/` directory using
-    `lock.shard_levels`. The [logical format](/spec/lock-v1) stays the same.
+    Large repositories can [shard the lock](/guides/improving-performance#shard-a-very-large-gat-lock)
+    into a `gat.lock/` directory. The [logical format](/spec/lock-v1) stays the same.
   </Accordion>
   <Accordion title="gat.yaml: shared settings">
-    Project configuration defines remotes, selections, synchronization, and
-    other settings. Personal overrides belong in global or local configuration.
-    See [Config inheritance](/concepts/config-inheritance).
+    Project configuration contains general settings and named resources.
+    Use `gat config` for settings such as automatic fetching, and `gat remote`,
+    `gat route`, `gat mount`, or `gat selection` to manage named definitions.
+    Personal overrides belong in global or local configuration.
+    See [General settings and managed resources](/concepts/config-inheritance#general-settings-and-managed-resources)
+    for the command distinction and scope rules.
   </Accordion>
   <Accordion title=".gat/objects: cached bytes">
     An **object** is one file's bytes, stored by content ID. Identical bytes share one object across
@@ -122,6 +131,9 @@ queries. Reading an absent database leaves local storage absent.
   <Accordion title=".gat/state: local bookkeeping">
     Gat records what it last put in the working tree. Sync compares this record
     with the current lock and files on disk to plan changes.
+
+    For maintenance and recovery, see the experimental
+    [gat system](/commands/system) commands.
   </Accordion>
   <Accordion title=".git/info/exclude: keep managed files out of Git">
     Gat maintains local exclusions so `git add -A` skips managed working files.
@@ -176,7 +188,7 @@ in each clone. After operations without a suitable hook, such as `git reset
 ## Content identity is independent of path
 
 The content ID is a BLAKE3 hash of the bytes, not the filename. Renaming a tracked file
-with `gat mv` reuses its cached content. Editing a file requires `gat add`
+with [gat mv](/commands/mv) reuses its cached content. Editing a file requires `gat add`
 again to record the new bytes and content ID.
 
 <Accordion title="How cached content becomes a working file">

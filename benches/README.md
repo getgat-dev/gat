@@ -7,12 +7,16 @@ refactors closely and made stale workloads look authoritative.
 
 The maintained helpers are:
 
-- `benchmark_support.rs`: hermetic repository and remote fixtures plus
+- [benchmark_support.rs](benchmark_support.rs): hermetic repository and remote fixtures plus
   deterministic desired-state, cache, and worktree data builders. It is a
   harness-free Cargo bench target so all-target checks compile the helper API;
   it performs no measurements.
-- `tools/generate-benchmark.rs` (`task benchmark:generate`): creates a
+- [tools/generate-benchmark.rs](../tools/generate-benchmark.rs) (`task benchmark:generate`): creates a
   realistic on-disk repository for manually timing the real `gat` CLI.
+
+Run commands below from the repository root. For configuration tradeoffs to
+measure, see [Improving performance](../docs/guides/improving-performance.mdx);
+follow the [test isolation rules](../CONTRIBUTING.md#tests) when building fixtures.
 
 ## Create a local Criterion benchmark
 

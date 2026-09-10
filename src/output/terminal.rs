@@ -374,7 +374,7 @@ impl RowColumns {
             if width < super::layout::MIN_TWO_COLUMN_WIDTH {
                 0
             } else {
-                super::layout::MAX_METADATA_COLUMNS
+                super::layout::RESERVED_METADATA_COLUMNS
                     .min(width.saturating_sub(STATUS_PREFIX_COLUMNS) / 3)
             }
         });
@@ -386,16 +386,31 @@ impl RowColumns {
                 metadata,
             };
         }
+        // Rows without details use the full width and need no column alignment.
         let (label, detail) = items.fold((0, 0), |(label, detail), item| {
-            (
-                label.max(item.path.as_str().width()),
-                detail.max(item.metadata.map_or(0, |text| text.as_str().width())),
-            )
+            let detail_width = item.metadata.map_or(0, |text| text.as_str().width());
+            if detail_width == 0 {
+                (label, detail)
+            } else {
+                (
+                    label.max(item.path.as_str().width()),
+                    detail.max(detail_width),
+                )
+            }
         });
         let label = total.map_or(label, |width| {
             let reserved = detail.min(metadata.unwrap_or(0));
             let gap = if reserved > 0 { COLUMN_GAP } else { 0 };
             label.min(width.saturating_sub(STATUS_PREFIX_COLUMNS + reserved + gap))
+        });
+        // The reservation protects details from long labels; it is not a cap.
+        // Give metadata the remaining physical width after group alignment.
+        let metadata = total.map(|width| {
+            if detail == 0 {
+                0
+            } else {
+                width.saturating_sub(STATUS_PREFIX_COLUMNS + label + COLUMN_GAP)
+            }
         });
         Self {
             total,
@@ -784,6 +799,52 @@ mod tests {
         }
         assert_eq!(truncate("e\u{301}abcdef", 4), "e\u{301}...");
         assert_eq!(truncate("👩‍💻abcdef", 5), "👩‍💻...");
+    }
+
+    #[test]
+    fn short_labels_release_remaining_terminal_width_to_metadata() {
+        let label = UserLine::authored("origin");
+        let detail = UserLine::identifier(&"x".repeat(180));
+        for width in 40..=200 {
+            let line = super::list_items(
+                std::iter::once(ListItem::with_metadata(Status::Success, &label, &detail)),
+                Some(width),
+            )
+            .next()
+            .unwrap();
+            let text = plain(&line);
+            assert_eq!(text.width(), width.min(191));
+            assert_eq!(text.ends_with("..."), width < 191);
+            assert!(text.starts_with("✓  origin  "));
+        }
+    }
+
+    #[test]
+    fn rows_without_details_do_not_take_space_from_other_rows_metadata() {
+        let short = UserLine::authored("origin");
+        let long = UserLine::identifier(&"label".repeat(30));
+        let detail = UserLine::identifier(&"detail".repeat(10));
+        let empty = UserLine::authored("");
+        for metadata in [None, Some(&empty)] {
+            let items = [
+                ListItem::with_metadata(Status::Success, &short, &detail),
+                ListItem {
+                    status: Status::Success,
+                    path: &long,
+                    metadata,
+                },
+            ];
+            for width in [40, 80, 200] {
+                let together: Vec<_> =
+                    super::list_items(items.iter().cloned(), Some(width)).collect();
+                for (item, line) in items.iter().zip(together) {
+                    let alone = super::list_items(std::iter::once(item.clone()), Some(width))
+                        .next()
+                        .unwrap();
+                    assert_eq!(line, alone);
+                }
+            }
+        }
     }
 
     #[test]

@@ -7,6 +7,9 @@ A lock-v1 document maps repository-relative file paths to BLAKE3 content IDs.
 This specification defines the logical model, serialization, sharded representation,
 and three-way merge semantics. File content and local metadata are outside the format.
 
+For the user workflow, start with [How Gat works](/concepts/how-gat-works).
+For resolving a conflicted lock, follow [Branching and merging](/guides/branching-and-merging#resolve-a-same-path-conflict).
+
 <Info>
 Format identifier: `https://getgat.dev/spec/lock-v1`.
 </Info>
@@ -249,6 +252,8 @@ defined above.
 
 Flat and sharded representations use the same format identifier.
 
+To enable sharding in Gat, see [Shard a very large Gat lock](/guides/improving-performance#shard-a-very-large-gat-lock).
+
 ### Shard assignment
 
 For a canonical sharded lock at depth `N`, where `N >= 1`:
@@ -320,6 +325,8 @@ path-to-OID map, even if:
 
 Tools that compare revisions SHOULD compare the logical map rather than raw textual
 layout when they need semantic results.
+
+[gat diff](/commands/diff) provides this comparison for users reviewing versions.
 
 ## Three-way merge
 
