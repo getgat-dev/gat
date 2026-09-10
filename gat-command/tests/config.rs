@@ -4,7 +4,7 @@ use gat_command::{
     config_with_lifecycle_observer,
 };
 use gat_core::config::{ConfigScope, IngestStrategy, MaterializationMode};
-use gat_core::config_keys::ConfigKey;
+use gat_core::config_keys::{ConfigKey, ConfigResource};
 use gat_core::lifecycle::Surface;
 use gat_core::lock::LockShardLevels;
 use gat_engine::Repository;
@@ -74,6 +74,47 @@ fn raw_keys_and_action_cardinality_follow_the_typed_registry() {
             key: ConfigKey::GitIgnorePatterns
         })
     ));
+}
+
+#[test]
+fn resource_keys_are_rejected_before_execution_for_every_config_action() {
+    for (key, expected) in [
+        ("remotes.origin.url", ConfigResource::Remote),
+        ("remotes.default", ConfigResource::Remote),
+        ("routes.data.remote", ConfigResource::Route),
+        ("mounts.models.rev", ConfigResource::Mount),
+        ("mounts.models.rev_lock", ConfigResource::Mount),
+        ("selections.training.include", ConfigResource::Selection),
+        ("selections.default", ConfigResource::Selection),
+        ("mounts", ConfigResource::Mount),
+        ("routes.data.unknown", ConfigResource::Route),
+    ] {
+        for action in [
+            ConfigAction::Get,
+            ConfigAction::Set(vec!["value".to_string()]),
+            ConfigAction::Clear,
+            ConfigAction::Unset,
+        ] {
+            let expected_read_only = action == ConfigAction::Get;
+            let error =
+                ConfigRequest::from_raw(key.to_string(), action, ConfigScope::Local).unwrap_err();
+            assert!(matches!(
+                error,
+                ConfigError::ManagedResource { key: rejected, resource, read_only }
+                    if rejected == key && resource == expected && read_only == expected_read_only
+            ));
+        }
+    }
+    for key in [
+        "mounts_extra.models.rev",
+        "remote.origin.url",
+        "cache.unknown",
+    ] {
+        assert!(matches!(
+            ConfigRequest::from_raw(key.to_string(), ConfigAction::Get, ConfigScope::Project),
+            Err(ConfigError::UnknownKey { .. })
+        ));
+    }
 }
 
 #[test]
@@ -465,4 +506,200 @@ fn ignore_patterns_preserve_commas_and_alias_writes_the_canonical_key() {
             source: ConfigSource::Scope(ConfigScope::Project)
         }
     );
+}
+
+#[test]
+fn saved_selections_resolve_without_worktree_or_lock_and_keep_sparse_definitions() {
+    use gat_command::{SelectionOutcome, SelectionRequest, named_selection, saved_selection};
+    use gat_core::config::SelectionConfig;
+    use gat_core::globs::GatGlobPattern;
+    use gat_core::lexical_path::GatSubpath;
+
+    let (temp, repo) = repository();
+    for (name, definition, matches_future) in [
+        (
+            "future",
+            SelectionConfig {
+                path: GatSubpath::normalize("future-assets").unwrap(),
+                ..Default::default()
+            },
+            true,
+        ),
+        (
+            "none",
+            SelectionConfig {
+                exclude: Some(vec![GatGlobPattern::parse("**").unwrap()]),
+                ..Default::default()
+            },
+            false,
+        ),
+    ] {
+        let outcome = saved_selection(
+            &repo,
+            SelectionRequest::Add {
+                name: name.into(),
+                definition,
+                scope: ConfigScope::Project,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            SelectionOutcome::Saved {
+                unrestricted: false,
+                ..
+            }
+        ));
+        let selection = named_selection(&repo, &name.into()).unwrap();
+        assert!(!selection.matches_str("root.bin"));
+        assert_eq!(
+            selection.matches_str("future-assets/model.bin"),
+            matches_future
+        );
+        // Resolving consumes only the in-memory configuration, not the saved definition.
+        assert!(named_selection(&repo, &name.into()).is_ok());
+    }
+    assert!(!temp.path().join("gat.lock").exists());
+    assert!(!temp.path().join("future-assets").exists());
+    std::fs::write(
+        temp.path().join("gat.yaml"),
+        "selections:\n  all: {}\n  default: all\n",
+    )
+    .unwrap();
+    let selection = named_selection(&repo, &"all".into()).unwrap();
+    assert!(selection.is_unrestricted());
+    assert!(selection.matches_str("root.bin"));
+    assert!(selection.matches_str("future-assets/model.bin"));
+    let outcome = saved_selection(
+        &repo,
+        SelectionRequest::Default {
+            name: None,
+            unset: false,
+            scope: ConfigScope::Project,
+        },
+    )
+    .unwrap();
+    let SelectionOutcome::Default {
+        record: Some(record),
+        ..
+    } = outcome
+    else {
+        panic!("expected the persisted default");
+    };
+    assert!(record.definition.is_unrestricted());
+}
+
+#[test]
+fn default_mutations_report_candidate_provenance_from_one_config_snapshot() {
+    use gat_command::{RemoteOutcome, RemoteRequest, SelectionOutcome, SelectionRequest};
+    use gat_core::config::{Config, RemoteConfig};
+    use gat_core::endpoint::RemoteUrlTemplate;
+
+    for selection in [true, false] {
+        let (_temp, repo) = repository();
+        let mut config = Config::default();
+        for name in ["one", "two"] {
+            config
+                .selections
+                .by_name
+                .insert(name.into(), Default::default());
+            config.remotes.by_name.insert(
+                name.into(),
+                RemoteConfig {
+                    // hygiene-ok: configuration-only fixture; no remote is opened.
+                    url: RemoteUrlTemplate::from_string("file:///unused".into()),
+                },
+            );
+        }
+        repo.save_config_scoped(&config, ConfigScope::Project)
+            .unwrap();
+        for (name, scope, expected, chosen) in [
+            (
+                Some("one"),
+                ConfigScope::Project,
+                Some("one"),
+                Some(ConfigScope::Project),
+            ),
+            (
+                Some("two"),
+                ConfigScope::Local,
+                Some("two"),
+                Some(ConfigScope::Local),
+            ),
+            // A project edit must still report the higher-priority local choice.
+            (
+                Some("one"),
+                ConfigScope::Project,
+                Some("two"),
+                Some(ConfigScope::Local),
+            ),
+            (
+                None,
+                ConfigScope::Local,
+                Some("one"),
+                Some(ConfigScope::Project),
+            ),
+            (None, ConfigScope::Project, None, None),
+        ] {
+            #[cfg(feature = "test-support")]
+            let before = gat_engine::test_support::config_loads();
+            let (actual, chosen_in, defined_in) = if selection {
+                let SelectionOutcome::Default { record, chosen_in } = gat_command::saved_selection(
+                    &repo,
+                    SelectionRequest::Default {
+                        name: name.map(Into::into),
+                        unset: name.is_none(),
+                        scope,
+                    },
+                )
+                .unwrap() else {
+                    panic!("expected selection default");
+                };
+                assert!(record.as_ref().is_none_or(|record| record.is_default));
+                let defined_in = record.as_ref().map(|record| record.scope);
+                (
+                    record.map(|record| record.name.as_str().to_owned()),
+                    chosen_in,
+                    defined_in,
+                )
+            } else {
+                let RemoteOutcome::Default {
+                    name,
+                    chosen_in,
+                    defined_in,
+                } = gat_command::remote(
+                    &repo,
+                    RemoteRequest::Default {
+                        name: name.map(Into::into),
+                        unset: name.is_none(),
+                        scope,
+                    },
+                )
+                .unwrap()
+                else {
+                    panic!("expected remote default");
+                };
+                (
+                    name.map(|name| name.as_str().to_owned()),
+                    chosen_in,
+                    defined_in,
+                )
+            };
+            #[cfg(feature = "test-support")]
+            assert_eq!(gat_engine::test_support::config_loads() - before, 1);
+            assert_eq!(actual.as_deref(), expected);
+            assert_eq!(chosen_in, chosen);
+            assert_eq!(defined_in, expected.map(|_| ConfigScope::Project));
+            let saved = repo.load_config_scoped(scope).unwrap();
+            let saved_name = if selection {
+                saved
+                    .selections
+                    .default
+                    .map(|name| name.as_str().to_owned())
+            } else {
+                saved.remotes.default.map(|name| name.as_str().to_owned())
+            };
+            assert_eq!(saved_name.as_deref(), name);
+        }
+    }
 }

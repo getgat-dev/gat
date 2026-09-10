@@ -15,14 +15,16 @@ For missing working files or damaged cached content, start with
 [missing and corrupted objects](/concepts/automatic-sync#missing-and-corrupted-objects).
 To remove unneeded stored content using history-based protection, see {{command:gc}}.
 
-If lock repair cannot resolve invalid lock or transaction state, the report retains
-the inspection findings and any validated recovery choices. `repair all` stops at
-that lock report before repairing other domains.
+<Accordion title="An interrupted lock update needs recovery">
+  Gat reports unresolved lock state and any validated recovery commands.
+  `repair all` repairs other domains only after blocking lock problems are resolved.
 
-Recovering one transaction can leave other transaction problems unresolved. The
-report shows both the completed recovery and remaining findings; `repair all`
-continues only once blocking lock state is resolved.
+  | Report | Next step |
+  | --- | --- |
+  | One recovery completed, but other problems remain | Review the remaining findings before continuing. |
+  | Several transactions support the requested recovery | Use `--transaction` with an ID from a suggested command. |
+  | No transaction supports the requested recovery | Review the findings; a transaction ID alone cannot make the recovery valid. |
 
-If several transactions support a recovery choice, specify `--transaction` using
-one of the recovery commands shown in the report. This is distinct from a request
-that matches no eligible transaction.
+  A <Tooltip tip="A recorded attempt to change the lock's layout. After an interruption, Gat inspects its saved state before offering recovery.">lock transaction</Tooltip>
+  can remain after an interrupted [layout conversion](/guides/improving-performance#shard-a-very-large-gat-lock).
+</Accordion>

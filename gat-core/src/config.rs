@@ -691,6 +691,28 @@ pub struct SelectionConfig {
     pub exclude: Option<Vec<crate::globs::GatGlobPattern>>,
 }
 
+impl SelectionConfig {
+    /// Whether this definition has root scope and no pattern restrictions,
+    /// independent of lock contents. Omitted and empty lists are equivalent.
+    #[must_use]
+    pub fn is_unrestricted(&self) -> bool {
+        self.path.is_root()
+            && self.include.as_ref().is_none_or(Vec::is_empty)
+            && self.exclude.as_ref().is_none_or(Vec::is_empty)
+    }
+}
+
+/// Move a saved definition into its matcher without cloning or recompiling patterns.
+impl From<SelectionConfig> for crate::selection::Selection {
+    fn from(definition: SelectionConfig) -> Self {
+        Self::from_scope_patterns(
+            definition.path.into_path_scope(),
+            definition.include.unwrap_or_default(),
+            definition.exclude.unwrap_or_default(),
+        )
+    }
+}
+
 /// Synchronization behavior under `sync:` in `gat.yaml`. Shared path defaults
 /// are configured separately through [`SelectionsConfig`].
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
@@ -1320,6 +1342,29 @@ mod tests {
         let mut cfg = Config::default();
         mutate(&mut cfg);
         cfg
+    }
+
+    #[test]
+    fn saved_selection_extent_agrees_with_matching_after_config_roundtrip() {
+        for (yaml, unrestricted) in [
+            ("{}", true),
+            ("path: .", true),
+            ("include: []\nexclude: []", true),
+            ("path: models", false),
+            ("include: ['*.bin']", false),
+            ("exclude: ['**']", false),
+        ] {
+            let definition: SelectionConfig = yaml_serde::from_str(yaml).unwrap();
+            let encoded = yaml_serde::to_string(&definition).unwrap();
+            let decoded: SelectionConfig = yaml_serde::from_str(&encoded).unwrap();
+            assert_eq!(decoded.is_unrestricted(), unrestricted, "{yaml}");
+            let selection = crate::selection::Selection::from(decoded);
+            assert_eq!(selection.is_unrestricted(), unrestricted, "{yaml}");
+            if unrestricted {
+                assert!(selection.matches_str("root.bin"));
+                assert!(selection.matches_str("models/nested/data.bin"));
+            }
+        }
     }
 
     #[test]

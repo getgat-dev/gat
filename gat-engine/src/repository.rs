@@ -217,7 +217,13 @@ impl ConfigLayers {
     }
 
     pub fn effective(&self) -> std::result::Result<Config, RepositoryError> {
-        validate_effective(Config::merge_layers(self.layers.clone()))
+        self.clone().into_effective()
+    }
+
+    // Ordinary reads no longer need provenance after merging; move their decoded
+    // layers instead of cloning every definition and compiled pattern.
+    fn into_effective(self) -> std::result::Result<Config, RepositoryError> {
+        validate_effective(Config::merge_layers(self.layers))
     }
 
     pub fn candidate_effective(
@@ -225,8 +231,12 @@ impl ConfigLayers {
         scope: ConfigScope,
         scoped: &Config,
     ) -> std::result::Result<Config, RepositoryError> {
-        let mut layers = self.layers.clone();
-        layers[Self::index(scope)] = scoped.clone();
+        let replaced = Self::index(scope);
+        let layers = self
+            .layers
+            .iter()
+            .enumerate()
+            .map(|(index, layer)| if index == replaced { scoped } else { layer }.clone());
         validate_effective(Config::merge_layers(layers))
     }
 
@@ -515,7 +525,7 @@ impl Repository {
     /// explicit global config directory instead of mutating `HOME`/
     /// `USERPROFILE`.
     pub fn load_config(&self) -> std::result::Result<Config, RepositoryError> {
-        self.load_config_layers()?.effective()
+        self.load_config_layers()?.into_effective()
     }
 
     /// Reads every configuration layer once for operation-scoped policy.
@@ -536,7 +546,7 @@ impl Repository {
         global_config_dir: Option<PathBuf>,
     ) -> std::result::Result<Config, RepositoryError> {
         self.load_config_layers_with_global_dir(global_config_dir)?
-            .effective()
+            .into_effective()
     }
 
     fn load_config_layers_with_global_dir(
@@ -749,6 +759,58 @@ mod tests {
     use gat_core::lexical_path::GatPath;
     use gat_core::lock::Lock;
     use gat_core::oid::Oid;
+
+    #[test]
+    fn candidate_config_replaces_one_layer_without_changing_the_snapshot() {
+        let definition = |name: &str| {
+            let mut config = Config::default();
+            config
+                .selections
+                .by_name
+                .insert(name.into(), Default::default());
+            config.selections.default = Some(name.into());
+            config
+        };
+        let layers = ConfigLayers {
+            layers: [
+                definition("global"),
+                definition("project"),
+                definition("local"),
+            ],
+        };
+        let baseline = layers.effective().unwrap();
+        let candidate = definition("replacement");
+        for (scope, removed) in [
+            (ConfigScope::Global, "global"),
+            (ConfigScope::Project, "project"),
+            (ConfigScope::Local, "local"),
+        ] {
+            let effective = layers.candidate_effective(scope, &candidate).unwrap();
+            let mut expected = baseline.selections.by_name.clone();
+            expected.remove(removed);
+            expected.insert("replacement".into(), Default::default());
+            assert_eq!(effective.selections.by_name, expected);
+            assert_eq!(
+                effective.selections.default,
+                Some(
+                    if scope == ConfigScope::Local {
+                        "replacement"
+                    } else {
+                        "local"
+                    }
+                    .into()
+                )
+            );
+            assert_eq!(layers.effective().unwrap(), baseline);
+        }
+        let mut invalid = candidate;
+        invalid.selections.default = Some("missing".into());
+        assert!(matches!(
+            layers.candidate_effective(ConfigScope::Local, &invalid),
+            Err(RepositoryError::InvalidEffectiveSelections(_))
+        ));
+        assert_eq!(layers.effective().unwrap(), baseline);
+    }
 
     fn gp(path: &str) -> GatPath {
         GatPath::parse_canonical(path).unwrap()

@@ -200,7 +200,7 @@ fn named_selection_rejects_ambiguity_unknown_names_and_invalid_paths() {
             "--selection",
             "training",
         ],
-        vec!["selection", "add", "default"],
+        vec!["selection", "add", "default", "--path", "."],
         vec!["selection", "default", "missing"],
         vec!["selection", "add", "bad", "--path", "../escape"],
         vec!["selection", "add", "bad", "--include", "["],
@@ -359,4 +359,82 @@ fn selection_updates_preserve_omitted_fields_and_clear_lists_explicitly() {
         3
     );
     assert!(stdout(&gat(repo.path(), &["selection", "default"])).contains("none"));
+}
+
+#[test]
+fn unrestricted_selection_is_explicit_persistent_and_visible() {
+    let repo = init_repo();
+    repo.write("root.bin", "root");
+    repo.write("models/a.bin", "model");
+    assert!(
+        gat(repo.path(), &["add", "root.bin", "models"])
+            .status
+            .success()
+    );
+    assert!(
+        gat(
+            repo.path(),
+            &["selection", "add", "models", "--path", "models"]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        gat(repo.path(), &["selection", "default", "models"])
+            .status
+            .success()
+    );
+    let before = std::fs::read(repo.path().join("gat.yaml")).unwrap();
+    for args in [
+        vec!["selection", "add", "accidental"],
+        vec!["selection", "update", "models", "--project"],
+    ] {
+        let result = gat(repo.path(), &args);
+        assert_eq!(result.status.code(), Some(2));
+        assert!(result.stdout.is_empty());
+        assert!(stderr(&result).contains("--path"));
+        assert_eq!(std::fs::read(repo.path().join("gat.yaml")).unwrap(), before);
+    }
+    let saved = gat(
+        repo.path(),
+        &["selection", "add", "all", "--local", "--path", "."],
+    );
+    assert!(saved.status.success());
+    assert!(stderr(&saved).contains("Saved selection: all (all tracked paths)"));
+    assert!(!stdout(&gat(repo.path(), &["ls-files"])).contains("root.bin"));
+    for args in [vec!["selection", "show", "all"], vec!["selection", "list"]] {
+        assert!(stdout(&gat(repo.path(), &args)).contains("All tracked paths"));
+    }
+    let selected = gat(repo.path(), &["ls-files", "--selection", "all"]);
+    assert!(stdout(&selected).contains("root.bin"));
+    assert!(stdout(&selected).contains("models/a.bin"));
+    let chosen = gat(repo.path(), &["selection", "default", "all", "--local"]);
+    assert!(chosen.status.success());
+    assert!(stdout(&chosen).contains("All tracked paths"));
+    assert!(stdout(&gat(repo.path(), &["ls-files"])).contains("root.bin"));
+    assert!(
+        gat(repo.path(), &["selection", "default", "--local", "--unset"])
+            .status
+            .success()
+    );
+    assert!(!stdout(&gat(repo.path(), &["ls-files"])).contains("root.bin"));
+    let narrowed = gat(
+        repo.path(),
+        &[
+            "selection",
+            "update",
+            "all",
+            "--local",
+            "--include",
+            "*.bin",
+        ],
+    );
+    assert!(narrowed.status.success());
+    assert!(!stderr(&narrowed).contains("all tracked paths"));
+    let cleared = gat(
+        repo.path(),
+        &["selection", "update", "all", "--local", "--clear-include"],
+    );
+    assert!(cleared.status.success());
+    assert!(stderr(&cleared).contains("Saved selection: all (all tracked paths)"));
 }

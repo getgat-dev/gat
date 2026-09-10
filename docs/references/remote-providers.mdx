@@ -88,7 +88,7 @@ In cloud URLs, `/gat` is an optional <Tooltip tip="A shared beginning for object
         | Method | Environment variables |
         | --- | --- |
         | Shared key | `AZURE_STORAGE_ACCOUNT_NAME` + `AZURE_STORAGE_ACCOUNT_KEY` |
-        | SAS token | `AZURE_STORAGE_SAS_TOKEN` |
+        | <Tooltip tip="A Shared Access Signature: a token granting specified storage permissions for a limited period. Supply it exactly as Azure provides it.">SAS token</Tooltip> | `AZURE_STORAGE_SAS_TOKEN` |
         | Bearer token | `AZURE_STORAGE_BEARER_TOKEN` |
 
         Configured managed identity, workload identity, and service-principal
@@ -126,7 +126,7 @@ In cloud URLs, `/gat` is an optional <Tooltip tip="A shared beginning for object
 
     <Steps>
       <Step title="Set up Application Default Credentials">
-        For local development:
+        Set up <Tooltip tip="Google Cloud's credential discovery mechanism, used by applications to find a local credential file or workload identity.">Application Default Credentials</Tooltip> for local development:
 
         ```sh
         gcloud auth application-default login
@@ -331,12 +331,12 @@ If connection setup needs longer, set a positive whole number of seconds:
 <CodeGroup>
   ```sh macOS / Linux
   export GAT_CONNECT_TIMEOUT=15
-  gat push
+  gat status --remote origin
   ```
 
   ```powershell Windows PowerShell
   $env:GAT_CONNECT_TIMEOUT = '15'
-  gat push
+  gat status --remote origin
   ```
 </CodeGroup>
 

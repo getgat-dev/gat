@@ -3,8 +3,8 @@ title: "Branching and merging"
 description: "Publish large-file changes and resolve conflicts with Git."
 ---
 
-Use Git for branches and commits. Run `gat add` after editing large files,
-then publish their bytes with `gat push` before publishing commits.
+Use Git for branches and commits. Run [gat add](/commands/add) after editing large files,
+then publish their bytes with [gat push](/commands/push) before publishing commits.
 
 <Note>
   Run `gat init` in every clone. Git does not copy Gat's local hooks or
@@ -46,7 +46,7 @@ then publish their bytes with `gat push` before publishing commits.
     gat diff main HEAD --path models
     ```
 
-    Gat compares tracked paths and content IDs. It does not compare the contents
+    [gat diff](/commands/diff) compares tracked paths and content IDs. It does not compare the contents
     of binary files. The Gat example compares the two branch tips directly.
   </Tab>
 </Tabs>
@@ -93,7 +93,9 @@ require a decision. Gat does not merge binary contents.
 
 ### Why you may not see conflict markers
 
-The semantic merge driver fails closed. When it cannot resolve a path, Git records `gat.lock` as unresolved, but Gat leaves the current lock content untouched instead of writing `<<<<<<<` / `=======` / `>>>>>>>` markers into it.
+When the merge driver cannot resolve a path, Git records `gat.lock` as unresolved.
+Gat leaves the current lock content untouched instead of writing
+<Tooltip tip="The lines beginning with <<<<<<<, =======, and >>>>>>> that Git normally inserts into conflicted text files. Gat reports the conflicting paths without inserting these lines into the lock.">conflict markers</Tooltip>.
 
 <Info>
 Use `git status` as the source of truth for whether `gat.lock` is unresolved. A conflicted lock can still look syntactically valid on disk.

@@ -91,3 +91,70 @@ fn mapped_commands_remain_copyable_in_summaries_details_and_hints() {
         }
     }
 }
+
+#[test]
+fn resource_hints_distinguish_reads_from_writes_and_keep_commands_copyable() {
+    use gat_command::{ConfigAction, ConfigRequest};
+    for (key, inspect, update) in [
+        (
+            "remotes.default",
+            "gat remote default",
+            "gat remote default NAME",
+        ),
+        (
+            "selections.default",
+            "gat selection default",
+            "gat selection default NAME",
+        ),
+        (
+            "remotes.origin.url",
+            "gat remote show NAME",
+            "gat remote update NAME --url URL",
+        ),
+        (
+            "routes.models.path",
+            "gat route show NAME",
+            "gat route update NAME --path PATH --remote REMOTE",
+        ),
+        (
+            "mounts.models.rev_lock",
+            "gat mount show NAME",
+            "gat mount update NAME",
+        ),
+        (
+            "mounts.models.rev",
+            "gat mount show NAME",
+            "gat mount update NAME",
+        ),
+        (
+            "selections.runtime.path",
+            "gat selection show NAME",
+            "gat selection update NAME",
+        ),
+    ] {
+        for (action, expected) in [
+            (ConfigAction::Get, inspect),
+            (ConfigAction::Set(vec!["value".into()]), update),
+        ] {
+            let failure = Failure::from(
+                ConfigRequest::from_raw(key.into(), action, ConfigScope::Project).unwrap_err(),
+            );
+            for width in [20, 40, 80] {
+                let text = render(&failure, width, false);
+                assert!(text.contains(expected), "{width}: {text}");
+                assert_eq!(
+                    text.contains("generated"),
+                    key == "mounts.models.rev_lock" && expected == update,
+                    "unexpected revision hint: {text}"
+                );
+                if key.ends_with(".default") {
+                    assert!(!text.contains("show NAME"));
+                    assert!(!text.contains("update NAME"));
+                }
+                if expected == inspect {
+                    assert!(!text.contains(update), "read suggests mutation: {text}");
+                }
+            }
+        }
+    }
+}

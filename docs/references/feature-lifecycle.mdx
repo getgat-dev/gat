@@ -49,15 +49,15 @@ disabling than originally planned.
 
 ## Where lifecycle shows up
 
-- **`--help` text** states a command's lifecycle status directly, so it's
-  visible without ever visiting this site.
-- **CLI notices**: running an Experimental command, or reading/writing a
-  Deprecated config key/value, prints a one-line notice to stderr. These
-  notices never write to stdout and never change a successful exit code
-  -- scripts parsing gat's stdout output are unaffected.
-- **Generated command pages** carry an `Experimental`/`Deprecated` tag and
-  a callout at the top of the page. Deprecated or experimental command
-  options also carry a callout in the corresponding command page.
-- [Configuration](/references/configuration) marks individual config keys and enumerated values
-  with their lifecycle status, so e.g. one config key's several allowed
-  values can each have their own status.
+| Where | What to look for |
+| --- | --- |
+| `--help` | The command's lifecycle status. |
+| CLI notices | A notice when running an Experimental command or reading/writing a Deprecated key or value. |
+| Command pages, such as [gat system](/commands/system) | An Experimental or Deprecated tag and callout. Individual options can have their own callouts. |
+| [Configuration](/references/configuration) | Status labels on individual keys and allowed values. |
+
+<Accordion title="Do lifecycle notices affect scripts?">
+  Notices go to <Tooltip tip="The separate diagnostic output stream. Command results normally use stdout, the standard output stream.">stderr</Tooltip>.
+  They never write to stdout or change a successful exit code, so they do not
+  alter the command results a script reads from stdout.
+</Accordion>

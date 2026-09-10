@@ -105,7 +105,7 @@ pub fn remote(repo: &Repository, request: RemoteRequest) -> Result<RemoteOutcome
     match request {
         RemoteRequest::Default { name, unset, scope } => {
             let layers = repo.load_config_layers()?;
-            if name.is_some() || unset {
+            let (cfg, chosen_in) = if name.is_some() || unset {
                 let mut cfg = layers.scoped(scope).clone();
                 cfg.remotes.default = name;
                 let effective = layers.candidate_effective(scope, &cfg)?;
@@ -114,19 +114,18 @@ pub fn remote(repo: &Repository, request: RemoteRequest) -> Result<RemoteOutcome
                 {
                     return Err(RemoteError::UnknownRemote { name: name.clone() });
                 }
+                let chosen_in =
+                    crate::resource::candidate_defining_scope(&layers, scope, &cfg, |c| {
+                        c.remotes.default.is_some()
+                    });
                 repo.save_config_scoped(&cfg, scope)?;
-                return remote(
-                    repo,
-                    RemoteRequest::Default {
-                        name: None,
-                        unset: false,
-                        scope,
-                    },
-                );
-            }
-            let cfg = layers.effective()?;
-            let chosen_in =
-                crate::resource::defining_scope(&layers, |c| c.remotes.default.is_some());
+                (effective, chosen_in)
+            } else {
+                (
+                    layers.effective()?,
+                    crate::resource::defining_scope(&layers, |c| c.remotes.default.is_some()),
+                )
+            };
             let defined_in = cfg.remotes.default.as_ref().and_then(|name| {
                 crate::resource::defining_scope(&layers, |c| c.remotes.by_name.contains_key(name))
             });

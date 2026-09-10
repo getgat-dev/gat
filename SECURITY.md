@@ -12,12 +12,11 @@ details and coordinate a fix and disclosure timeline.
 
 ## Scope
 
-`gat` reads git repository data and talks to storage remotes (S3, Azure
-Blob, or a local directory) using credentials from standard environment
-variables. Vulnerabilities of particular interest include:
+`gat` reads git repository data and talks to storage remotes (S3, Azure Blob, GCS, OSS, or a local directory),
+using provider credentials or configured URL options. Vulnerabilities of particular interest include:
 
 - Path traversal or symlink handling issues when tracking, checking out,
   or importing files
 - Credential handling or leakage (remote URLs, access keys)
-- Manifest (`.gat`) parsing issues that could lead to writing outside the
+- Lock (`gat.lock`) or configuration (`gat.yaml`) parsing issues that could lead to writing outside the
   intended working tree

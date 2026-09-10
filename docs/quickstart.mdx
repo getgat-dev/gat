@@ -8,6 +8,9 @@ Keep a file's version in Git and its bytes in Gat, then restore it in a fresh cl
 Before you start, [install Gat](/installation) and open an existing Git repository.
 Replace `assets/model.bin` below with a file that **Git does not already track**.
 
+Already using [Git LFS](/guides/migrating-from-git-lfs) or
+[DVC](/guides/migrating-from-dvc)? Follow the migration guide to transfer existing files.
+
 <Tip>
   Working with an AI assistant? [Connect it to the Gat MCP server](/guides/use-gat-mcp)
   so it can search the documentation as you follow this guide.
@@ -19,7 +22,7 @@ Replace `assets/model.bin` below with a file that **Git does not already track**
     gat init
     ```
 
-    This prepares the local cache, Git hooks, and `gat.lock` merge driver.
+    This prepares the local cache, <Tooltip tip="Local Git integrations that restore working files after supported Git operations and merge lock entries by path." cta="Git integration" href="/commands/init">Git hooks and lock merge driver</Tooltip>.
     Run it once in each clone.
   </Step>
 
@@ -62,7 +65,7 @@ Replace `assets/model.bin` below with a file that **Git does not already track**
     git commit -m "Track model with Gat"
     ```
 
-    The file stays in your working tree. Git commits its path and content ID in
+    The file stays in your working tree. Git commits its path and <Tooltip tip="A hash of the file's bytes. Gat uses it to find the same content in the cache or remote storage." cta="How content identity works" href="/concepts/how-gat-works#content-identity-is-independent-of-path">content ID</Tooltip> in
     `gat.lock`, plus the storage configuration in `gat.yaml`.
 
     <Accordion title="How does Gat keep the file out of Git?">
@@ -105,12 +108,16 @@ Replace `assets/model.bin` below with a file that **Git does not already track**
 
 | Task | Command |
 | --- | --- |
-| Record new or edited file content | `gat add assets/model.bin` |
-| Compare current tracking metadata with staged metadata | `gat status` |
-| Upload required objects | `gat push` |
-| Download objects and restore working files | `gat pull` |
-| Download objects without changing working files | `gat fetch` |
-| Update working files from the local cache | `gat sync` |
+| Record new or edited file content | [gat add](/commands/add) `assets/model.bin` |
+| List tracked paths | [gat ls-files](/commands/ls-files) |
+| Compare current tracking metadata with staged metadata | [gat status](/commands/status) |
+| Compare tracked versions across commits | [gat diff](/commands/diff) |
+| Move a tracked file | [gat mv](/commands/mv) `assets/model.bin assets/renamed.bin` |
+| Stop tracking and delete a file | [gat rm](/commands/rm) `assets/model.bin` |
+| Upload required objects | [gat push](/commands/push) |
+| Download objects and restore working files | [gat pull](/commands/pull) |
+| Download objects without changing working files | [gat fetch](/commands/fetch) |
+| Update working files from the local cache | [gat sync](/commands/sync) |
 
 <Note>
   `gat status` does not inspect file contents. Record edits with `gat add`;

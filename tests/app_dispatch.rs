@@ -200,8 +200,8 @@ fn mount_dispatch_converts_cli_values_and_uses_typed_outcomes() {
     assert_eq!(entries, 1);
     assert_eq!(
         gat_engine::test_support::config_loads() - config_loads_before,
-        1,
-        "mount add should read the destination config layers once"
+        2,
+        "mount add should read once before source preparation and once after locking"
     );
 
     let config_loads_before = gat_engine::test_support::config_loads();

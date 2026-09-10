@@ -303,7 +303,8 @@ fn resource_output_has_shared_style_and_separates_confirmations_from_results() {
     let empty = run(&["selection", "list"]);
     assert_eq!(
         empty.stdout,
-        "✓ Selections: none configured\n\nhint: Run `gat selection add <name>`\n".as_bytes()
+        "✓ Selections: none configured\n\nhint: Run `gat selection add <name> --path <path>`\n"
+            .as_bytes()
     );
     let saved = run(&[
         "selection",
@@ -430,7 +431,7 @@ fn status_and_diff_append_effective_mount_ownership_to_existing_metadata() {
                 .unwrap();
             assert!(
                 mounted.ends_with(if command == "status" {
-                    "new, cached (mount mo..."
+                    "new, cached (mount models)"
                 } else {
                     "new (mount models)"
                 }),

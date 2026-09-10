@@ -33,6 +33,29 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const CONFIGURATION_REMOTE_GUIDE: &str = include_str!("docs/content/configuration-remotes.md");
+const CONFIGURATION_COMMAND_GUIDE: &str = r#"<Note>
+**Local overrides Project; Project overrides Global.** General settings inherit
+field by field; same-name resources replace whole definitions.
+[Default choices](/concepts/config-inheritance#share-definitions-choose-your-default)
+inherit independently. Adding a resource never chooses a default.
+</Note>
+
+## Choose a configuration command
+
+General settings control Gat's behavior. <Tooltip tip="Named definitions with related fields, managed through commands that validate the whole definition and perform any associated work." cta="Settings and resources" href="/concepts/config-inheritance#general-settings-and-managed-resources">Managed resources</Tooltip>
+use their own commands for inspection and changes.
+
+| Configuration | Command |
+| --- | --- |
+| Cache, sync, lock layout, and Git exclusions | {{command:config}} |
+| Named storage locations and the default remote | {{command:remote}} |
+| Path-to-remote mappings | {{command:route}} |
+| Imported snapshots | {{command:mount}} |
+| Saved path filters and the default selection | {{command:selection}} |
+
+`gat config` does not read or write individual resource fields. See
+[Config inheritance](/concepts/config-inheritance) for overrides and defaults.
+"#;
 
 #[derive(Parser)]
 struct Options {
@@ -1065,10 +1088,11 @@ fn render_configuration_mdx(commands: &BTreeMap<String, &Command>) -> Result<Str
             if doc.committed { "Yes" } else { "No" }
         ));
     }
-    out.push_str("</Columns>\n\n<Note>\nConfiguration precedence is **Global → Project → Local**. Named selections, mounts, routes, and remotes replace whole definitions on a same-name collision; different names coexist. Optional default pointers for selections and remotes inherit independently. Adding a resource never chooses a default. Other settings inherit field by field.\n</Note>\n\n");
-    out.push_str("Use `gat config` for general settings and `gat remote`, `gat mount`, `gat route`, or `gat selection` for named resources. See [Config inheritance](/concepts/config-inheritance) for overrides and defaults.\n\n");
+    out.push_str("</Columns>\n\n");
+    let guide = expand_checked_references(CONFIGURATION_COMMAND_GUIDE, commands)?;
+    out.push_str(guide.trim_end());
 
-    out.push_str("## Configuration examples\n\n<CodeGroup>\n```yaml Typical\n");
+    out.push_str("\n\n## Configuration examples\n\n<CodeGroup>\n```yaml Typical\n");
     out.push_str(&validated_yaml(&typical_config())?);
     out.push_str("```\n\n```yaml Complete\n");
     out.push_str(&validated_yaml(&complete_config())?);
@@ -1316,6 +1340,39 @@ mod tests {
     }
 
     #[test]
+    fn subcommand_overviews_render_options_as_inline_code() {
+        let root = root();
+        let commands = command_map(&root);
+        let docs = command_docs_map().unwrap();
+        for (top, subcommand, options) in [
+            (
+                "selection",
+                "add",
+                &["--path", "--include", "--exclude", "--path ."][..],
+            ),
+            ("selection", "default", &["--unset"][..]),
+            ("remote", "default", &["--unset"][..]),
+        ] {
+            let page = render_command_page(top, &commands, &docs).unwrap();
+            let heading = format!("## gat {top} {subcommand}\n\n");
+            let overview = page
+                .split_once(&heading)
+                .unwrap()
+                .1
+                .split_once("\n### Usage")
+                .unwrap()
+                .0;
+            for option in options {
+                assert!(
+                    overview.contains(&format!("`{option}`")),
+                    "gat {top} {subcommand} overview must format {option} as inline code"
+                );
+            }
+            assert!(!overview.contains("{{"), "unexpanded checked reference");
+        }
+    }
+
+    #[test]
     fn duplicate_documentation_paths_are_rejected() {
         static EXAMPLES: &[CommandExample] = &[CommandExample {
             title: "example",
@@ -1379,49 +1436,40 @@ mod tests {
         let mdx = render_configuration_mdx(&commands).unwrap();
         assert_eq!(mdx.matches(guide.as_str()).count(), 1);
         assert!(!guide.contains("{{command:"));
-        assert!(guide.contains("<Tooltip tip="));
-        assert!(guide.contains("<Tabs sync={false}>"));
+        assert!(guide.contains("[gat remote add](/commands/remote#gat-remote-add)"));
+        assert!(guide.contains("/references/remote-providers#"));
         for scheme in ["file://", "s3://", "azblob://", "gcs://", "oss://"] {
             assert!(guide.contains(scheme), "missing provider: {scheme}");
         }
     }
 
     #[test]
-    fn configuration_remote_provider_examples_parse_as_remote_add() {
+    fn remote_provider_examples_parse_as_remote_add() {
         let root = root();
-        for (name, url) in [
-            ("origin", "s3://example-bucket/project?region=eu-west-1"),
-            (
-                "minio",
-                concat!(
-                    "s3://example-bucket/project?region=us-east-1&endpoint=",
-                    // hygiene-ok: parser-only documentation example; no network request.
-                    "http://localhost",
-                    // hygiene-ok: parser-only documentation example; no socket is opened.
-                    ":9000",
-                ),
-            ),
-            (
-                "origin",
-                // hygiene-ok: parser-only documentation example; no network request.
-                "azblob://example-container/project?endpoint=https://myaccount.blob.core.windows.net",
-            ),
-            ("origin", "gcs://example-bucket/project"),
-            (
-                "origin",
-                // hygiene-ok: parser-only documentation example; no network request.
-                "oss://example-bucket/project?endpoint=https://oss-cn-hangzhou.aliyuncs.com",
-            ),
-            ("origin", "file:///mnt/backup/project"),
-            // hygiene-ok: parser-only Windows documentation example; no filesystem access.
-            ("origin", "file:///C:/gat-storage/project"),
-        ] {
-            let line = format!("gat remote add {name} '{url}'");
-            assert!(CONFIGURATION_REMOTE_GUIDE.contains(&line), "missing {line}");
-            let argv = ["remote", "add", name, url];
-            assert!(cli::Cli::try_parse_from(std::iter::once("gat").chain(argv)).is_ok());
+        let guide = include_str!("../docs/references/remote-providers.mdx");
+        let mut schemes = BTreeSet::new();
+        for example in guide
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("gat remote add "))
+        {
+            // Provider examples use a single-quoted URL, preserving query strings
+            // and environment placeholders as one shell argument.
+            let (arguments, quoted_url) = example.split_once('\'').unwrap();
+            let url = quoted_url.strip_suffix('\'').unwrap();
+            let argv = ["remote", "add"]
+                .into_iter()
+                .chain(arguments.split_whitespace())
+                .chain(std::iter::once(url))
+                .collect::<Vec<_>>();
+            cli::Cli::try_parse_from(std::iter::once("gat").chain(argv.iter().copied()))
+                .unwrap_or_else(|err| panic!("invalid provider example {example}: {err}"));
             assert_eq!(parsed_command_path(&root, &argv).unwrap(), "remote add");
+            schemes.insert(url.split_once("://").unwrap().0);
         }
+        assert_eq!(
+            schemes,
+            BTreeSet::from(["file", "s3", "azblob", "gcs", "oss"])
+        );
     }
 
     #[test]

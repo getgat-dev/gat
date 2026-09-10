@@ -26,6 +26,9 @@ jobs:
           cache: npm
           cache-dependency-path: docs/package-lock.json
 
+      - name: Test documentation generator
+        run: cargo test --locked -p gat-tools --bin generate-docs
+
       - name: Check generated documentation
         run: cargo run --quiet --locked -p gat-tools --bin generate-docs -- --check
 

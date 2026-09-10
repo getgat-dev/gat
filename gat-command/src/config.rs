@@ -5,7 +5,7 @@ use gat_core::config::{
     ConfigScope, DEFAULT_INGEST_STRATEGY, IngestStrategy, MaterializationStrategy,
     parse_shard_levels, parse_sync_bool_setting, validate_ignore_patterns,
 };
-use gat_core::config_keys::{ConfigKey, ValueCardinality};
+use gat_core::config_keys::{ConfigKey, ConfigResource, ValueCardinality};
 use gat_core::lifecycle::Surface;
 use gat_core::lock::LockShardLevels;
 use gat_engine::{Repository, RepositoryError};
@@ -31,6 +31,13 @@ pub struct ConfigRequest {
 impl ConfigRequest {
     pub fn from_raw(key: String, action: ConfigAction, scope: ConfigScope) -> Result<Self> {
         let Some(key_value) = ConfigKey::parse(&key) else {
+            if let Some(resource) = ConfigResource::from_key(&key) {
+                return Err(ConfigError::ManagedResource {
+                    key,
+                    resource,
+                    read_only: matches!(action, ConfigAction::Get),
+                });
+            }
             return Err(ConfigError::UnknownKey { key });
         };
         Ok(Self {
@@ -88,6 +95,13 @@ pub enum ConfigOutcome {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    #[error("config key `{key}` belongs to a managed resource")]
+    ManagedResource {
+        key: String,
+        resource: ConfigResource,
+        read_only: bool,
+    },
+
     #[error("unknown config key `{key}`")]
     UnknownKey { key: String },
 
@@ -144,14 +158,9 @@ pub fn config_with_lifecycle_observer(
 
     let read_snapshot = if request.action == ConfigAction::Get {
         let layers = repo.load_config_layers()?;
-        let source = [
-            ConfigScope::Local,
-            ConfigScope::Project,
-            ConfigScope::Global,
-        ]
-        .into_iter()
-        .find(|scope| key_is_defined(layers.scoped(*scope), request.key))
-        .map_or(ConfigSource::Default, ConfigSource::Scope);
+        let source =
+            crate::resource::defining_scope(&layers, |cfg| key_is_defined(cfg, request.key))
+                .map_or(ConfigSource::Default, ConfigSource::Scope);
         Some((layers.effective()?, source))
     } else {
         None

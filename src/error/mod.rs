@@ -662,7 +662,7 @@ impl UserProblem {
     }
 
     /// Approved summary text for inspection. Renderers use
-    /// [`Self::summary_line`] to retain prose and identity boundaries.
+    /// the internal `summary_line` accessor to retain prose and identity boundaries.
     #[must_use]
     pub const fn summary(&self) -> &str {
         self.summary.as_str()

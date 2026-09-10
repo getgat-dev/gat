@@ -83,8 +83,9 @@ gat mount update models --path exports --include '**/*.onnx' --exclude '**/debug
 are relative to that path; exclusions win. The destination stays `vendor/models`.
 
 Omitted settings are preserved. Supplying an include or exclude list replaces
-that list only. See [Mount options](/commands/mount#gat-mount-update) to clear
-saved filters. Repository named selections do not apply to mount source filters.
+that list only. Use `--clear-include` or `--clear-exclude` to clear the corresponding
+saved list; see [Mount options](/commands/mount#gat-mount-update).
+Repository named selections do not apply to mount source filters.
 
 ## Pin the upstream version
 

@@ -38,7 +38,7 @@ gat ls-files --path data --include '**/*.bin' --exclude 'scratch/**'
 
 ## Preview your selection
 
-`gat ls-files` lists matches in the current `gat.lock`, including files absent
+[gat ls-files](/commands/ls-files) lists matches in the current `gat.lock`, including files absent
 from disk. It does not preview historical snapshots or transfer actions.
 
 <Tip>
@@ -148,8 +148,10 @@ gat selection add training --project --path datasets --include '**/*.parquet'
 gat selection default runtime --local
 ```
 
-The saved path is relative to the repository root and defaults to `.`.
-Patterns are relative to that path. Exclusions win.
+Creation requires at least one of `--path`, `--include`, or `--exclude`.
+The saved path is relative to the repository root and defaults to `.` when
+only patterns are supplied. Patterns are relative to that path; exclusions win.
+To save an unrestricted definition, use `gat selection add all --path .`.
 
 | Invocation | Selection used |
 | --- | --- |
@@ -170,8 +172,8 @@ persistent configuration.
 
 ### Update or remove a definition
 
-`gat selection update` preserves omitted fields within the selected scope.
-Supplied lists replace the saved lists; `--clear-include` and
+`gat selection update` requires at least one path, pattern, or clear option and
+preserves omitted fields within the selected scope. Supplied lists replace the saved lists; `--clear-include` and
 `--clear-exclude` clear them. Changing the path keeps the saved filters,
 now relative to that new path.
 
@@ -206,7 +208,8 @@ named selections or their default.
 
 `gat mount update` **keeps each setting you omit**: its saved source path,
 include list, and exclude list. Supplying `--include` replaces only the saved
-include list; the saved exclusions remain unless you also supply `--exclude`.
+include list and keeps the saved exclusions.
+Use `--clear-include` or `--clear-exclude` to clear the corresponding saved list.
 
 See [gat mount](/commands/mount) for saved settings and update options.
 

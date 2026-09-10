@@ -3,7 +3,7 @@ title: "Migrating from Git LFS"
 description: "Move current files to Gat while preserving your existing Git history."
 ---
 
-One migration commit replaces the current LFS pointers with `gat.lock` metadata.
+One migration commit replaces the current <Tooltip tip="Small Git-tracked text files that identify content stored by Git LFS. Restore the actual bytes with git lfs pull before adding those files to Gat.">LFS pointers</Tooltip> with `gat.lock` metadata.
 Old commits remain unchanged and may still require Git LFS and its storage.
 See [Gat’s file lifecycle](/concepts/how-gat-works#follow-one-file-through-a-change)
 for how new versions are recorded and published.
@@ -83,7 +83,7 @@ your paths. For a partial migration, preserve LFS rules for files that stay in L
     ```
 
     Confirm the required objects are present before publishing the branch.
-    `--path .` overrides any configured default selection.
+    `--path .` overrides any configured [default selection](/concepts/path-selection#saved-selections).
   </Step>
 </Steps>
 

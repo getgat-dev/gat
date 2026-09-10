@@ -63,7 +63,8 @@ Options:
           include
 
       --remote <REMOTE>
-          Remote to pull from. Defaults to the configured default remote
+          Remote to pull from. Overrides path routing; when omitted, routes
+          choose storage by path, with the configured default remote as fallback
 
       --rev <REV>
           Explicit revision/rev-spec to select (e.g. a commit, tag, or branch
