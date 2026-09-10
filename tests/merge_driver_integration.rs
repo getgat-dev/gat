@@ -601,7 +601,7 @@ fn linked_worktree_integration_ignores_a_conflicting_ambient_git_common_dir_and_
 /// environment [`common::git`] now applies (via `isolated_child_env`,
 /// shared with [`common::gat_with_env`]), and remains correct even when
 /// the `git` child is additionally handed an explicit, deliberately
-/// conflicting `HOME`/`GAT_CACHE_DIR`/global-Gat-config environment via
+/// conflicting `HOME`/`GAT_CACHE_LOCATION`/global-Gat-config environment via
 /// [`git_with_env`]. Unlike the hook path, `gat merge-driver` itself never
 /// touches ambient Gat/Git state at all (see `gat-engine/src/merge_driver.rs`
 /// -- it only reads the three temp files Git hands it and writes the
@@ -632,7 +632,7 @@ fn merge_driver_still_merges_cleanly_under_an_explicit_conflicting_child_environ
     // environment, handed to the `git merge` child that in turn invokes
     // `gat merge-driver` -- mirroring the conflicting setups used
     // elsewhere in this test suite (a fake home with its own `.gat`
-    // directory, plus a redirected `GAT_CACHE_DIR`).
+    // directory, plus a redirected `GAT_CACHE_LOCATION`).
     let conflicting_home = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(conflicting_home.path().join(".gat")).unwrap();
     let conflicting_cache_dir = tempfile::tempdir().unwrap();
@@ -642,7 +642,7 @@ fn merge_driver_still_merges_cleanly_under_an_explicit_conflicting_child_environ
             Some(conflicting_home.path().to_str().unwrap()),
         ),
         (
-            "GAT_CACHE_DIR",
+            "GAT_CACHE_LOCATION",
             Some(conflicting_cache_dir.path().to_str().unwrap()),
         ),
     ];

@@ -507,7 +507,9 @@ mod tests {
     #[test]
     fn pruned_store_and_lock_render_like_the_original_matcher() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut lock = Lock::default();
         for path in [
             "data/a",
@@ -559,7 +561,9 @@ mod tests {
     #[test]
     fn control_paths_cannot_inject_rules_or_lose_trailing_carriage_return() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut lock = Lock::default();
         insert(&mut lock, "a\nb", 'a');
         insert(&mut lock, "tail\r", 'b');
@@ -601,7 +605,9 @@ mod tests {
     #[test]
     fn root_managed_file_does_not_hide_unrelated_nested_file() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut lock = Lock::default();
         insert(&mut lock, "model.bin", 'a');
         repo.save_lock(&lock).unwrap();
@@ -625,7 +631,9 @@ mod tests {
     #[test]
     fn literal_metacharacter_directory_is_ignored_via_git_semantics() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut lock = Lock::default();
         insert(&mut lock, "data/[foo]/model.bin", 'a');
         repo.save_lock(&lock).unwrap();
@@ -644,7 +652,9 @@ mod tests {
     #[test]
     fn literal_metacharacter_filename_is_ignored_without_wildcarding_to_siblings() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut lock = Lock::default();
         insert(&mut lock, "data/model?.bin", 'a');
         insert(&mut lock, "data/file[1].bin", 'b');
@@ -664,7 +674,9 @@ mod tests {
     #[test]
     fn default_writes_only_exact_tracked_paths_into_info_exclude() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut lock = Lock::default();
         insert(&mut lock, "big.bin", 'a');
         repo.save_lock(&lock).unwrap();
@@ -679,7 +691,9 @@ mod tests {
     #[test]
     fn sync_is_idempotent() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut lock = Lock::default();
         insert(&mut lock, "big.bin", 'a');
         repo.save_lock(&lock).unwrap();
@@ -694,7 +708,9 @@ mod tests {
     #[test]
     fn sync_drops_removed_paths_after_lock_update() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut lock = Lock::default();
         insert(&mut lock, "big.bin", 'a');
         repo.save_lock(&lock).unwrap();
@@ -711,7 +727,9 @@ mod tests {
     #[test]
     fn dry_run_reports_change_without_writing() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut lock = Lock::default();
         insert(&mut lock, "big.bin", 'a');
         repo.save_lock(&lock).unwrap();
@@ -730,7 +748,9 @@ mod tests {
     #[test]
     fn default_empty_patterns_takes_fast_path_and_still_writes_all_exact_paths() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         assert!(
             repo.load_config()
                 .unwrap()
@@ -758,7 +778,9 @@ mod tests {
     #[test]
     fn custom_exclude_pattern_is_written_and_suppresses_redundant_exact_rule() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         set_ignore_patterns(&repo, &["*.safetensors"]);
         let mut lock = Lock::default();
         insert(&mut lock, "model.safetensors", 'a');
@@ -775,7 +797,9 @@ mod tests {
     #[test]
     fn directory_pattern_suppresses_exact_rules_for_every_file_underneath() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         set_ignore_patterns(&repo, &["/data/"]);
         let mut lock = Lock::default();
         for i in 0..50 {
@@ -796,7 +820,9 @@ mod tests {
     #[test]
     fn negated_custom_pattern_is_rejected() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         write_raw_ignore_pattern(tmp.path(), "!keep.txt");
 
         let err = sync(&repo, false).unwrap_err();
@@ -809,7 +835,9 @@ mod tests {
     #[test]
     fn sync_from_store_matches_sync_from_lock_byte_for_byte() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut lock = Lock::default();
         insert(&mut lock, "b.bin", 'a');
         insert(&mut lock, "a.bin", 'b');
@@ -834,7 +862,9 @@ mod tests {
     #[test]
     fn sync_from_store_matches_sync_from_lock_byte_for_byte_with_metacharacters() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut lock = Lock::default();
         insert(&mut lock, "data/[foo]/model.bin", 'a');
         insert(&mut lock, "data/model?.bin", 'b');
@@ -863,7 +893,9 @@ mod tests {
     #[test]
     fn sync_from_store_matches_sync_from_lock_with_ignore_patterns() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         set_ignore_patterns(&repo, &["/data/"]);
         let mut lock = Lock::default();
         for i in 0..20 {
@@ -891,7 +923,9 @@ mod tests {
     #[test]
     fn sync_from_store_preserves_user_lines_outside_managed_block() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let exclude_path = tmp.path().join(".git/info/exclude");
         std::fs::write(&exclude_path, "# my own rule\n*.log\n").unwrap();
         let mut lock = Lock::default();
@@ -914,7 +948,9 @@ mod tests {
     #[test]
     fn sync_preserves_crlf_info_exclude_without_mixing_line_endings() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let exclude_path = tmp.path().join(".git/info/exclude");
         std::fs::write(&exclude_path, "# my own rule\r\n*.log\r\n").unwrap();
         let mut lock = Lock::default();
@@ -939,7 +975,9 @@ mod tests {
     #[test]
     fn remove_managed_block_preserves_crlf_for_surviving_content() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let exclude_path = tmp.path().join(".git/info/exclude");
         std::fs::create_dir_all(exclude_path.parent().unwrap()).unwrap();
         std::fs::write(
@@ -960,7 +998,9 @@ mod tests {
     #[test]
     fn remove_managed_block_deletes_a_crlf_file_that_was_only_the_managed_block() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let exclude_path = tmp.path().join(".git/info/exclude");
         std::fs::create_dir_all(exclude_path.parent().unwrap()).unwrap();
         std::fs::write(&exclude_path, format!("{BEGIN}\r\nbig.bin\r\n{END}\r\n")).unwrap();
@@ -974,7 +1014,9 @@ mod tests {
     #[test]
     fn sync_from_store_has_no_rules_for_empty_desired_state() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let store = store_with_lock(&repo, &Lock::default());
 
         sync_from_store(&repo, &store, false).unwrap();
@@ -986,7 +1028,9 @@ mod tests {
     #[test]
     fn old_exclude_fingerprint_migrates_local_directory_rule_out_of_managed_block() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut store = store_with_lock(&repo, &Lock::default());
         let cfg = repo.load_config().unwrap();
         let mut old_fingerprint = blake3::Hasher::new();
@@ -1026,7 +1070,9 @@ mod tests {
     #[test]
     fn fast_path_persists_a_reusable_proof_from_the_very_first_coherent_observation() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let cfg = repo.load_config().unwrap();
         let mut lock = Lock::default();
         insert(&mut lock, "a.bin", 'a');
@@ -1071,7 +1117,9 @@ mod tests {
     #[test]
     fn proof_miss_reads_once_then_refreshes_the_warm_path() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let cfg = repo.load_config().unwrap();
         let mut lock = Lock::default();
         insert(&mut lock, "a.bin", 'a');
@@ -1112,7 +1160,9 @@ mod tests {
     #[test]
     fn fast_path_fails_closed_on_a_mid_read_rewrite_of_info_exclude() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let cfg = repo.load_config().unwrap();
         let mut lock = Lock::default();
         insert(&mut lock, "a.bin", 'a');
@@ -1196,7 +1246,9 @@ mod tests {
     #[test]
     fn sync_from_lock_fails_closed_on_a_mid_read_rewrite_of_info_exclude() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut lock = Lock::default();
         insert(&mut lock, "a.bin", 'a');
 
@@ -1235,7 +1287,9 @@ mod tests {
     #[test]
     fn render_with_proof_retries_once_and_succeeds_after_a_concurrent_edit_clears() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut lock = Lock::default();
         insert(&mut lock, "a.bin", 'a');
         sync_from_lock(&repo, &lock, false).unwrap();
@@ -1281,7 +1335,9 @@ mod tests {
     #[test]
     fn render_with_proof_surfaces_a_clear_error_after_exhausting_retries() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut lock = Lock::default();
         insert(&mut lock, "a.bin", 'a');
         sync_from_lock(&repo, &lock, false).unwrap();
@@ -1313,7 +1369,9 @@ mod tests {
     #[test]
     fn remove_managed_block_retries_once_and_succeeds_after_a_concurrent_edit_clears() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let exclude_path = tmp.path().join(".git/info/exclude");
         std::fs::create_dir_all(exclude_path.parent().unwrap()).unwrap();
         std::fs::write(&exclude_path, format!("{BEGIN}\nbig.bin\n{END}\nkeep-me\n")).unwrap();
@@ -1346,7 +1404,9 @@ mod tests {
     #[test]
     fn remove_managed_block_surfaces_a_clear_error_after_exhausting_retries() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let exclude_path = tmp.path().join(".git/info/exclude");
         std::fs::create_dir_all(exclude_path.parent().unwrap()).unwrap();
         std::fs::write(&exclude_path, format!("{BEGIN}\nbig.bin\n{END}\nkeep-me\n")).unwrap();

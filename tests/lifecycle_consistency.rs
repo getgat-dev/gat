@@ -11,7 +11,6 @@ use gat::app::{self, Context};
 use gat::cli::{self, Cli};
 use gat::lifecycle::{self, NoticeKind, Status};
 use gat::progress::NoopProgress;
-use gat_engine::Repository as Repo;
 
 #[path = "common/mod.rs"]
 mod common;
@@ -79,7 +78,9 @@ fn every_experimental_command_stays_in_sync_across_help_notices_and_docs() {
 
         // 2. Runtime notice.
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let context = Context::new(repo);
         let result = app::run(parse(minimal_success_args(name)), &context, &NoopProgress);
         result.unwrap_or_else(|err| {
@@ -143,7 +144,9 @@ fn no_command_help_duplicates_the_experimental_lifecycle_prefix() {
 #[test]
 fn failing_experimental_command_still_returns_its_notice() {
     let tmp = test_repo();
-    let repo = Repo::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     let context = Context::new(repo);
 
     // `gat mount list` never fails, so force a failure via `gat gc

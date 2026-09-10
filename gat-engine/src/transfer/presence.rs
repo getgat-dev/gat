@@ -668,7 +668,7 @@ mod tests {
                 async move {
                     let now = active.fetch_add(1, Ordering::SeqCst) + 1;
                     max_active.fetch_max(now, Ordering::SeqCst);
-                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    tokio::task::yield_now().await;
                     active.fetch_sub(1, Ordering::SeqCst);
                     Ok::<bool, std::io::Error>(true)
                 }
@@ -811,13 +811,15 @@ mod tests {
             let executor = executor(8, 8);
             let (_dir, obligations, handles) = single_remote_fixture(3);
             let pending: Vec<usize> = (0..obligations.len()).collect();
-            // Index 0 sleeps longest (finishes last) and errors; index 2
-            // fails immediately. The lowest-index error (0) must still win.
+            // Complete in reverse order; the lowest-index error must still win.
+            let (completed, _) = tokio::sync::watch::channel(3);
             let check = move |_handle: &RemoteHandle, obligation: &FakeObligation| {
                 let tag = u64::from(obligation.oid.as_bytes()[0]);
+                let completed = completed.clone();
+                let mut turn = completed.subscribe();
                 async move {
-                    let delay_ms = (3 - tag) * 5;
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    turn.wait_for(|next| *next == tag + 1).await.unwrap();
+                    completed.send_replace(tag);
                     if tag == 0 || tag == 2 {
                         Err(std::io::Error::other(format!("job {tag} failed")))
                     } else {

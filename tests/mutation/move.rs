@@ -57,7 +57,9 @@ mod tests {
     #[test]
     fn mv_exclude_failure_reports_completed_move_and_retry_cannot_resume() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
         let exclude = tmp.path().join(".git/info/exclude");
@@ -85,7 +87,9 @@ mod tests {
     #[test]
     fn mv_renames_a_tracked_file_updating_lock_and_disk() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
 
@@ -110,7 +114,9 @@ mod tests {
     #[test]
     fn mv_in_a_flat_repo_uses_the_sparse_pipeline_and_stays_a_single_file() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         assert!(
             matching_lock_shape(&repo, tmp.path()).unwrap().is_none(),
             "nothing tracked yet"
@@ -156,7 +162,9 @@ mod tests {
     #[test]
     fn mv_moves_materialized_state_to_the_new_path() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
         ::test_support::sync(&repo, &NoopProgress).unwrap();
@@ -178,7 +186,9 @@ mod tests {
     #[test]
     fn mv_renames_a_tracked_directory_and_all_nested_entries() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("data/nested")).unwrap();
         std::fs::write(tmp.path().join("data/a.bin"), b"a").unwrap();
         std::fs::write(tmp.path().join("data/nested/b.bin"), b"b").unwrap();
@@ -210,7 +220,9 @@ mod tests {
     #[test]
     fn mv_on_an_untracked_path_errors() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
         let err = mv(&repo, Path::new("a.bin"), Path::new("b.bin"), false).unwrap_err();
         assert!(
@@ -227,7 +239,9 @@ mod tests {
     #[test]
     fn mv_without_force_refuses_to_replace_an_existing_untracked_destination() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"source").unwrap();
         add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
         std::fs::write(tmp.path().join("b.bin"), b"destination").unwrap();
@@ -260,7 +274,9 @@ mod tests {
     #[test]
     fn mv_with_force_replaces_an_existing_untracked_destination() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"source").unwrap();
         add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
         std::fs::write(tmp.path().join("b.bin"), b"destination").unwrap();
@@ -283,7 +299,9 @@ mod tests {
     #[test]
     fn mv_destination_collision_with_a_tracked_row_requires_force_and_cleans_up_ownership() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"source").unwrap();
         std::fs::write(tmp.path().join("b.bin"), b"destination").unwrap();
         add(
@@ -343,10 +361,12 @@ mod tests {
         use std::collections::HashMap;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut cfg = repo.load_config().unwrap();
         cfg.lock.shard_levels = Some(gat_core::lock::LockShardLevels::new(2).unwrap());
-        repo.save_config(&cfg).unwrap();
+        repo.write_config_fixture(&cfg).unwrap();
         let mut paths = Vec::new();
         for i in 0..40 {
             let path = format!("file-{i}.bin");
@@ -392,7 +412,9 @@ mod tests {
     #[test]
     fn mv_refuses_an_existing_directory_destination_even_with_force() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
         std::fs::create_dir_all(tmp.path().join("dir")).unwrap();
@@ -414,7 +436,9 @@ mod tests {
     #[test]
     fn mv_refuses_to_touch_a_source_owned_row_or_move_into_a_source_prefix() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut cfg = repo.load_config().unwrap();
         cfg.mounts.by_name.insert(
             gat_core::name::MountName::from_string("models".to_string()),
@@ -428,7 +452,7 @@ mod tests {
                 exclude: Vec::new(),
             },
         );
-        repo.save_config(&cfg).unwrap();
+        repo.write_config_fixture(&cfg).unwrap();
 
         std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
@@ -473,7 +497,9 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let outside = tempfile::tempdir().unwrap();
         let outside_file = outside.path().join("a.bin");
         std::fs::write(&outside_file, b"outside").unwrap();
@@ -520,7 +546,9 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
 
@@ -566,7 +594,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("sub")).unwrap();
         std::fs::write(tmp.path().join("sub/a.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("sub/a.bin")], &NoopProgress).unwrap();
@@ -610,7 +640,9 @@ mod tests {
     #[test]
     fn mv_reports_a_plain_filesystem_rename_failure() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
         // Removed after `mv`'s plan phase confirms `a.bin` is tracked and
@@ -633,7 +665,9 @@ mod tests {
     #[test]
     fn mv_rejects_a_destination_that_escapes_the_repository_root() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
 
@@ -667,7 +701,9 @@ mod tests {
     fn mv_large_directory_matches_single_threaded_and_default_pools() {
         fn run_with_threads(threads: usize) -> (MoveOutcome, Vec<String>) {
             let tmp = test_repo();
-            let repo = Repo::at(tmp.path().to_path_buf());
+            let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+                .unwrap()
+                .repository_at(tmp.path().to_path_buf());
             std::fs::create_dir_all(tmp.path().join("bulk")).unwrap();
             let files: Vec<PathBuf> = (0..200)
                 .map(|i| PathBuf::from(format!("bulk/file-{i:04}.bin")))
@@ -708,7 +744,9 @@ mod tests {
         use crate::common::RecordingProgress;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
         assert_eq!(
@@ -743,7 +781,9 @@ mod tests {
         use crate::common::RecordingProgress;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
         assert_eq!(
@@ -756,7 +796,7 @@ mod tests {
         // full-`Lock` fallback rather than the sparse pipeline.
         let mut cfg = repo.load_config().unwrap();
         cfg.lock.shard_levels = Some(gat_core::lock::LockShardLevels::new(1).unwrap());
-        repo.save_config(&cfg).unwrap();
+        repo.write_config_fixture(&cfg).unwrap();
         assert!(
             matching_lock_shape(&repo, tmp.path()).unwrap().is_none(),
             "a shard_levels change with no reshape yet must force the fallback"
@@ -790,7 +830,9 @@ mod tests {
         use crate::common::RecordingProgress;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"source").unwrap();
         add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
         std::fs::write(tmp.path().join("b.bin"), b"destination").unwrap();

@@ -7,7 +7,7 @@ pub(super) const fn remote_open_code(kind: &gat_engine::RemoteOpenFailureKind) -
     use gat_engine::RemoteOpenFailureKind;
 
     match kind {
-        RemoteOpenFailureKind::InvalidConnectTimeout
+        RemoteOpenFailureKind::NonUnicodeVariable { .. }
         | RemoteOpenFailureKind::InvalidInterpolation
         | RemoteOpenFailureKind::MissingVariable { .. } => ErrorCode::InvalidArgumentValue,
         RemoteOpenFailureKind::MalformedUrl
@@ -33,7 +33,7 @@ pub(super) fn semantic_remote_open_failure(
 
     let subject = UserLine::redacted_url(&crate::redaction::render_remote_template(template));
     let (diagnostic, expected) = match kind {
-        RemoteOpenFailureKind::InvalidConnectTimeout => (invalid_connect_timeout_diagnostic(), true),
+        RemoteOpenFailureKind::NonUnicodeVariable { name } => (non_unicode_variable_diagnostic(name), true),
         RemoteOpenFailureKind::InvalidInterpolation => {
             (super::interpolate::interpolation_syntax_diagnostic(), true)
         }
@@ -128,9 +128,12 @@ pub(super) fn semantic_remote_open_failure(
     }
 }
 
-fn invalid_connect_timeout_diagnostic() -> Diagnostic {
-    Diagnostic::new(ErrorCode::InvalidArgumentValue, "Invalid GAT_CONNECT_TIMEOUT")
-        .with_hint("Set GAT_CONNECT_TIMEOUT to a positive whole number of seconds, such as 15, or unset it to use the 5-second default. The duration must fit the platform timer.")
+fn non_unicode_variable_diagnostic(name: &str) -> Diagnostic {
+    Diagnostic::new(
+        ErrorCode::InvalidArgumentValue,
+        "Template variable is not Unicode",
+    )
+    .with_subject(UserLine::identifier(name))
 }
 
 /// Readiness wording shared by all workflows before workers receive a client.
@@ -145,7 +148,7 @@ pub(super) fn readiness_diagnostic(
         UserLine::authored("'"),
     ]);
     match kind {
-        RemoteOpenFailureKind::InvalidConnectTimeout => Some(invalid_connect_timeout_diagnostic()),
+        RemoteOpenFailureKind::NonUnicodeVariable { name } => Some(non_unicode_variable_diagnostic(name)),
         RemoteOpenFailureKind::ReadinessTimedOut { budget } => Some(
             Diagnostic::new(ErrorCode::RemoteUnavailable, UserLine::compose([
                 UserLine::authored("Readiness check for "), remote,

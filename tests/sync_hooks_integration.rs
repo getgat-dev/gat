@@ -356,13 +356,15 @@ fn restore_is_not_covered_by_hooks_but_manual_sync_recovers() {
 
 #[test]
 fn linked_worktree_shares_hooks_but_has_its_own_materialized_state() {
-    // Sharing the object cache across worktrees is opt-in (`GAT_CACHE_DIR`
+    // Sharing the object cache across worktrees is opt-in (`GAT_CACHE_LOCATION`
     // or `cache.location`, see `Repo::objects_dir`); without it each
     // worktree's default `.gat/objects` is its own, so use a shared cache
     // dir here the way a real multi-worktree setup would.
     let shared_cache = tempfile::tempdir().unwrap();
-    let cache_env: &[(&str, Option<&str>)] =
-        &[("GAT_CACHE_DIR", Some(shared_cache.path().to_str().unwrap()))];
+    let cache_env: &[(&str, Option<&str>)] = &[(
+        "GAT_CACHE_LOCATION",
+        Some(shared_cache.path().to_str().unwrap()),
+    )];
 
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
@@ -503,7 +505,7 @@ fn reinstalling_after_no_hooks_dispatches_and_materializes_again() {
 /// it inherits whatever environment the `git` process that ran it had.
 ///
 /// First proves the setup is meaningful: an
-/// *explicit* conflicting `GAT_CACHE_DIR` override, passed to the `git`
+/// *explicit* conflicting `GAT_CACHE_LOCATION` override, passed to the `git`
 /// child that triggers the hook via [`git_with_env`]'s `extra_env`,
 /// really is honored by the hook-triggered `gat sync` -- otherwise the
 /// assertion that follows would be vacuous. Then proves the actual
@@ -534,7 +536,7 @@ fn hook_triggered_sync_ignores_a_conflicting_global_config_and_cache_dir_elsewhe
     let conflicting_cache_dir = tempfile::tempdir().unwrap();
 
     // A second branch with different tracked content, ingested via an
-    // explicit `GAT_CACHE_DIR` override so the object physically lives
+    // explicit `GAT_CACHE_LOCATION` override so the object physically lives
     // under `conflicting_cache_dir` -- otherwise a later checkout given
     // that same override would have nothing to materialize from and the
     // "honoring" sanity check below would be meaningless.
@@ -545,11 +547,11 @@ fn hook_triggered_sync_ignores_a_conflicting_global_config_and_cache_dir_elsewhe
             dir,
             &["add", "big.bin"],
             &[(
-                "GAT_CACHE_DIR",
+                "GAT_CACHE_LOCATION",
                 Some(conflicting_cache_dir.path().to_str().unwrap()),
             )],
         ),
-        "gat add with an explicit conflicting GAT_CACHE_DIR",
+        "gat add with an explicit conflicting GAT_CACHE_LOCATION",
     );
     assert_ok(&git(dir, &["add", "-A"]), "git add");
     assert_ok(&git(dir, &["commit", "-q", "-m", "honoring"]), "commit");
@@ -564,19 +566,19 @@ fn hook_triggered_sync_ignores_a_conflicting_global_config_and_cache_dir_elsewhe
         dir,
         &["checkout", "-q", "honoring"],
         &[(
-            "GAT_CACHE_DIR",
+            "GAT_CACHE_LOCATION",
             Some(conflicting_cache_dir.path().to_str().unwrap()),
         )],
     );
     assert_ok(
         &honoring_out,
-        "git checkout honoring with an explicit conflicting GAT_CACHE_DIR",
+        "git checkout honoring with an explicit conflicting GAT_CACHE_LOCATION",
     );
     assert_eq!(
         std::fs::read(dir.join("big.bin")).unwrap(),
         b"honoring content",
         "expected the hook-triggered gat sync to honor an explicit conflicting \
-         GAT_CACHE_DIR passed to the git child that fired it"
+         GAT_CACHE_LOCATION passed to the git child that fired it"
     );
 
     // The actual regression: an *ordinary* checkout back to
@@ -603,7 +605,7 @@ fn hook_triggered_sync_ignores_a_conflicting_global_config_and_cache_dir_elsewhe
         count_files(conflicting_cache_dir.path()),
         conflicting_cache_dir_count_before,
         "ordinary hook-triggered gat sync must not have reused the earlier \
-         explicit GAT_CACHE_DIR override"
+         explicit GAT_CACHE_LOCATION override"
     );
 }
 

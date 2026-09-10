@@ -41,6 +41,9 @@ impl Drop for TransferLease {
         let remote = state.remotes.get_mut(&self.remote).unwrap();
         remote.jobs -= 1;
         remote.bytes -= self.bytes;
+        if remote.jobs == 0 {
+            state.remotes.remove(&self.remote);
+        }
         drop(state);
         self.admission.changed.notify_waiters();
     }
@@ -152,6 +155,35 @@ impl Admission {
 mod tests {
     use super::*;
     use std::num::NonZeroUsize;
+
+    #[test]
+    fn last_lease_removes_idle_accounting_without_losing_a_waiter() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _entered = runtime.enter();
+        let (_dir, handles) = crate::remote_session::test_support::open_handles(&["a"]);
+        let id = handles[0].id();
+        let admission = Admission::new(RemoteConcurrency {
+            global: NonZeroUsize::new(2).unwrap(),
+            per_remote: NonZeroUsize::new(2).unwrap(),
+        });
+        let first = admission.try_acquire(id, 1).unwrap();
+        let second = admission.try_acquire(id, 1).unwrap();
+        assert!(admission.try_acquire(id, 1).is_none());
+        drop(first);
+        assert_eq!(admission.state.lock().unwrap().remotes[&id].jobs, 1);
+        drop(second);
+        {
+            let state = admission.state.lock().unwrap();
+            assert!(state.remotes.is_empty());
+            assert_eq!(state.total.jobs, 0);
+            assert_eq!(state.total.bytes, 0);
+            assert_eq!(state.waiting.front(), Some(&(id, 1)));
+        }
+        let resumed = admission.try_acquire(id, 1).unwrap();
+        assert!(admission.state.lock().unwrap().waiting.is_empty());
+        drop(resumed);
+        assert!(admission.state.lock().unwrap().remotes.is_empty());
+    }
 
     #[test]
     fn reservations_bound_bytes_and_preserve_large_job_opportunity() {

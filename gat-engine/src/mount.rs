@@ -19,12 +19,12 @@ use gat_core::progress::{
 use gat_core::selection::Selection;
 use gat_io::{AtomicError, RepoLock};
 use gat_io::{DesiredPublicationError, MountMutationSession, MountReplayResult, StateStoreError};
-use gat_io::{MOUNT_TXN_VERSION, MountJournal, MountJournalError, MountTxnOp, MountTxnRecord};
+use gat_io::{MountJournal, MountJournalError, MountTxnChange, MountTxnPhase, MountTxnRecord};
 
 type BoxedSource = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 const MOUNT_DELETE_WINDOW: usize = 4096;
-const MOUNT_IMPORT_WINDOW: usize = 4096;
+const MOUNT_IMPORT_WINDOW: std::num::NonZeroUsize = std::num::NonZeroUsize::new(4096).unwrap();
 
 /// A parsed mount source location whose physical Git representation remains
 /// below the command boundary.
@@ -380,7 +380,7 @@ impl MountRowSource<'_> {
 }
 
 /// A complete add transition. Its shape makes an old target unrepresentable.
-pub struct MountAdd<'source> {
+pub(crate) struct MountAdd<'source> {
     scope: ConfigScope,
     name: MountName,
     target: GatPath,
@@ -414,7 +414,7 @@ impl<'source> MountAdd<'source> {
 }
 
 /// A complete update transition. Both old and new targets are mandatory.
-pub struct MountUpdate<'source> {
+pub(crate) struct MountUpdate<'source> {
     scope: ConfigScope,
     name: MountName,
     old_target: GatPath,
@@ -452,7 +452,7 @@ impl<'source> MountUpdate<'source> {
 }
 
 /// A destructive remove transition. A new target/source cannot be supplied.
-pub struct MountRemove {
+pub(crate) struct MountRemove {
     scope: ConfigScope,
     name: MountName,
     target: GatPath,
@@ -505,7 +505,9 @@ impl<'repo> MountService<'repo> {
         &self,
         progress: &dyn ProgressReporter,
     ) -> Result<(), MountWorkflowError> {
-        let guard = RepoLock::acquire_repository(self.repo.layout())
+        let guard = self
+            .repo
+            .acquire_configuration_lock()
             .map_err(MountWorkflowError::acquire)?;
         recover_pending_mount_transaction_locked(self.repo, &guard, progress).map(|_| ())
     }
@@ -522,7 +524,8 @@ impl<'repo> MountService<'repo> {
     ///
     /// `E: From<MountWorkflowError>` keeps command errors typed without
     /// introducing a reverse dependency from engine to command.
-    pub fn with_locked<T, E>(
+    #[cfg(test)]
+    pub(crate) fn with_locked<T, E>(
         &self,
         progress: &dyn ProgressReporter,
         operation: impl FnOnce(&mut LockedMount<'repo, '_>) -> Result<T, E>,
@@ -530,16 +533,27 @@ impl<'repo> MountService<'repo> {
     where
         E: From<MountWorkflowError>,
     {
-        let guard = RepoLock::acquire_repository(self.repo.layout())
+        let guard = self
+            .repo
+            .acquire_configuration_lock()
             .map_err(MountWorkflowError::acquire)
             .map_err(E::from)?;
-        let state = recover_pending_mount_transaction_locked(self.repo, &guard, progress)
+        drop(
+            recover_pending_mount_transaction_locked(self.repo, &guard, progress)
+                .map_err(E::from)?,
+        );
+        let layers = self
+            .repo
+            .load_config_layers()
+            .map_err(MountWorkflowError::publish_config)
             .map_err(E::from)?;
+        let levels = layers.unvalidated_effective().lock.shard_levels();
         let mut locked = LockedMount {
             repo: self.repo,
             progress,
-            state,
-            levels: None,
+            state: None,
+            levels,
+            layers,
         };
         operation(&mut locked)
     }
@@ -548,7 +562,7 @@ impl<'repo> MountService<'repo> {
     ///
     /// The effective lock shape is retained by the locked service, avoiding
     /// a second config read when desired state is opened lazily.
-    pub fn with_locked_config<T, E>(
+    pub(crate) fn with_locked_config<T, E>(
         &self,
         progress: &dyn ProgressReporter,
         operation: impl FnOnce(
@@ -560,18 +574,25 @@ impl<'repo> MountService<'repo> {
     where
         E: From<MountWorkflowError> + From<RepositoryError>,
     {
-        let guard = RepoLock::acquire_repository(self.repo.layout())
+        let guard = self
+            .repo
+            .acquire_configuration_lock()
             .map_err(MountWorkflowError::acquire)
             .map_err(E::from)?;
-        let state = recover_pending_mount_transaction_locked(self.repo, &guard, progress)
-            .map_err(E::from)?;
+        // Recovery finishes using its recorded layout. The new operation must
+        // adopt current settings rather than reuse that publication session.
+        drop(
+            recover_pending_mount_transaction_locked(self.repo, &guard, progress)
+                .map_err(E::from)?,
+        );
         let layers = self.repo.load_config_layers().map_err(E::from)?;
-        let effective = layers.effective().map_err(E::from)?;
+        let effective = layers.unvalidated_effective();
         let mut locked = LockedMount {
             repo: self.repo,
             progress,
-            state,
-            levels: Some(effective.lock.shard_levels()),
+            state: None,
+            levels: effective.lock.shard_levels(),
+            layers: layers.clone(),
         };
         operation(&mut locked, layers, effective)
     }
@@ -579,23 +600,18 @@ impl<'repo> MountService<'repo> {
 
 /// Semantic view and authoritative transition executor available only while
 /// [`MountService`] retains repository mutation authority.
-pub struct LockedMount<'repo, 'progress> {
+pub(crate) struct LockedMount<'repo, 'progress> {
     repo: &'repo Repository,
     progress: &'progress dyn ProgressReporter,
     state: Option<MountMutationSession<'repo>>,
-    levels: Option<gat_core::lock::LockShardLevels>,
+    levels: gat_core::lock::LockShardLevels,
+    layers: crate::ConfigLayers,
 }
 
 impl<'repo> LockedMount<'repo, '_> {
     fn state(&mut self) -> Result<&mut MountMutationSession<'repo>, MountWorkflowError> {
         if self.state.is_none() {
-            let levels = match self.levels {
-                Some(levels) => levels,
-                None => self
-                    .repo
-                    .lock_shard_levels()
-                    .map_err(MountWorkflowError::open_state)?,
-            };
+            let levels = self.levels;
             let state = with_progress_typed(
                 self.progress,
                 ProgressSpec::indeterminate(ProgressOperation::LoadingState),
@@ -656,17 +672,21 @@ impl<'repo> LockedMount<'repo, '_> {
                     .stage_selected(&journal, &target)
                     .map_err(MountWorkflowError::stage_rows)?;
                 mount_fault("add.staged")?;
-                let record = MountTxnRecord {
-                    version: MOUNT_TXN_VERSION,
-                    op: MountTxnOp::Add,
+                let mut record = MountTxnRecord {
+                    change: MountTxnChange::Add {
+                        target,
+                        row_windows,
+                    },
                     scope,
                     name,
-                    old_target: None,
-                    new_target: Some(target),
                     post_config,
                     pre_config,
-                    row_windows,
+                    shard_levels: self.levels,
+                    phase: MountTxnPhase::Publish,
                 };
+                self.repo
+                    .validate_config_candidate(&self.layers, &record.post_config, record.scope)
+                    .map_err(MountWorkflowError::publish_config)?;
                 journal
                     .write(&record)
                     .map_err(MountWorkflowError::write_journal)?;
@@ -690,6 +710,7 @@ impl<'repo> LockedMount<'repo, '_> {
                     }
                     return Err(error);
                 }
+                mark_published(&journal, &mut record)?;
                 handle.set_activity(ProgressActivity::RegeneratingExcludes);
                 sync_mount_excludes(self.repo, self.state()?, &post_effective_config)?;
                 Ok(replay.imported)
@@ -732,29 +753,28 @@ impl<'repo> LockedMount<'repo, '_> {
                     .stage_selected(&journal, &new_target)
                     .map_err(MountWorkflowError::stage_rows)?;
                 mount_fault("update.staged")?;
-                let record = MountTxnRecord {
-                    version: MOUNT_TXN_VERSION,
-                    op: MountTxnOp::Update,
+                let mut record = MountTxnRecord {
+                    change: MountTxnChange::Update {
+                        old_target,
+                        new_target,
+                        row_windows,
+                    },
                     scope,
                     name,
-                    old_target: Some(old_target),
-                    new_target: Some(new_target),
                     post_config,
                     pre_config,
-                    row_windows,
+                    shard_levels: self.levels,
+                    phase: MountTxnPhase::Publish,
                 };
+                self.repo
+                    .validate_config_candidate(&self.layers, &record.post_config, record.scope)
+                    .map_err(MountWorkflowError::publish_config)?;
                 journal
                     .write(&record)
                     .map_err(MountWorkflowError::write_journal)?;
                 mount_fault("update.journaled")?;
                 handle.set_activity(ProgressActivity::DeletingOwnedRows);
-                let removed = self
-                    .state()?
-                    .delete_subtree_windowed(
-                        record.old_target.as_ref().expect("validated update"),
-                        MOUNT_DELETE_WINDOW,
-                    )
-                    .map_err(MountWorkflowError::delete_rows)?;
+                let removed = delete_record_rows(self.state()?, &record.change)?;
                 mount_fault("update.deleted")?;
                 handle.set_activity(ProgressActivity::PublishingConfig);
                 self.repo
@@ -763,6 +783,7 @@ impl<'repo> LockedMount<'repo, '_> {
                 mount_fault("update.config_published")?;
                 let mut replay = MountReplayResult::default();
                 replay_record(self.state()?, &journal, &record, &handle, &mut replay)?;
+                mark_published(&journal, &mut record)?;
                 handle.set_activity(ProgressActivity::RegeneratingExcludes);
                 sync_mount_excludes(self.repo, self.state()?, &post_effective_config)?;
                 Ok(MountMutationOutcome {
@@ -800,36 +821,32 @@ impl<'repo> LockedMount<'repo, '_> {
                 journal
                     .reset_staged_rows()
                     .map_err(MountWorkflowError::stage_rows)?;
-                let record = MountTxnRecord {
-                    version: MOUNT_TXN_VERSION,
-                    op: MountTxnOp::Remove,
+                let mut record = MountTxnRecord {
+                    change: MountTxnChange::Remove { target },
                     scope,
                     name,
-                    old_target: Some(target),
-                    new_target: None,
                     post_config,
                     pre_config,
-                    row_windows: 0,
+                    shard_levels: self.levels,
+                    phase: MountTxnPhase::Publish,
                 };
+                self.repo
+                    .validate_config_candidate(&self.layers, &record.post_config, record.scope)
+                    .map_err(MountWorkflowError::publish_config)?;
                 journal
                     .write(&record)
                     .map_err(MountWorkflowError::write_journal)?;
                 mount_fault("remove.journaled")?;
                 task.handle()
                     .set_activity(ProgressActivity::DeletingOwnedRows);
-                let removed = self
-                    .state()?
-                    .delete_subtree_windowed(
-                        record.old_target.as_ref().expect("validated remove"),
-                        MOUNT_DELETE_WINDOW,
-                    )
-                    .map_err(MountWorkflowError::delete_rows)?;
+                let removed = delete_record_rows(self.state()?, &record.change)?;
                 mount_fault("remove.deleted")?;
                 task.handle()
                     .set_activity(ProgressActivity::PublishingConfig);
                 self.repo
                     .save_config_scoped(&record.post_config, record.scope)
                     .map_err(MountWorkflowError::publish_config)?;
+                mark_published(&journal, &mut record)?;
                 task.handle()
                     .set_activity(ProgressActivity::RegeneratingExcludes);
                 sync_mount_excludes(self.repo, self.state()?, &post_effective_config)?;
@@ -846,10 +863,13 @@ impl<'repo> LockedMount<'repo, '_> {
     /// A detach is exactly one atomic config transition and intentionally
     /// writes no journal or desired rows.
     pub fn detach(
-        &mut self,
+        &self,
         scope: ConfigScope,
         post_config: &Config,
     ) -> Result<(), MountWorkflowError> {
+        self.repo
+            .validate_config_candidate(&self.layers, post_config, scope)
+            .map_err(MountWorkflowError::publish_config)?;
         self.repo
             .save_config_scoped(post_config, scope)
             .map_err(MountWorkflowError::publish_config)
@@ -878,7 +898,7 @@ fn replay_record(
     handle: &ProgressHandle,
     result: &mut MountReplayResult,
 ) -> Result<(), MountWorkflowError> {
-    if record.row_windows == 0 {
+    if record.change.row_windows() == 0 {
         return Ok(());
     }
     handle.set_activity(ProgressActivity::ReplayingRows);
@@ -911,6 +931,32 @@ fn replay_record(
             },
         )
         .map_err(MountWorkflowError::replay_rows)
+}
+
+fn delete_record_rows(
+    state: &mut MountMutationSession<'_>,
+    change: &MountTxnChange,
+) -> Result<usize, MountWorkflowError> {
+    match change {
+        MountTxnChange::Add { .. } => Ok(0),
+        MountTxnChange::Update {
+            old_target: target, ..
+        }
+        | MountTxnChange::Remove { target } => state
+            .delete_subtree_windowed(target, MOUNT_DELETE_WINDOW)
+            .map_err(MountWorkflowError::delete_rows),
+    }
+}
+
+fn mark_published(
+    journal: &MountJournal,
+    record: &mut MountTxnRecord,
+) -> Result<(), MountWorkflowError> {
+    record.phase = MountTxnPhase::Regenerate;
+    journal
+        .write(record)
+        .map_err(MountWorkflowError::write_journal)?;
+    mount_fault("mount.published")
 }
 
 fn mount_journal(repo: &Repository) -> MountJournal {
@@ -975,12 +1021,10 @@ pub(crate) fn recover_pending_mount_transaction_locked<'repo>(
     progress: &dyn ProgressReporter,
 ) -> Result<Option<MountMutationSession<'repo>>, MountWorkflowError> {
     let journal = mount_journal(repo);
-    let Some(record) = journal.read().map_err(MountWorkflowError::read_journal)? else {
+    let Some(mut record) = journal.read().map_err(MountWorkflowError::read_journal)? else {
         return Ok(None);
     };
-    let levels = repo
-        .lock_shard_levels()
-        .map_err(MountWorkflowError::open_state)?;
+    let levels = record.shard_levels;
     let mut state = with_progress_typed(
         progress,
         ProgressSpec::indeterminate(ProgressOperation::LoadingState),
@@ -1001,29 +1045,17 @@ pub(crate) fn recover_pending_mount_transaction_locked<'repo>(
         |task| {
             let handle = task.handle();
             handle.set_activity(ProgressActivity::RecoveringInterruptedMount);
-            match record.op {
-                MountTxnOp::Add => {}
-                MountTxnOp::Update | MountTxnOp::Remove => {
-                    handle.set_activity(ProgressActivity::DeletingOwnedRows);
-                    state
-                        .delete_subtree_windowed(
-                            record.old_target.as_ref().expect("journal shape validated"),
-                            MOUNT_DELETE_WINDOW,
-                        )
-                        .map_err(MountWorkflowError::delete_rows)?;
-                }
-            }
-            mount_fault("recover.after_delete")?;
-            handle.set_activity(ProgressActivity::PublishingConfig);
-            repo.save_config_scoped(&record.post_config, record.scope)
-                .map_err(MountWorkflowError::publish_config)?;
-            mount_fault("recover.after_config")?;
-            match record.op {
-                MountTxnOp::Add | MountTxnOp::Update => {
-                    let mut replay = MountReplayResult::default();
-                    replay_record(&mut state, &journal, &record, &handle, &mut replay)?;
-                }
-                MountTxnOp::Remove => {}
+            if record.phase == MountTxnPhase::Publish {
+                handle.set_activity(ProgressActivity::DeletingOwnedRows);
+                delete_record_rows(&mut state, &record.change)?;
+                mount_fault("recover.after_delete")?;
+                handle.set_activity(ProgressActivity::PublishingConfig);
+                repo.save_config_scoped(&record.post_config, record.scope)
+                    .map_err(MountWorkflowError::publish_config)?;
+                mount_fault("recover.after_config")?;
+                let mut replay = MountReplayResult::default();
+                replay_record(&mut state, &journal, &record, &handle, &mut replay)?;
+                mark_published(&journal, &mut record)?;
             }
             handle.set_activity(ProgressActivity::RegeneratingExcludes);
             let effective_config = repo
@@ -1067,7 +1099,9 @@ mod tests {
     #[test]
     fn recovery_finishes_journaled_add_and_regenerates_excludes() {
         let source_dir = crate::test_harness::git_repo();
-        let source = Repository::at(source_dir.path().to_path_buf());
+        let source = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(source_dir.path().to_path_buf());
         source
             .save_lock(&Lock {
                 entries: vec![Entry {
@@ -1085,7 +1119,9 @@ mod tests {
         .unwrap();
 
         let destination_dir = crate::test_harness::git_repo();
-        let destination = Repository::at(destination_dir.path().to_path_buf());
+        let destination = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(destination_dir.path().to_path_buf());
         let name = MountName::from_string("models".to_string());
         let target = gp("models");
         let pre_config = Config::default();
@@ -1183,7 +1219,9 @@ mod tests {
     #[test]
     fn interruption_before_journal_publication_never_exposes_mount_state() {
         let source_dir = crate::test_harness::git_repo();
-        let source = Repository::at(source_dir.path().to_path_buf());
+        let source = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(source_dir.path().to_path_buf());
         source
             .save_lock(&Lock {
                 entries: vec![Entry {
@@ -1201,7 +1239,9 @@ mod tests {
         .unwrap();
 
         let destination_dir = crate::test_harness::git_repo();
-        let destination = Repository::at(destination_dir.path().to_path_buf());
+        let destination = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(destination_dir.path().to_path_buf());
         let name = MountName::from_string("models".to_string());
         let target = gp("models");
         let pre_config = Config::default();
@@ -1255,7 +1295,9 @@ mod tests {
     #[test]
     fn recovery_resumes_after_an_interruption_following_config_publication() {
         let source_dir = crate::test_harness::git_repo();
-        let source = Repository::at(source_dir.path().to_path_buf());
+        let source = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(source_dir.path().to_path_buf());
         source
             .save_lock(&Lock {
                 entries: vec![Entry {
@@ -1273,7 +1315,9 @@ mod tests {
         .unwrap();
 
         let destination_dir = crate::test_harness::git_repo();
-        let destination = Repository::at(destination_dir.path().to_path_buf());
+        let destination = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(destination_dir.path().to_path_buf());
         let name = MountName::from_string("models".to_string());
         let target = gp("models");
         let pre_config = Config::default();
@@ -1338,7 +1382,9 @@ mod tests {
     #[test]
     fn update_and_remove_recovery_roll_forward_from_deleted_rows() {
         let source_dir = crate::test_harness::git_repo();
-        let source = Repository::at(source_dir.path().to_path_buf());
+        let source = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(source_dir.path().to_path_buf());
         source
             .save_lock(&Lock {
                 entries: vec![Entry {
@@ -1356,7 +1402,9 @@ mod tests {
         .unwrap();
 
         let destination_dir = crate::test_harness::git_repo();
-        let destination = Repository::at(destination_dir.path().to_path_buf());
+        let destination = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(destination_dir.path().to_path_buf());
         let name = MountName::from_string("models".to_string());
         let old_target = gp("models");
         let new_target = gp("vendor/models");
@@ -1454,5 +1502,95 @@ mod tests {
             .with_locked(&NoopProgress, |locked| locked.desired_count(&new_target))
             .unwrap();
         assert_eq!(count, 0);
+    }
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    use gat_core::progress::NoopProgress;
+
+    #[test]
+    fn setting_edit_recovers_pending_publication_before_capturing_configuration() {
+        let directory = crate::test_harness::git_repo();
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(directory.path().to_path_buf());
+        let post_config = Config {
+            sync: gat_core::config::SyncConfig {
+                auto_fetch: Some(true),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let journal = mount_journal(&repo);
+        journal
+            .write(&MountTxnRecord {
+                change: MountTxnChange::Add {
+                    target: GatPath::parse_canonical("models").unwrap(),
+                    row_windows: 0,
+                },
+                scope: ConfigScope::Project,
+                name: "models".into(),
+                post_config,
+                pre_config: Config::default(),
+                shard_levels: gat_core::lock::LockShardLevels::FLAT,
+                phase: MountTxnPhase::Publish,
+            })
+            .unwrap();
+        repo.change_setting(
+            ConfigScope::Project,
+            gat_core::settings::SettingChange::Set(
+                gat_core::settings::SettingAssignment::NetworkRequestConcurrency(
+                    gat_core::settings::ConcurrencyLimit::new(7).unwrap(),
+                ),
+            ),
+        )
+        .unwrap();
+        repo.mounts().recover_pending(&NoopProgress).unwrap();
+        let config = repo.load_config_scoped(ConfigScope::Project).unwrap();
+        assert_eq!(config.sync.auto_fetch, Some(true));
+        assert_eq!(config.network.resolve().request_concurrency.get(), 7);
+        assert!(journal.read().unwrap().is_none());
+    }
+
+    #[test]
+    fn completed_publication_is_not_replayed_when_environment_or_file_settings_change() {
+        let directory = crate::test_harness::git_repo();
+        let repo = crate::Invocation::from_pairs([("GAT_LOCK_SHARD_LEVELS", "2")])
+            .unwrap()
+            .repository_at(directory.path().to_path_buf());
+        let durable = Config {
+            sync: gat_core::config::SyncConfig {
+                auto_fetch: Some(true),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        repo.save_config(&durable).unwrap();
+        let journal = mount_journal(&repo);
+        journal
+            .write(&MountTxnRecord {
+                change: MountTxnChange::Add {
+                    target: GatPath::parse_canonical("models").unwrap(),
+                    row_windows: 0,
+                },
+                scope: ConfigScope::Project,
+                name: "models".into(),
+                post_config: Config::default(),
+                pre_config: Config::default(),
+                shard_levels: gat_core::lock::LockShardLevels::FLAT,
+                phase: MountTxnPhase::Regenerate,
+            })
+            .unwrap();
+        {
+            let _fault = gat_core::fault::armed("recover.after_config");
+            repo.mounts().recover_pending(&NoopProgress).unwrap();
+        }
+        assert_eq!(
+            repo.load_config_scoped(ConfigScope::Project).unwrap(),
+            durable
+        );
+        assert!(journal.read().unwrap().is_none());
     }
 }

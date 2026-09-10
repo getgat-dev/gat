@@ -14,7 +14,9 @@ fn repository() -> (tempfile::TempDir, Repository) {
     test_support_git::run_git(temp.path(), &["init", "-q", "-b", "main"]);
     std::fs::write(temp.path().join("README"), "fixture\n").expect("write initial file");
     test_support_git::commit_all(temp.path(), "initial");
-    let repo = Repository::at(temp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(temp.path().to_path_buf());
     (temp, repo)
 }
 
@@ -143,7 +145,7 @@ fn acquired_operations_keep_their_config_snapshot() {
         .load_config_scoped(ConfigScope::Project)
         .expect("load project config");
     config.sync.trust_state = Some(true);
-    repo.save_config_scoped(&config, ConfigScope::Project)
+    repo.write_scoped_config_fixture(&config, ConfigScope::Project)
         .expect("save project config");
 
     assert_eq!(desired.operation().config().sync.trust_state, None);

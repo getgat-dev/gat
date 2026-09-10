@@ -395,9 +395,38 @@ thread_local! {
 pub struct RepoLock {
     file: Rc<std::fs::File>,
     identity: Arc<PathBuf>,
+    global: Option<Box<Self>>,
 }
 
 impl RepoLock {
+    /// Serialize configuration-dependent mutations across repositories sharing a
+    /// global scope. Always acquire global authority before repository authority.
+    pub fn acquire_configuration(
+        layout: &crate::RepositoryLayout,
+        global: Option<&Path>,
+    ) -> Result<Self> {
+        let global = global
+            .map(|directory| {
+                std::fs::create_dir_all(directory).map_err(|source| {
+                    AtomicError::DirectoryUnavailable {
+                        path: directory.to_path_buf(),
+                        source,
+                    }
+                })?;
+                let identity = std::fs::canonicalize(directory)
+                    .map_err(|source| AtomicError::DirectoryUnavailable {
+                        path: directory.to_path_buf(),
+                        source,
+                    })?
+                    .join("configuration.lock");
+                Self::acquire_at(identity.clone(), Arc::new(identity))
+            })
+            .transpose()?;
+        let mut repository = Self::acquire_repository(layout)?;
+        repository.global = global.map(Box::new);
+        Ok(repository)
+    }
+
     /// Acquire this repository's mutation lock without exposing its path.
     pub fn acquire_repository(layout: &crate::RepositoryLayout) -> Result<Self> {
         layout
@@ -413,12 +442,19 @@ impl RepoLock {
                 source,
             }
         })?;
+        Self::acquire_at(layout.sync_lock_path(), identity)
+    }
+
+    fn acquire_at(path: PathBuf, identity: Arc<PathBuf>) -> Result<Self> {
         if let Some(file) =
             HELD_LOCKS.with(|locks| locks.borrow().get(&identity).and_then(Weak::upgrade))
         {
-            return Ok(Self { file, identity });
+            return Ok(Self {
+                file,
+                identity,
+                global: None,
+            });
         }
-        let path = layout.sync_lock_path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|source| {
                 AtomicError::DirectoryUnavailable {
@@ -450,7 +486,11 @@ impl RepoLock {
                             .borrow_mut()
                             .insert(Arc::clone(&identity), Rc::downgrade(&file))
                     });
-                    return Ok(Self { file, identity });
+                    return Ok(Self {
+                        file,
+                        identity,
+                        global: None,
+                    });
                 }
                 Err(e) if e.kind() == fs2::lock_contended_error().kind() => {
                     // The OS confirms another process actively holds the lock.

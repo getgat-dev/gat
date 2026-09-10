@@ -45,7 +45,9 @@ mod tests {
     #[test]
     fn rm_delete_failure_publishes_removal_and_retry_does_not_resume_cleanup() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let path = tmp.path().join("a.bin");
         std::fs::write(&path, b"tracked").unwrap();
         add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
@@ -95,7 +97,9 @@ mod tests {
     fn rm_ownership_failure_leaves_stale_state_and_retry_does_not_resume() {
         for cached in [false, true] {
             let tmp = test_repo();
-            let repo = Repo::at(tmp.path().to_path_buf());
+            let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+                .unwrap()
+                .repository_at(tmp.path().to_path_buf());
             std::fs::write(tmp.path().join("a.bin"), b"tracked").unwrap();
             add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
             let excludes = std::fs::read(tmp.path().join(".git/info/exclude")).unwrap();
@@ -154,7 +158,9 @@ mod tests {
     fn rm_exclude_failure_is_post_publication_and_retry_does_not_repair_it() {
         for cached in [false, true] {
             let tmp = test_repo();
-            let repo = Repo::at(tmp.path().to_path_buf());
+            let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+                .unwrap()
+                .repository_at(tmp.path().to_path_buf());
             std::fs::write(tmp.path().join("a.bin"), b"tracked").unwrap();
             add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
             let exclude = tmp.path().join(".git/info/exclude");
@@ -193,7 +199,9 @@ mod tests {
     #[test]
     fn rm_on_an_untracked_path_does_not_rewrite_gat_lock() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
         let lock_path = tmp.path().join("gat.lock");
@@ -239,7 +247,9 @@ mod tests {
     #[test]
     fn rm_seeds_the_desired_mirror_without_a_separate_refresh() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"a").unwrap();
         std::fs::write(tmp.path().join("b.bin"), b"b").unwrap();
         add(
@@ -264,7 +274,9 @@ mod tests {
     #[test]
     fn rm_cached_removes_lock_entry_unexcludes_and_keeps_file() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
         rm(&repo, &[PathBuf::from("big.bin")], true).unwrap();
@@ -287,7 +299,9 @@ mod tests {
     #[test]
     fn rm_cached_forgets_materialized_state_so_a_later_sync_keeps_the_file() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
         ::test_support::sync(&repo, &NoopProgress).unwrap();
@@ -319,7 +333,9 @@ mod tests {
     #[test]
     fn rm_without_cached_also_deletes_the_file() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
         rm(&repo, &[PathBuf::from("big.bin")], false).unwrap();
@@ -338,7 +354,9 @@ mod tests {
     #[test]
     fn rm_without_cached_also_forgets_materialized_state() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
         ::test_support::sync(&repo, &NoopProgress).unwrap();
@@ -356,7 +374,9 @@ mod tests {
     #[test]
     fn rm_on_a_directory_removes_all_nested_lock_entries_and_the_directory() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("data/nested")).unwrap();
         std::fs::write(tmp.path().join("data/a.bin"), b"a").unwrap();
         std::fs::write(tmp.path().join("data/nested/b.bin"), b"b").unwrap();
@@ -383,7 +403,9 @@ mod tests {
     #[test]
     fn rm_on_a_directory_reports_the_real_tracked_file_count_and_keeps_untracked_files() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("data/nested")).unwrap();
         std::fs::write(tmp.path().join("data/a.bin"), b"a").unwrap();
         std::fs::write(tmp.path().join("data/nested/b.bin"), b"b").unwrap();
@@ -424,7 +446,9 @@ mod tests {
     #[test]
     fn rm_prunes_every_level_of_a_deeply_nested_directory_chain() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("a/b/c/d")).unwrap();
         std::fs::write(tmp.path().join("a/b/c/d/e.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("a/b/c/d/e.bin")], &NoopProgress).unwrap();
@@ -446,7 +470,9 @@ mod tests {
     #[test]
     fn rm_prunes_a_deep_chain_of_unique_touched_ancestors() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let depth = 24usize;
         let mut rel = PathBuf::new();
         for i in 0..depth {
@@ -469,7 +495,9 @@ mod tests {
     #[test]
     fn rm_stops_pruning_at_a_directory_still_holding_an_untracked_file() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("a/b/c")).unwrap();
         std::fs::write(tmp.path().join("a/b/c/e.bin"), b"payload").unwrap();
         std::fs::write(tmp.path().join("a/b/keep.txt"), b"keep me").unwrap();
@@ -494,7 +522,9 @@ mod tests {
     #[test]
     fn rm_leaves_an_unrelated_empty_directory_untouched() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("data/tracked")).unwrap();
         std::fs::create_dir_all(tmp.path().join("data/untouched")).unwrap();
         std::fs::write(tmp.path().join("data/tracked/f.bin"), b"payload").unwrap();
@@ -519,7 +549,9 @@ mod tests {
     #[test]
     fn rm_glob_prunes_every_directory_its_matches_actually_vacated() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("g/one")).unwrap();
         std::fs::create_dir_all(tmp.path().join("g/two")).unwrap();
         std::fs::write(tmp.path().join("g/one/a.bin"), b"a").unwrap();
@@ -556,7 +588,9 @@ mod tests {
     #[test]
     fn rm_glob_matching_nothing_tracked_does_no_directory_cleanup() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("untracked")).unwrap();
 
         let outcome = rm(&repo, &[PathBuf::from("untracked/*.bin")], false).unwrap();
@@ -571,7 +605,9 @@ mod tests {
     #[test]
     fn rm_cached_does_no_directory_cleanup() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("data")).unwrap();
         std::fs::write(tmp.path().join("data/a.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("data/a.bin")], &NoopProgress).unwrap();
@@ -594,7 +630,9 @@ mod tests {
     #[test]
     fn rm_pruning_never_removes_the_repository_root() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("only.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("only.bin")], &NoopProgress).unwrap();
 
@@ -617,7 +655,9 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("victim.bin"), b"outside").unwrap();
 
@@ -637,7 +677,9 @@ mod tests {
     #[test]
     fn rm_non_glob_uses_exact_and_nested_scope_matching() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("data/nested")).unwrap();
         std::fs::write(tmp.path().join("data/a.bin"), b"a").unwrap();
         std::fs::write(tmp.path().join("data/nested/b.bin"), b"b").unwrap();
@@ -679,7 +721,9 @@ mod tests {
     #[test]
     fn rm_normalizes_messy_path_spellings_before_matching_the_lock() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("data/nested")).unwrap();
         std::fs::write(tmp.path().join("data/a.bin"), b"a").unwrap();
         std::fs::write(tmp.path().join("data/nested/b.bin"), b"b").unwrap();
@@ -706,7 +750,9 @@ mod tests {
     #[test]
     fn rm_removes_lock_entry_even_when_file_already_missing_on_disk() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
         std::fs::remove_file(tmp.path().join("big.bin")).unwrap();
@@ -723,7 +769,9 @@ mod tests {
     #[test]
     fn rm_removes_lock_entries_even_when_directory_already_missing_on_disk() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("data/nested")).unwrap();
         std::fs::write(tmp.path().join("data/a.bin"), b"a").unwrap();
         std::fs::write(tmp.path().join("data/nested/b.bin"), b"b").unwrap();
@@ -750,7 +798,9 @@ mod tests {
     #[test]
     fn rm_matches_a_glob_pattern_against_lock_entries_even_if_files_are_gone() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("g")).unwrap();
         std::fs::write(tmp.path().join("g/a.bin"), b"a").unwrap();
         std::fs::write(tmp.path().join("g/b.bin"), b"b").unwrap();
@@ -796,7 +846,9 @@ mod tests {
     #[test]
     fn rm_glob_is_non_recursive_unless_double_star_is_used() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("data/deep")).unwrap();
         std::fs::write(tmp.path().join("a.bin"), b"a").unwrap();
         std::fs::write(tmp.path().join("data/a.bin"), b"a").unwrap();
@@ -843,7 +895,9 @@ mod tests {
     #[test]
     fn rm_rejects_rooted_scope_without_removing_everything() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
 
@@ -860,7 +914,9 @@ mod tests {
     #[test]
     fn rm_rejects_rooted_and_unc_inputs_consistently() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
 
@@ -879,7 +935,9 @@ mod tests {
     #[test]
     fn rm_glob_refuses_to_touch_a_source_owned_lock_row() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut cfg = repo.load_config().unwrap();
         cfg.mounts.by_name.insert(
             gat_core::name::MountName::from_string("models".to_string()),
@@ -893,7 +951,7 @@ mod tests {
                 exclude: Vec::new(),
             },
         );
-        repo.save_config(&cfg).unwrap();
+        repo.write_config_fixture(&cfg).unwrap();
         let mut lock = Lock::default();
         lock.upsert(
             gp("data/models/a.bin"),
@@ -914,7 +972,9 @@ mod tests {
     #[test]
     fn rm_refuses_a_source_owned_lock_row() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut cfg = repo.load_config().unwrap();
         cfg.mounts.by_name.insert(
             gat_core::name::MountName::from_string("models".to_string()),
@@ -928,7 +988,7 @@ mod tests {
                 exclude: Vec::new(),
             },
         );
-        repo.save_config(&cfg).unwrap();
+        repo.write_config_fixture(&cfg).unwrap();
         // Simulate a mount-owned row (`gat mount pull` writes
         // these; `rm` must not be able to touch them either directly or
         // via an ancestor directory argument).
@@ -961,10 +1021,12 @@ mod tests {
         use std::collections::HashMap;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut cfg = repo.load_config().unwrap();
         cfg.lock.shard_levels = Some(gat_core::lock::LockShardLevels::new(1).unwrap());
-        repo.save_config(&cfg).unwrap();
+        repo.write_config_fixture(&cfg).unwrap();
         std::fs::create_dir_all(tmp.path().join("keep")).unwrap();
         let mut paths = Vec::new();
         for i in 0..20 {
@@ -1024,7 +1086,9 @@ mod tests {
         use gat_io::state_test_support as test_support;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut paths = Vec::new();
         for i in 0..80 {
             let path = format!("other/file-{i:03}.bin");
@@ -1072,7 +1136,9 @@ mod tests {
         use gat_io::state_test_support as test_support;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut paths = Vec::new();
         for name in ["a.bin", "b.bin", "c.txt", "keep.dat"] {
             std::fs::write(tmp.path().join(name), name).unwrap();
@@ -1119,7 +1185,9 @@ mod tests {
         use gat_io::state_test_support as test_support;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("data/models")).unwrap();
         std::fs::create_dir_all(tmp.path().join("assets")).unwrap();
         let paths = [
@@ -1171,7 +1239,9 @@ mod tests {
         use gat_io::state_test_support as test_support;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut paths = Vec::new();
         for name in ["a.bin", "b.bin", "c.txt", "d.txt"] {
             std::fs::write(tmp.path().join(name), name).unwrap();
@@ -1207,7 +1277,9 @@ mod tests {
         use gat_io::state_test_support as test_support;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut paths = Vec::new();
         for name in ["a.bin", "b.bin", "c.txt", "keep.dat"] {
             std::fs::write(tmp.path().join(name), name).unwrap();
@@ -1244,7 +1316,9 @@ mod tests {
     #[test]
     fn rm_overlapping_prefix_and_glob_selectors_claim_each_path_exactly_once() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("data")).unwrap();
         std::fs::write(tmp.path().join("data/a.bin"), b"a").unwrap();
         std::fs::write(tmp.path().join("other.bin"), b"b").unwrap();
@@ -1285,10 +1359,12 @@ mod tests {
         use std::collections::HashMap;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut cfg = repo.load_config().unwrap();
         cfg.lock.shard_levels = Some(gat_core::lock::LockShardLevels::new(1).unwrap());
-        repo.save_config(&cfg).unwrap();
+        repo.write_config_fixture(&cfg).unwrap();
         let mut paths = Vec::new();
         for i in 0..40 {
             let path = format!("file-{i}.bin");
@@ -1356,7 +1432,9 @@ mod tests {
     #[test]
     fn rm_in_a_flat_repo_uses_the_sparse_pipeline_and_stays_a_single_file() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"a").unwrap();
         std::fs::write(tmp.path().join("b.bin"), b"b").unwrap();
         add(
@@ -1401,7 +1479,9 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let outside = tempfile::tempdir().unwrap();
         let outside_file = outside.path().join("victim.bin");
         std::fs::write(&outside_file, b"outside").unwrap();
@@ -1442,7 +1522,9 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let outside = tempfile::tempdir().unwrap();
         let outside_file = outside.path().join("victim.bin");
         std::fs::write(&outside_file, b"outside").unwrap();
@@ -1471,7 +1553,9 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let outside = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(outside.path().join("nested")).unwrap();
         symlink(outside.path(), tmp.path().join("link")).unwrap();
@@ -1497,7 +1581,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
 
@@ -1534,7 +1620,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
 
@@ -1560,7 +1648,9 @@ mod tests {
     #[test]
     fn rm_cached_dot_removes_all() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"a").unwrap();
         std::fs::write(tmp.path().join("b.bin"), b"b").unwrap();
         add(
@@ -1595,7 +1685,9 @@ mod tests {
     #[test]
     fn rm_literal_with_glob_metachar_roundtrips() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("file[1].bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("file[1].bin")], &NoopProgress).unwrap();
         assert_eq!(
@@ -1620,7 +1712,9 @@ mod tests {
     #[test]
     fn rm_glob_still_works() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"a").unwrap();
         std::fs::write(tmp.path().join("b.bin"), b"b").unwrap();
         add(
@@ -1645,7 +1739,9 @@ mod tests {
     #[test]
     fn rm_missing_on_disk_tracked_path_selectable() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"a").unwrap();
         add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
         // Remove the file but it's still tracked
@@ -1681,7 +1777,9 @@ mod tests {
     #[test]
     fn rm_large_directory_matches_single_threaded_and_default_pools() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::create_dir_all(tmp.path().join("bulk")).unwrap();
         let files: Vec<PathBuf> = (0..200)
             .map(|i| PathBuf::from(format!("bulk/file-{i:04}.bin")))
@@ -1749,7 +1847,9 @@ mod tests {
 
         fn run_with_threads(threads: usize) -> String {
             let tmp = test_repo();
-            let repo = Repo::at(tmp.path().to_path_buf());
+            let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+                .unwrap()
+                .repository_at(tmp.path().to_path_buf());
             let outside = tempfile::tempdir().unwrap();
             symlink(outside.path(), tmp.path().join("bad-a")).unwrap();
             symlink(outside.path(), tmp.path().join("bad-b")).unwrap();
@@ -1824,7 +1924,9 @@ mod tests {
     #[test]
     fn rm_acquires_the_repo_lock_before_refreshing_desired_state_for_classification() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"hello").unwrap();
         add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
 
@@ -1900,7 +2002,9 @@ mod tests {
         use crate::common::RecordingProgress;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
         add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
 
@@ -1921,7 +2025,9 @@ mod tests {
         use crate::common::RecordingProgress;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"a").unwrap();
         std::fs::write(tmp.path().join("b.bin"), b"b").unwrap();
         add(
@@ -1953,7 +2059,9 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let outside = tempfile::tempdir().unwrap();
         let outside_file = outside.path().join("victim.bin");
         std::fs::write(&outside_file, b"outside").unwrap();

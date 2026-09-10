@@ -1,7 +1,7 @@
 //! [`CacheLocation`]: the configured `cache.location` host-path value.
 //!
 //! Holds the raw, not-yet-joined path text from `gat.yaml` (or a
-//! `GAT_CACHE_DIR` override) as a native [`PathBuf`], parsed once at the
+//! `GAT_CACHE_LOCATION` override) as a native [`PathBuf`], parsed once at the
 //! config-deserialization boundary rather than staying a bare [`String`]
 //! all the way down to I/O-owned repository cache resolution. Relative
 //! locations are joined against the repository root only when an operation's
@@ -14,17 +14,17 @@ use std::path::{Path, PathBuf};
 /// A `cache.location` value: an absolute path, or one still relative to
 /// the repository root. Deliberately holds a native [`PathBuf`] (not a
 /// [`String`]) so a configured location can round-trip non-UTF-8 path
-/// bytes on platforms that allow them, the same way a `GAT_CACHE_DIR`
+/// bytes on platforms that allow them, the same way a `GAT_CACHE_LOCATION`
 /// environment override already must.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CacheLocation(PathBuf);
 
 impl CacheLocation {
-    /// Wrap an already-owned path, e.g. one just parsed from `gat.yaml`
-    /// text or read from `GAT_CACHE_DIR` via [`std::env::var_os`].
-    #[must_use]
-    pub const fn from_path(path: PathBuf) -> Self {
-        Self(path)
+    pub fn try_from_path(path: PathBuf) -> Result<Self, crate::settings::SettingValueError> {
+        if path.as_os_str().is_empty() {
+            return Err(crate::settings::SettingValueError::EmptyPath);
+        }
+        Ok(Self(path))
     }
 
     /// The raw configured path, borrowed -- absolute or still relative to
@@ -37,9 +37,10 @@ impl CacheLocation {
     }
 }
 
-impl From<PathBuf> for CacheLocation {
-    fn from(path: PathBuf) -> Self {
-        Self(path)
+impl TryFrom<PathBuf> for CacheLocation {
+    type Error = crate::settings::SettingValueError;
+    fn try_from(path: PathBuf) -> Result<Self, Self::Error> {
+        Self::try_from_path(path)
     }
 }
 
@@ -69,7 +70,7 @@ impl<'de> Deserialize<'de> for CacheLocation {
         D: Deserializer<'de>,
     {
         let raw = String::deserialize(deserializer)?;
-        Ok(Self(PathBuf::from(raw)))
+        Self::try_from_path(PathBuf::from(raw)).map_err(serde::de::Error::custom)
     }
 }
 
@@ -79,13 +80,15 @@ mod tests {
 
     #[test]
     fn as_path_returns_the_wrapped_path() {
-        let loc = CacheLocation::from_path(PathBuf::from("relative/cache"));
+        let loc = CacheLocation::try_from_path(PathBuf::from("relative/cache"))
+            .expect("nonempty cache location");
         assert_eq!(loc.as_path(), Path::new("relative/cache"));
     }
 
     #[test]
     fn serde_round_trips_through_a_plain_yaml_string() {
-        let loc = CacheLocation::from_path(PathBuf::from("/var/cache/gat"));
+        let loc = CacheLocation::try_from_path(PathBuf::from("/var/cache/gat"))
+            .expect("nonempty cache location");
         let yaml = yaml_serde::to_string(&loc).unwrap();
         assert_eq!(yaml.trim(), "/var/cache/gat");
         let back: CacheLocation = yaml_serde::from_str(&yaml).unwrap();

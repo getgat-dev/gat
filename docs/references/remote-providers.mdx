@@ -324,18 +324,18 @@ connectivity or account permissions. `list` and `show` only inspect configuratio
 
 Before the first network transfer, Gat checks that it can list the configured
 storage root. Credentials must allow **root listing**, plus the read, write, or
-delete operations you intend to use. This check has a **5-second deadline**.
+delete operations you intend to use.
 
 If connection setup needs longer, set a positive whole number of seconds:
 
 <CodeGroup>
   ```sh macOS / Linux
-  export GAT_CONNECT_TIMEOUT=15
+  export GAT_NETWORK_READINESS_TIMEOUT_SECONDS=15
   gat status --remote origin
   ```
 
   ```powershell Windows PowerShell
-  $env:GAT_CONNECT_TIMEOUT = '15'
+  $env:GAT_NETWORK_READINESS_TIMEOUT_SECONDS = '15'
   gat status --remote origin
   ```
 </CodeGroup>

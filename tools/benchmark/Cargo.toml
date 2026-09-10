@@ -1,0 +1,19 @@
+[package]
+name = "gat-benchmark"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+
+[[bin]]
+name = "generate-benchmark"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.18"
+rayon = "1"
+tempfile = "3"
+
+[lints]
+workspace = true

@@ -47,7 +47,9 @@ impl RepoFixture {
     }
 
     fn from_test_repo(repo: test_support::TestRepo) -> Self {
-        let engine = gat_engine::Repository::at(repo.path().to_path_buf());
+        let engine = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(repo.path().to_path_buf());
         Self { repo, engine }
     }
 

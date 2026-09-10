@@ -1012,6 +1012,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "gat-benchmark"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "indicatif",
+ "rayon",
+ "tempfile",
+]
+
+[[package]]
+name = "gat-check"
+version = "0.0.0"
+dependencies = [
+ "proc-macro2",
+ "serde_json",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "gat-command"
 version = "0.0.0"
 dependencies = [
@@ -1033,6 +1053,19 @@ dependencies = [
  "serde_json",
  "thiserror",
  "yaml_serde",
+]
+
+[[package]]
+name = "gat-docs"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "gat",
+ "gat-core",
+ "gat-engine",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -1077,21 +1110,6 @@ dependencies = [
  "tokio",
  "url",
  "yaml_serde",
-]
-
-[[package]]
-name = "gat-tools"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "clap",
- "gat",
- "gat-core",
- "gat-engine",
- "indicatif",
- "rayon",
- "serde_json",
- "tempfile",
 ]
 
 [[package]]

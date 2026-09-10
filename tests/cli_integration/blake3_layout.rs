@@ -36,7 +36,7 @@ fn add_push_fetch_sync_only_ever_touch_the_blake3_namespaced_local_and_remote_pa
         .unwrap()
         .entries[0]
         .oid;
-    let cache_root = RepositoryLayout::at(dir.to_path_buf()).resolve_cache_root(None, None);
+    let cache_root = RepositoryLayout::at(dir.to_path_buf()).resolve_cache_root(None);
     let local_object_path = cache_root.object_path_for_test(&oid);
     assert!(
         local_object_path.is_file(),
@@ -78,8 +78,7 @@ fn add_push_fetch_sync_only_ever_touch_the_blake3_namespaced_local_and_remote_pa
     // would be rejected as a duplicate remote.
     assert_ok(&gat(clone_dir, &["fetch"]), "gat fetch");
 
-    let clone_cache_root =
-        RepositoryLayout::at(clone_dir.to_path_buf()).resolve_cache_root(None, None);
+    let clone_cache_root = RepositoryLayout::at(clone_dir.to_path_buf()).resolve_cache_root(None);
     let clone_local_object_path = clone_cache_root.object_path_for_test(&oid);
     assert!(
         clone_local_object_path.is_file(),
@@ -119,7 +118,7 @@ fn repair_re_fetches_a_corrupted_object_back_to_its_blake3_namespaced_path() {
         .unwrap()
         .entries[0]
         .oid;
-    let cache_root = RepositoryLayout::at(dir.to_path_buf()).resolve_cache_root(None, None);
+    let cache_root = RepositoryLayout::at(dir.to_path_buf()).resolve_cache_root(None);
     let obj_path = cache_root.object_path_for_test(&oid);
     #[cfg(unix)]
     {
@@ -159,7 +158,7 @@ fn local_gc_sweeps_an_orphan_from_and_keeps_a_reachable_object_under_the_blake3_
     // An orphaned object: an ordinary cache blob with no `gat.lock` row
     // referencing it in any commit's history or the current working
     // tree, exactly as `gc` must distinguish from a still-tracked one.
-    let cache_root = RepositoryLayout::at(dir.to_path_buf()).resolve_cache_root(None, None);
+    let cache_root = RepositoryLayout::at(dir.to_path_buf()).resolve_cache_root(None);
     let orphan_oid = cache_root
         .writer()
         .ingest(std::io::Cursor::new(b"orphan-payload"))

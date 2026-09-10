@@ -7,7 +7,7 @@ param()
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
-$installer = Join-Path $PSScriptRoot '../docs/install.ps1'
+$installer = Join-Path $PSScriptRoot '../../docs/install.ps1'
 $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ([IO.Path]::GetRandomFileName())
 New-Item -ItemType Directory -Path $fixtureRoot | Out-Null
 $savedEnvironment = @{}

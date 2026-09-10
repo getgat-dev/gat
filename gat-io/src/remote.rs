@@ -19,7 +19,7 @@ use std::time::Duration;
 
 mod file;
 mod file_gc;
-pub use file_gc::{FILE_GC_BATCH_SIZE, FileDeleteBatch, FileDeleteOutcome, FileObjectScan};
+pub use file_gc::{FileDeleteBatch, FileDeleteOutcome, FileGc, FileObjectScan};
 mod interpolate;
 mod transfer;
 mod tuning;
@@ -171,7 +171,7 @@ impl Drop for RequestOccupancyGuard {
 }
 
 use futures::StreamExt;
-use interpolate::interpolate_env;
+pub(crate) use interpolate::interpolate_with;
 
 /// Retains the backend error for developer inspection without exposing its
 /// potentially secret-bearing formatting or concrete `OpenDAL` type.
@@ -194,25 +194,6 @@ impl std::error::Error for RemoteBackendError {
         Some(&self.0)
     }
 }
-
-/// Bounds a single control-plane call (`stat`, `create_dir`, `delete`,
-/// `presign`, ...). A minute is long enough
-/// that a merely slow-but-alive backend never trips it, short enough that
-/// a backend which accepted a TCP connection but then never responds
-/// fails instead of hanging the whole command forever.
-const REMOTE_CONTROL_TIMEOUT: Duration = Duration::from_mins(1);
-
-/// Bounds every already-open IO body call (one `read`/`write` chunk, one
-/// `list` page, ...). A minute avoids an aggressive bound: a healthy but
-/// merely slow large-object
-/// transfer (a big multipart chunk over a modest connection) must not be
-/// mistaken for a stalled one and needlessly retried -- only a call that
-/// stays stuck for a full minute (e.g. a credential provider silently
-/// falling through to an unreachable EC2 instance-metadata endpoint at
-/// 169.254.169.254, a TCP connection stuck "Busy ESTAB", or a firewalled
-/// endpoint that drops packets instead of resetting the connection)
-/// should trip this and hand off to gat's bounded [`RetryLayer`].
-const REMOTE_IO_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// How many times [`RetryLayer`] retries an operation opendal itself
 /// classifies as temporary (`opendal::Error::is_temporary`, e.g. rate
@@ -243,10 +224,6 @@ const _: () = assert!(
 const _: () = assert!(
     REMOTE_RETRY_MIN_DELAY.as_nanos() <= REMOTE_RETRY_MAX_DELAY.as_nanos(),
     "backoff window must not be inverted"
-);
-const _: () = assert!(
-    !REMOTE_CONTROL_TIMEOUT.is_zero() && !REMOTE_IO_TIMEOUT.is_zero(),
-    "a zero timeout would fail every call instantly"
 );
 
 /// Wraps every remote [`Operator`] this module builds with the same resilience
@@ -280,17 +257,17 @@ const _: () = assert!(
 /// connections per operator, so a gat-owned client would only add
 /// dependency weight for settings (a separate connect timeout, DNS
 /// caching, a forced HTTP version) with no demonstrated benefit over
-/// opendal's defaults plus [`REMOTE_CONTROL_TIMEOUT`]/
-/// [`REMOTE_IO_TIMEOUT`] above.
+/// the invocation-resolved operation and I/O timeouts.
 fn with_gat_defaults(
     op: Operator,
     scheme: &str,
     request_budget: Option<&RemoteRequestBudget>,
+    options: gat_core::settings::NetworkOptions,
 ) -> Operator {
     let op = op.layer(
         TimeoutLayer::new()
-            .with_timeout(REMOTE_CONTROL_TIMEOUT)
-            .with_io_timeout(REMOTE_IO_TIMEOUT),
+            .with_timeout(options.operation_timeout.duration())
+            .with_io_timeout(options.io_timeout.duration()),
     );
     let op = if scheme == "file" {
         op
@@ -324,8 +301,6 @@ fn with_gat_defaults(
 #[derive(Debug, thiserror::Error)]
 pub enum RemoteError {
     /// The readiness deadline override is not a usable positive whole-second duration.
-    #[error("invalid remote connection timeout override")]
-    InvalidConnectTimeout,
 
     /// The remote URL failed opendal's own scheme/config validation (bad
     /// host syntax, invalid port, root not specified, an unsupported
@@ -495,12 +470,13 @@ fn windows_file_root_uri(url: &str) -> Option<String> {
 /// registry (only services whose Cargo feature is enabled get registered),
 /// so gat never has to know a given backend's config fields.
 fn build_remote(url: &str) -> std::result::Result<Operator, RemoteError> {
-    build_remote_with_request_budget(url, None)
+    build_remote_with_request_budget(url, None, gat_core::settings::NetworkOptions::default())
 }
 
 fn build_remote_with_request_budget(
     url: &str,
     request_budget: Option<&RemoteRequestBudget>,
+    options: gat_core::settings::NetworkOptions,
 ) -> std::result::Result<Operator, RemoteError> {
     // Object uploads must stage beside the destination. A second staging root
     // can select another filesystem and cannot preserve that contract. Reject
@@ -549,7 +525,7 @@ fn build_remote_with_request_budget(
     let operator_url = rewritten.as_deref().unwrap_or(url);
     let scheme = scheme_of(url).unwrap_or("");
     Operator::from_uri(operator_url)
-        .map(|op| with_gat_defaults(op, scheme, request_budget))
+        .map(|op| with_gat_defaults(op, scheme, request_budget, options))
         .map_err(classify_opendal_error)
         .and_then(|op| check_capability_contract(op, scheme))
 }
@@ -602,6 +578,7 @@ fn check_capability_contract(
 /// cross this boundary.
 #[derive(Clone)]
 pub struct RemoteClient {
+    io_timeout: std::time::Duration,
     operator: Arc<Operator>,
     #[cfg(any(test, feature = "test-support"))]
     runtime: tokio::runtime::Handle,
@@ -614,25 +591,39 @@ impl std::fmt::Debug for RemoteClient {
 }
 
 impl RemoteClient {
-    pub fn validate(template: &str) -> Result<(), OpenRemoteError> {
-        let url = interpolate_env(template)?;
+    pub fn validate(
+        template: &str,
+        resolver: &crate::TemplateResolver,
+    ) -> Result<(), OpenRemoteError> {
+        let url = resolver.expand(template)?;
         build_remote(&url)?;
         Ok(())
     }
 
-    pub fn open(template: &str) -> Result<Self, OpenRemoteError> {
-        Self::open_with_request_budget(template, None)
+    pub fn open(
+        template: &str,
+        resolver: &crate::TemplateResolver,
+        options: gat_core::settings::NetworkOptions,
+    ) -> Result<Self, OpenRemoteError> {
+        Self::open_with_request_budget(template, None, resolver, options)
     }
 
     pub fn open_with_request_budget(
         template: &str,
         request_budget: Option<&RemoteRequestBudget>,
+        resolver: &crate::TemplateResolver,
+        options: gat_core::settings::NetworkOptions,
     ) -> Result<Self, OpenRemoteError> {
-        let url = interpolate_env(template)?;
-        let operator = Arc::new(build_remote_with_request_budget(&url, request_budget)?);
+        let url = resolver.expand(template)?;
+        let operator = Arc::new(build_remote_with_request_budget(
+            &url,
+            request_budget,
+            options,
+        )?);
         #[cfg(any(test, feature = "test-support"))]
         let runtime = tokio::runtime::Handle::current();
         Ok(Self {
+            io_timeout: options.io_timeout.duration(),
             operator,
             #[cfg(any(test, feature = "test-support"))]
             runtime,
@@ -1170,3 +1161,16 @@ mod tests {
 
 #[cfg(test)]
 mod readiness_tests;
+
+#[cfg(test)]
+impl RemoteClient {
+    fn open_for_test(template: &str) -> Result<Self, OpenRemoteError> {
+        Self::open(
+            template,
+            &crate::InvocationInputs::from_pairs([] as [(&str, &str); 0])
+                .unwrap()
+                .templates(),
+            gat_core::settings::NetworkOptions::default(),
+        )
+    }
+}

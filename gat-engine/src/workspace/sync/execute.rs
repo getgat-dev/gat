@@ -557,6 +557,7 @@ mod tests {
 
     fn ingest(repo: &Repo, content: impl std::io::Read) -> gat_io::Ingested {
         repo.resolved_cache_root()
+            .unwrap()
             .writer()
             .ingest(content)
             .unwrap()
@@ -600,7 +601,9 @@ mod tests {
     #[test]
     fn initial_sync_materializes_every_tracked_file() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
 
         let outcome = sync(&repo, &SyncOptions::default()).unwrap();
@@ -613,7 +616,9 @@ mod tests {
     #[test]
     fn lock_change_replaces_materialized_file() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
 
@@ -627,7 +632,9 @@ mod tests {
     #[test]
     fn removed_lock_entry_deletes_the_file() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
 
@@ -641,7 +648,9 @@ mod tests {
     #[test]
     fn default_validation_restores_missing_working_file() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
         std::fs::remove_file(tmp.path().join("a.bin")).unwrap();
@@ -655,7 +664,9 @@ mod tests {
     #[test]
     fn trust_state_does_not_restore_missing_matching_file() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
         std::fs::remove_file(tmp.path().join("a.bin")).unwrap();
@@ -676,7 +687,9 @@ mod tests {
     #[test]
     fn trust_state_does_not_report_local_modification_when_lock_matches_materialized() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         repo.save_config(&gat_core::config::Config {
             cache: gat_core::config::CacheConfig {
                 materialization_strategy: Some("copy".parse().unwrap()),
@@ -711,7 +724,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
 
@@ -755,7 +770,9 @@ mod tests {
     #[test]
     fn clean_validated_sync_hashes_zero_files() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
 
@@ -789,7 +806,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         repo.save_config(&gat_core::config::Config {
             cache: gat_core::config::CacheConfig {
                 materialization_strategy: Some("copy".parse().unwrap()),
@@ -835,7 +854,9 @@ mod tests {
     #[test]
     fn validate_detects_same_size_content_changes_via_hash_fallback() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         repo.save_config(&gat_core::config::Config {
             cache: gat_core::config::CacheConfig {
                 materialization_strategy: Some("copy".parse().unwrap()),
@@ -876,7 +897,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
         assert!(materialized_has_proof(&repo, "a.bin"));
@@ -928,7 +951,9 @@ mod tests {
     #[test]
     fn dry_run_validate_does_not_persist_stat_refreshes() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
         clear_materialized_stat(tmp.path(), "a.bin");
@@ -951,7 +976,9 @@ mod tests {
     #[test]
     fn path_scoped_sync_still_regenerates_excludes_from_the_full_lock() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "data/a.bin", b"a");
         track(&repo, "other.bin", b"b");
 
@@ -977,7 +1004,9 @@ mod tests {
     #[test]
     fn force_overwrites_a_local_modification() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         repo.save_config(&gat_core::config::Config {
             cache: gat_core::config::CacheConfig {
                 materialization_strategy: Some("copy".parse().unwrap()),
@@ -1008,7 +1037,9 @@ mod tests {
     #[test]
     fn dry_run_reports_without_touching_disk() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
 
         let outcome = sync(
@@ -1027,7 +1058,9 @@ mod tests {
     #[test]
     fn hardlink_mode_shares_the_cache_object() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         repo.save_config(&gat_core::config::Config {
             cache: gat_core::config::CacheConfig {
                 materialization_strategy: Some("hardlink".parse().unwrap()),
@@ -1040,7 +1073,10 @@ mod tests {
 
         sync(&repo, &SyncOptions::default()).unwrap();
 
-        let obj = repo.resolved_cache_root().object_path_for_test(&entry.oid);
+        let obj = repo
+            .resolved_cache_root()
+            .unwrap()
+            .object_path_for_test(&entry.oid);
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
@@ -1055,7 +1091,9 @@ mod tests {
     #[cfg(unix)]
     fn symlink_mode_materializes_a_symlink() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         repo.save_config(&gat_core::config::Config {
             cache: gat_core::config::CacheConfig {
                 materialization_strategy: Some("symlink".parse().unwrap()),
@@ -1097,7 +1135,9 @@ mod tests {
     #[test]
     fn copy_mode_produces_a_writable_file() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         repo.save_config(&gat_core::config::Config {
             cache: gat_core::config::CacheConfig {
                 materialization_strategy: Some("copy".parse().unwrap()),
@@ -1121,7 +1161,9 @@ mod tests {
     #[test]
     fn paths_with_spaces_and_non_ascii_are_synced() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "dir with space/héllo 世界.bin", b"hi");
 
         let outcome = sync(&repo, &SyncOptions::default()).unwrap();
@@ -1133,7 +1175,9 @@ mod tests {
     #[test]
     fn force_does_not_fix_a_corrupted_cache_object() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         repo.save_config(&gat_core::config::Config {
             cache: gat_core::config::CacheConfig {
                 materialization_strategy: Some("copy".parse().unwrap()),
@@ -1147,7 +1191,7 @@ mod tests {
         std::fs::write(tmp.path().join("a.bin"), b"locally edited").unwrap();
 
         let world = track(&repo, "a.bin", b"world");
-        let cache_root = repo.resolved_cache_root();
+        let cache_root = repo.resolved_cache_root().unwrap();
         let obj = cache_root.object_path_for_test(&world.oid);
         cache_root
             .make_object_writable_for_test(&world.oid)
@@ -1191,7 +1235,9 @@ mod tests {
     #[test]
     fn confine_rejects_traversal_for_remove() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
 
         // Insert a traversal path directly into materialized state
         // (bypassing the strict parser that `Lock::parse` would normally
@@ -1249,7 +1295,9 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "link/out.bin", b"hello");
 
         let outside = tempfile::tempdir().unwrap();
@@ -1289,7 +1337,9 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let ok_entry = track(&repo, "ok.bin", b"hello");
 
         let outside = tempfile::tempdir().unwrap();
@@ -1309,7 +1359,7 @@ mod tests {
         let mut store = StateStore::open(repo.layout()).unwrap();
         let err = apply_actions(
             &repo,
-            &repo.resolved_cache_root().open_client(),
+            &repo.resolved_cache_root().unwrap().open_client(),
             &Default::default(),
             Some(&mut store),
             &plan,
@@ -1345,7 +1395,9 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let leaf_entry = track(&repo, "a/leaf.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
 
@@ -1376,7 +1428,7 @@ mod tests {
         let mut store = StateStore::open(repo.layout()).unwrap();
         let err = apply_actions(
             &repo,
-            &repo.resolved_cache_root().open_client(),
+            &repo.resolved_cache_root().unwrap().open_client(),
             &Default::default(),
             Some(&mut store),
             &plan,
@@ -1415,7 +1467,9 @@ mod tests {
     #[test]
     fn file_to_directory_transition_in_the_same_batch_persists_the_new_nested_path() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
 
         let a_entry = track(&repo, "a", b"old");
         let mut store = StateStore::open(repo.layout()).unwrap();
@@ -1425,7 +1479,7 @@ mod tests {
         };
         apply_actions(
             &repo,
-            &repo.resolved_cache_root().open_client(),
+            &repo.resolved_cache_root().unwrap().open_client(),
             &Default::default(),
             Some(&mut store),
             &setup_plan,
@@ -1446,7 +1500,7 @@ mod tests {
         let mut store = StateStore::open(repo.layout()).unwrap();
         apply_actions(
             &repo,
-            &repo.resolved_cache_root().open_client(),
+            &repo.resolved_cache_root().unwrap().open_client(),
             &Default::default(),
             Some(&mut store),
             &plan,
@@ -1477,7 +1531,9 @@ mod tests {
     #[test]
     fn directory_to_file_transition_in_the_same_batch_persists_the_new_file() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
 
         let ab_entry = track(&repo, "a/b", b"old");
         let mut store = StateStore::open(repo.layout()).unwrap();
@@ -1487,7 +1543,7 @@ mod tests {
         };
         apply_actions(
             &repo,
-            &repo.resolved_cache_root().open_client(),
+            &repo.resolved_cache_root().unwrap().open_client(),
             &Default::default(),
             Some(&mut store),
             &setup_plan,
@@ -1510,7 +1566,7 @@ mod tests {
         let mut store = StateStore::open(repo.layout()).unwrap();
         apply_actions(
             &repo,
-            &repo.resolved_cache_root().open_client(),
+            &repo.resolved_cache_root().unwrap().open_client(),
             &Default::default(),
             Some(&mut store),
             &plan,
@@ -1538,7 +1594,9 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let outside = tempfile::tempdir().unwrap();
         let outside_file = outside.path().join("victim.bin");
         std::fs::write(&outside_file, b"outside").unwrap();
@@ -1582,7 +1640,9 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         // The target deliberately never exists (that's the "dangling"
         // under test), but it's still rooted under this test's own
@@ -1618,7 +1678,9 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
 
@@ -1658,7 +1720,9 @@ mod tests {
         // aside (because existence was unknown at planning time), the original
         // file must be restored so no user data is silently destroyed.
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         // Use hardlink-only so there is exactly one mode to fail.
         repo.save_config(&gat_core::config::Config {
             cache: gat_core::config::CacheConfig {
@@ -1686,13 +1750,14 @@ mod tests {
         // Remove the cached object so every materialize mode fails at execute time.
         let obj_path = repo
             .resolved_cache_root()
+            .unwrap()
             .object_path_for_test(&ingested.oid);
         std::fs::remove_file(&obj_path).unwrap();
 
         let mut store = gat_io::StateStore::open(repo.layout()).unwrap();
         let result = apply_actions(
             &repo,
-            &repo.resolved_cache_root().open_client(),
+            &repo.resolved_cache_root().unwrap().open_client(),
             &Default::default(),
             Some(&mut store),
             &plan,
@@ -1723,7 +1788,9 @@ mod tests {
     #[test]
     fn deep_chain_removal_prunes_all_empty_ancestors_under_validate() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a/b/c/file.bin", b"x");
         sync(&repo, &SyncOptions::default()).unwrap();
 
@@ -1737,7 +1804,9 @@ mod tests {
     #[test]
     fn deep_chain_removal_prunes_all_empty_ancestors_under_trust_state() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a/b/c/file.bin", b"x");
         sync(&repo, &SyncOptions::default()).unwrap();
 
@@ -1758,7 +1827,9 @@ mod tests {
     #[test]
     fn untracked_sibling_file_blocks_pruning_above_it() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a/b/c/file.bin", b"x");
         sync(&repo, &SyncOptions::default()).unwrap();
         std::fs::write(tmp.path().join("a/b/keep.txt"), b"keep").unwrap();
@@ -1775,7 +1846,9 @@ mod tests {
     #[test]
     fn two_removes_sharing_a_parent_prune_it_once() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a/b/one.bin", b"1");
         track(&repo, "a/b/two.bin", b"2");
         sync(&repo, &SyncOptions::default()).unwrap();
@@ -1791,7 +1864,9 @@ mod tests {
     #[test]
     fn sibling_branches_are_both_pruned() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a/left/file.bin", b"l");
         track(&repo, "a/right/file.bin", b"r");
         sync(&repo, &SyncOptions::default()).unwrap();
@@ -1807,7 +1882,9 @@ mod tests {
     #[test]
     fn unrelated_empty_directory_is_never_touched_by_sync_pruning() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a/file.bin", b"x");
         sync(&repo, &SyncOptions::default()).unwrap();
         std::fs::create_dir_all(tmp.path().join("unrelated")).unwrap();
@@ -1822,7 +1899,9 @@ mod tests {
     #[test]
     fn repository_root_is_never_removed_when_the_last_root_file_is_deleted() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "root.bin", b"x");
         sync(&repo, &SyncOptions::default()).unwrap();
 
@@ -1836,7 +1915,9 @@ mod tests {
     #[test]
     fn dry_run_removal_performs_no_pruning() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a/b/file.bin", b"x");
         sync(&repo, &SyncOptions::default()).unwrap();
 
@@ -1859,7 +1940,9 @@ mod tests {
     #[test]
     fn remove_conflict_without_force_leaves_file_and_directories_untouched() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         repo.save_config(&gat_core::config::Config {
             cache: gat_core::config::CacheConfig {
                 materialization_strategy: Some("copy".parse().unwrap()),
@@ -1883,7 +1966,9 @@ mod tests {
     #[test]
     fn remove_conflict_with_force_deletes_the_leaf_and_prunes_the_empty_chain() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         repo.save_config(&gat_core::config::Config {
             cache: gat_core::config::CacheConfig {
                 materialization_strategy: Some("copy".parse().unwrap()),
@@ -1914,7 +1999,9 @@ mod tests {
     #[test]
     fn absent_before_sync_path_is_never_handed_to_do_remove_or_pruned() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a/b/file.bin", b"x");
         sync(&repo, &SyncOptions::default()).unwrap();
         // Simulate the path already being gone from both `gat.lock` and
@@ -1947,7 +2034,9 @@ mod tests {
     #[test]
     fn trust_state_reconciles_a_materialized_row_whose_leaf_is_already_gone_without_pruning() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a/b/file.bin", b"x");
         sync(&repo, &SyncOptions::default()).unwrap();
         std::fs::remove_file(tmp.path().join("a/b/file.bin")).unwrap();
@@ -1969,7 +2058,9 @@ mod tests {
     #[test]
     fn mixed_batch_only_prunes_ancestors_of_the_actually_removed_leaf() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a/file.bin", b"a");
         track(&repo, "b/file.bin", b"b");
         sync(&repo, &SyncOptions::default()).unwrap();
@@ -1999,7 +2090,9 @@ mod tests {
     #[test]
     fn clean_repeated_sync_performs_zero_remove_dir_attempts() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a/b/file.bin", b"x");
         sync(&repo, &SyncOptions::default()).unwrap();
 
@@ -2012,7 +2105,9 @@ mod tests {
     #[test]
     fn materialize_only_sync_performs_zero_remove_dir_attempts() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a/b/file.bin", b"x");
 
         gat_io::worktree_test_support::reset_remove_dir_attempts();
@@ -2024,7 +2119,9 @@ mod tests {
     #[test]
     fn replace_only_sync_performs_zero_remove_dir_attempts() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let entry = track(&repo, "a/b/file.bin", b"x");
         sync(&repo, &SyncOptions::default()).unwrap();
         track(&repo, entry.path.as_str(), b"replaced");
@@ -2039,7 +2136,9 @@ mod tests {
     #[test]
     fn dry_run_with_planned_removal_performs_zero_remove_dir_attempts() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a/b/file.bin", b"x");
         sync(&repo, &SyncOptions::default()).unwrap();
         untrack(&repo, "a/b/file.bin");
@@ -2062,7 +2161,9 @@ mod tests {
     #[test]
     fn clean_repeated_sync_prunes_nothing() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a/b/file.bin", b"x");
         sync(&repo, &SyncOptions::default()).unwrap();
 
@@ -2086,7 +2187,9 @@ mod tests {
     #[test]
     fn plain_sync_after_a_strategy_change_leaves_an_already_correct_file_alone() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         set_strategy(&repo, "copy");
         track(&repo, "a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
@@ -2111,7 +2214,9 @@ mod tests {
     #[test]
     fn rematerialize_recreates_an_already_correct_file_copy_to_symlink() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         set_strategy(&repo, "copy");
         let entry = track(&repo, "a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
@@ -2153,7 +2258,9 @@ mod tests {
     #[cfg(unix)]
     fn rematerialize_recreates_an_already_correct_file_copy_to_hardlink() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         set_strategy(&repo, "copy");
         let entry = track(&repo, "a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
@@ -2170,7 +2277,10 @@ mod tests {
 
         assert_eq!(outcome.rematerialized, 1);
         use std::os::unix::fs::MetadataExt;
-        let obj = repo.resolved_cache_root().object_path_for_test(&entry.oid);
+        let obj = repo
+            .resolved_cache_root()
+            .unwrap()
+            .object_path_for_test(&entry.oid);
         let dest_ino = std::fs::metadata(tmp.path().join("a.bin")).unwrap().ino();
         let obj_ino = std::fs::metadata(&obj).unwrap().ino();
         assert_eq!(
@@ -2182,7 +2292,9 @@ mod tests {
     #[test]
     fn repeated_rematerialize_stays_clean_and_idempotent() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         set_strategy(&repo, "symlink");
         track(&repo, "a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
@@ -2212,7 +2324,9 @@ mod tests {
     #[test]
     fn rematerialize_reports_a_conflict_instead_of_overwriting_a_local_edit() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         set_strategy(&repo, "copy");
         track(&repo, "a.bin", b"hello");
         sync(
@@ -2254,7 +2368,9 @@ mod tests {
     #[test]
     fn rematerialize_force_restores_a_locally_modified_file() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         set_strategy(&repo, "copy");
         track(&repo, "a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
@@ -2284,11 +2400,16 @@ mod tests {
     #[test]
     fn rematerialize_leaves_the_file_untouched_when_the_cache_object_is_missing() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         set_strategy(&repo, "copy");
         let entry = track(&repo, "a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
-        let obj = repo.resolved_cache_root().object_path_for_test(&entry.oid);
+        let obj = repo
+            .resolved_cache_root()
+            .unwrap()
+            .object_path_for_test(&entry.oid);
         std::fs::remove_file(&obj).unwrap();
 
         let outcome = sync(
@@ -2314,11 +2435,13 @@ mod tests {
     #[test]
     fn rematerialize_leaves_the_file_untouched_when_the_cache_object_is_corrupted() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         set_strategy(&repo, "copy");
         let entry = track(&repo, "a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
-        let cache_root = repo.resolved_cache_root();
+        let cache_root = repo.resolved_cache_root().unwrap();
         let obj = cache_root.object_path_for_test(&entry.oid);
         cache_root
             .make_object_writable_for_test(&entry.oid)
@@ -2349,7 +2472,9 @@ mod tests {
     #[test]
     fn rematerialize_changed_desired_oid_uses_ordinary_replace() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         set_strategy(&repo, "copy");
         track(&repo, "a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
@@ -2372,7 +2497,9 @@ mod tests {
     #[test]
     fn rematerialize_removed_desired_path_uses_ordinary_remove() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         set_strategy(&repo, "copy");
         track(&repo, "a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
@@ -2395,7 +2522,9 @@ mod tests {
     #[test]
     fn dry_run_rematerialize_reports_but_never_touches_disk_or_state() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         set_strategy(&repo, "copy");
         track(&repo, "a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
@@ -2441,7 +2570,9 @@ mod tests {
     #[test]
     fn dry_run_rematerialize_with_trust_state_still_reports_a_conflict() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         set_strategy(&repo, "copy");
         track(&repo, "a.bin", b"hello");
         sync(
@@ -2477,7 +2608,9 @@ mod tests {
     #[cfg(unix)]
     fn a_failed_rematerialize_attempt_leaves_the_original_file_intact() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         set_strategy(&repo, "copy");
         track(&repo, "dir/a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();
@@ -2531,7 +2664,9 @@ mod tests {
     #[test]
     fn rematerialize_never_touches_a_preexisting_old_style_deterministic_tmp_sibling() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         set_strategy(&repo, "copy");
         track(&repo, "a.bin", b"hello");
         sync(&repo, &SyncOptions::default()).unwrap();

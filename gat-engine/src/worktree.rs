@@ -242,7 +242,9 @@ mod tests {
     #[test]
     fn inspection_returns_semantic_kind_without_exposing_a_physical_path() {
         let tmp = test_repo();
-        let repo = Repository::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("file.bin"), b"payload").unwrap();
 
         assert_eq!(
@@ -258,7 +260,9 @@ mod tests {
     #[test]
     fn move_and_remove_delegate_through_repository_relative_paths() {
         let tmp = test_repo();
-        let repo = Repository::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
 
         move_path(&repo, &gp("a.bin"), &gp("nested/b.bin")).unwrap();
@@ -275,7 +279,9 @@ mod tests {
     #[test]
     fn rollback_failure_preserves_engine_error_classification() {
         let tmp = test_repo();
-        let repo = Repository::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
 
         let error = rollback_move(&repo, &gp("a.bin"), &gp("missing.bin")).unwrap_err();
 

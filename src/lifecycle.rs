@@ -100,7 +100,7 @@ pub const REGISTRY: &[FeatureSpec] = &[
         status: Status::Experimental,
     ),
     feature_spec!(
-        surface: Surface::ConfigKey("lock.shard_levels"),
+        surface: Surface::SettingKey("lock.shard_levels"),
         subject: "`lock.shard_levels`",
         status: Status::Experimental,
     ),
@@ -189,7 +189,7 @@ pub enum DocTarget<'a> {
     /// The command page identified by `<slug>`.
     CommandPage(&'a str),
     /// The configuration section for a canonical `gat.yaml` key.
-    ConfigKey(&'a str),
+    SettingKey(&'a str),
 }
 
 /// Compares by variant + string content only, independent of lifetime,
@@ -200,9 +200,9 @@ impl<'b> PartialEq<DocTarget<'b>> for DocTarget<'_> {
     fn eq(&self, other: &DocTarget<'b>) -> bool {
         match (self, other) {
             (DocTarget::CommandPage(a), DocTarget::CommandPage(b)) => a == b,
-            (DocTarget::ConfigKey(a), DocTarget::ConfigKey(b)) => a == b,
-            (DocTarget::CommandPage(_), DocTarget::ConfigKey(_))
-            | (DocTarget::ConfigKey(_), DocTarget::CommandPage(_)) => false,
+            (DocTarget::SettingKey(a), DocTarget::SettingKey(b)) => a == b,
+            (DocTarget::CommandPage(_), DocTarget::SettingKey(_))
+            | (DocTarget::SettingKey(_), DocTarget::CommandPage(_)) => false,
         }
     }
 }
@@ -224,9 +224,9 @@ pub const fn doc_target_for(surface: Surface<'static>) -> DocTarget<'static> {
         Surface::CommandOption { command, .. } => DocTarget::CommandPage(command),
         Surface::OptionAlias { command, .. } => DocTarget::CommandPage(command),
         Surface::OptionValue { command, .. } => DocTarget::CommandPage(command),
-        Surface::ConfigKey(key) => DocTarget::ConfigKey(key),
-        Surface::ConfigAlias { canonical, .. } => DocTarget::ConfigKey(canonical),
-        Surface::ConfigValue { key, .. } => DocTarget::ConfigKey(key),
+        Surface::SettingKey(key) => DocTarget::SettingKey(key),
+        Surface::ConfigAlias { canonical, .. } => DocTarget::SettingKey(canonical),
+        Surface::ConfigValue { key, .. } => DocTarget::SettingKey(key),
     }
 }
 
@@ -299,7 +299,7 @@ pub struct DocPage {
 /// used by both [`command_page`] and [`config_key`] below. A page's own
 /// `tag` is only set by the entry whose `Surface` *is* that page's
 /// top-level surface (`Surface::Command` for a command page,
-/// `Surface::ConfigKey` for a config section) -- a non-Stable child
+/// `Surface::SettingKey` for a config section) -- a non-Stable child
 /// surface (alias/option/value) still renders a warning on the page
 /// without making the whole page's own status non-Stable.
 fn doc_page(target: DocTarget<'_>) -> DocPage {
@@ -315,7 +315,7 @@ fn doc_page(target: DocTarget<'_>) -> DocPage {
         let is_owning_surface = matches!(
             (spec_target, spec.surface),
             (DocTarget::CommandPage(_), Surface::Command(_))
-                | (DocTarget::ConfigKey(_), Surface::ConfigKey(_))
+                | (DocTarget::SettingKey(_), Surface::SettingKey(_))
         );
         if is_owning_surface {
             page.tag = Some(spec.status.label());
@@ -345,7 +345,7 @@ pub fn command_page(slug: &str) -> DocPage {
 /// `cache.ingest_strategy`).
 #[must_use]
 pub fn config_key(key: &str) -> DocPage {
-    doc_page(DocTarget::ConfigKey(key))
+    doc_page(DocTarget::SettingKey(key))
 }
 
 /// Registry-aware extension of the neutral core [`Lifecycle`] sink:
@@ -538,22 +538,22 @@ mod tests {
             DocTarget::CommandPage("gc")
         );
         assert_eq!(
-            doc_target_for(Surface::ConfigKey("git.ignore_patterns")),
-            DocTarget::ConfigKey("git.ignore_patterns")
+            doc_target_for(Surface::SettingKey("git.ignore_patterns")),
+            DocTarget::SettingKey("git.ignore_patterns")
         );
         assert_eq!(
             doc_target_for(Surface::ConfigAlias {
                 canonical: "git.ignore_patterns",
                 alias: "git.exclude_patterns"
             }),
-            DocTarget::ConfigKey("git.ignore_patterns")
+            DocTarget::SettingKey("git.ignore_patterns")
         );
         assert_eq!(
             doc_target_for(Surface::ConfigValue {
                 key: "cache.ingest_strategy",
                 value: "mmap"
             }),
-            DocTarget::ConfigKey("cache.ingest_strategy")
+            DocTarget::SettingKey("cache.ingest_strategy")
         );
     }
 
@@ -581,7 +581,7 @@ mod tests {
             }
             let page = match doc_target_for(spec.surface) {
                 DocTarget::CommandPage(slug) => command_page(slug),
-                DocTarget::ConfigKey(key) => config_key(key),
+                DocTarget::SettingKey(key) => config_key(key),
             };
             let matches = page
                 .warnings
@@ -603,7 +603,7 @@ mod tests {
         assert_eq!(gc.tag, Some("Experimental"));
 
         // `cache.ingest_strategy`'s non-Stable *values* must not force a
-        // page-level tag on their own -- only a `Surface::ConfigKey`
+        // page-level tag on their own -- only a `Surface::SettingKey`
         // entry for that key would (there is none registered today).
         let ingest_strategy = config_key("cache.ingest_strategy");
         assert_eq!(ingest_strategy.tag, None);

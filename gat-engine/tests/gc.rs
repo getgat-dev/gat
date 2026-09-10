@@ -32,7 +32,9 @@ fn explicit_repository_union_and_history_selection_match_for_both_targets() {
     for remote_target in [false, true] {
         let storage = tempfile::tempdir().unwrap();
         let current = test_repo();
-        let repo = Repository::at(current.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(current.path().to_path_buf());
         let remote_name = if remote_target {
             Some(use_remote(&repo, storage.path()))
         } else {
@@ -41,7 +43,9 @@ fn explicit_repository_union_and_history_selection_match_for_both_targets() {
         };
         let current_oid = track(&repo, current.path(), "current.bin", b"current");
         let peer = test_repo();
-        let peer_repo = Repository::at(peer.path().to_path_buf());
+        let peer_repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(peer.path().to_path_buf());
         let old = track(&peer_repo, peer.path(), "old.bin", b"old");
         commit_all(peer.path(), "old");
         untrack(&peer_repo, peer.path(), "old.bin");
@@ -49,7 +53,9 @@ fn explicit_repository_union_and_history_selection_match_for_both_targets() {
         commit_all(peer.path(), "tip");
         let uncommitted = track(&peer_repo, peer.path(), "uncommitted.bin", b"uncommitted");
         let second = test_repo();
-        let second_repo = Repository::at(second.path().to_path_buf());
+        let second_repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(second.path().to_path_buf());
         let second_oid = track(&second_repo, second.path(), "second.bin", b"second");
         commit_all(second.path(), "second");
         let remote = remote_name.as_ref().map(|_| remote_for(&repo));
@@ -135,7 +141,9 @@ fn explicit_repository_failures_are_deduplicated_and_dry_runs_are_uncertain() {
     for remote_target in [false, true] {
         let storage = tempfile::tempdir().unwrap();
         let current = test_repo();
-        let repo = Repository::at(current.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(current.path().to_path_buf());
         let remote_name = remote_target.then(|| use_remote(&repo, storage.path()));
         let orphan = cache_root(&repo)
             .writer()
@@ -222,8 +230,8 @@ fn commit_all_at(dir: &Path, message: &str, seconds: i64) {
 fn track(repo: &Repository, root: &Path, path: &str, bytes: &[u8]) -> Oid {
     std::fs::write(root.join(path), bytes).expect("write tracked fixture");
     let config = repo.load_config().expect("load cache config");
-    let cache_root = RepositoryLayout::at(root.to_path_buf())
-        .resolve_cache_root(None, config.cache.location.as_ref());
+    let cache_root =
+        RepositoryLayout::at(root.to_path_buf()).resolve_cache_root(config.cache.location.as_ref());
     let oid = cache_root
         .writer()
         .ingest(std::io::Cursor::new(bytes))
@@ -275,8 +283,9 @@ fn use_shared_cache(repo: &Repository, path: &Path) {
     let mut config = repo
         .load_config_scoped(gat_core::config::ConfigScope::Project)
         .expect("load project config");
-    config.cache.location = Some(CacheLocation::from_path(path.to_path_buf()));
-    repo.save_config_scoped(&config, gat_core::config::ConfigScope::Project)
+    config.cache.location =
+        Some(CacheLocation::try_from_path(path.to_path_buf()).expect("nonempty cache location"));
+    repo.write_scoped_config_fixture(&config, gat_core::config::ConfigScope::Project)
         .expect("save project config");
 }
 
@@ -290,7 +299,7 @@ fn use_remote(repo: &Repository, remote_root: &Path) -> RemoteName {
         name.clone(),
         RemoteUrlTemplate::from_string(gat_io::remote_file_url_for_test(remote_root)).into(),
     );
-    repo.save_config_scoped(&config, gat_core::config::ConfigScope::Project)
+    repo.write_scoped_config_fixture(&config, gat_core::config::ConfigScope::Project)
         .expect("save project config");
     name
 }
@@ -299,13 +308,22 @@ fn remote_for(repo: &Repository) -> RemoteClient {
     let config = repo.load_config().expect("load effective config");
     let name = config.remotes.default.as_ref().expect("default remote");
     let remote = config.remotes.by_name.get(name).expect("configured remote");
-    RemoteClient::open(remote.url.as_template_str()).expect("open remote")
+    RemoteClient::open(
+        remote.url.as_template_str(),
+        &gat_io::InvocationInputs::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .templates(),
+        gat_core::settings::NetworkOptions::default(),
+    )
+    .expect("open remote")
 }
 
 #[test]
 fn tips_and_depth_bound_the_history_kept_by_gc() {
     let temp = test_repo();
-    let repo = Repository::at(temp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(temp.path().to_path_buf());
     let oldest = track(&repo, temp.path(), "oldest.bin", b"oldest");
     commit_all(temp.path(), "add oldest");
     untrack(&repo, temp.path(), "oldest.bin");
@@ -361,7 +379,9 @@ fn tips_and_depth_bound_the_history_kept_by_gc() {
 #[test]
 fn depth_is_consumed_before_time_filtering() {
     let temp = test_repo();
-    let repo = Repository::at(temp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(temp.path().to_path_buf());
     let ancient = track(&repo, temp.path(), "ancient.bin", b"ancient");
     commit_all_at(temp.path(), "add ancient", 1_000);
     untrack(&repo, temp.path(), "ancient.bin");
@@ -398,7 +418,9 @@ fn depth_is_consumed_before_time_filtering() {
 #[test]
 fn all_refs_keeps_custom_commit_refs_and_ignores_blob_refs() {
     let temp = test_repo();
-    let repo = Repository::at(temp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(temp.path().to_path_buf());
     let branch_oid = track(&repo, temp.path(), "branch.bin", b"branch");
     commit_all(temp.path(), "branch");
     let branch_tip = head(temp.path());
@@ -462,7 +484,9 @@ fn all_refs_keeps_custom_commit_refs_and_ignores_blob_refs() {
 #[test]
 fn dangling_ref_aborts_before_any_object_is_deleted() {
     let temp = test_repo();
-    let repo = Repository::at(temp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(temp.path().to_path_buf());
     let kept = track(&repo, temp.path(), "kept.bin", b"kept");
     commit_all(temp.path(), "kept");
     let orphan = cache_root(&repo)
@@ -493,14 +517,16 @@ fn dangling_ref_aborts_before_any_object_is_deleted() {
 #[test]
 fn current_lock_is_always_kept_across_flat_and_sharded_history() {
     let temp = test_repo();
-    let repo = Repository::at(temp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(temp.path().to_path_buf());
     let flat = track(&repo, temp.path(), "flat.bin", b"flat");
     commit_all(temp.path(), "flat");
     let mut config = repo
         .load_config_scoped(gat_core::config::ConfigScope::Project)
         .unwrap();
     config.lock.shard_levels = Some(LockShardLevels::new(2).unwrap());
-    repo.save_config_scoped(&config, gat_core::config::ConfigScope::Project)
+    repo.write_scoped_config_fixture(&config, gat_core::config::ConfigScope::Project)
         .unwrap();
     let sharded = track(&repo, temp.path(), "sharded.bin", b"sharded");
     commit_all(temp.path(), "sharded");
@@ -531,7 +557,9 @@ fn current_lock_is_always_kept_across_flat_and_sharded_history() {
 fn shallow_clone_with_crlf_lock_fails_closed() {
     let shared = tempfile::tempdir().unwrap();
     let source = test_repo();
-    let source_repo = Repository::at(source.path().to_path_buf());
+    let source_repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(source.path().to_path_buf());
     use_shared_cache(&source_repo, shared.path());
     track(&source_repo, source.path(), "kept.bin", b"kept");
     commit_all(source.path(), "kept");
@@ -559,7 +587,9 @@ fn shallow_clone_with_crlf_lock_fails_closed() {
     git(&clone, &["checkout", "-q"]);
     let lock_text = std::fs::read_to_string(clone.join("gat.lock")).unwrap();
     assert!(lock_text.contains("\r\n"));
-    let repo = Repository::at(clone);
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(clone);
 
     assert!(matches!(
         collect(
@@ -633,7 +663,9 @@ fn remote_gc_keeps_explicit_peer_and_reuses_one_listing_pass() {
     let remote_root = tempfile::tempdir().unwrap();
 
     let first = test_repo();
-    let first_repo = Repository::at(first.path().to_path_buf());
+    let first_repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(first.path().to_path_buf());
     let remote_name = use_remote(&first_repo, remote_root.path());
     let first_oid = track(&first_repo, first.path(), "first.bin", b"first");
     commit_all(first.path(), "first");
@@ -643,7 +675,9 @@ fn remote_gc_keeps_explicit_peer_and_reuses_one_listing_pass() {
         .unwrap();
 
     let second = test_repo();
-    let second_repo = Repository::at(second.path().to_path_buf());
+    let second_repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(second.path().to_path_buf());
     use_remote(&second_repo, remote_root.path());
     let second_oid = track(&second_repo, second.path(), "second.bin", b"second");
     commit_all(second.path(), "second");
@@ -709,7 +743,9 @@ fn remote_gc_keeps_explicit_peer_and_reuses_one_listing_pass() {
 #[test]
 fn no_history_gc_rejects_malformed_current_lock() {
     let temp = test_repo();
-    let repo = Repository::at(temp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(temp.path().to_path_buf());
     let orphan = track(&repo, temp.path(), "file.bin", b"payload");
     std::fs::write(temp.path().join("gat.lock"), "invalid lock contents\n").unwrap();
     for dry_run in [true, false] {

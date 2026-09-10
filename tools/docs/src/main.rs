@@ -20,7 +20,7 @@ use gat_core::config::{
     SyncConfig,
 };
 use gat_core::config_keys::{
-    CONFIG_KEYS, ConfigDefault, ConfigDocValue, ConfigElementSpec, ConfigKeySpec, ConfigSection,
+    CONFIG_KEYS, ConfigDefault, ConfigDocValue, ConfigElementSpec, ConfigFieldSpec, ConfigSection,
     ConfigSetter, ConfigValueSpec, ConfigWriteSurface, EffectiveDefault, EmptyListPolicy,
     PersistedDefault,
 };
@@ -32,7 +32,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const CONFIGURATION_REMOTE_GUIDE: &str = include_str!("docs/content/configuration-remotes.md");
+const CONFIGURATION_REMOTE_GUIDE: &str = include_str!("../content/configuration-remotes.md");
 const CONFIGURATION_COMMAND_GUIDE: &str = r#"<Note>
 **Local overrides Project; Project overrides Global.** General settings inherit
 field by field; same-name resources replace whole definitions.
@@ -130,7 +130,7 @@ fn validate_command_docs(root: &Command) -> Result<()> {
         problems.push(format!("stale documentation:  gat {path}"));
     }
 
-    fn validate_config_value(spec: &ConfigKeySpec, value: ConfigDocValue) -> Result<()> {
+    fn validate_config_value(spec: &ConfigFieldSpec, value: ConfigDocValue) -> Result<()> {
         match (spec.value, value) {
             (ConfigValueSpec::Boolean, ConfigDocValue::Boolean(_))
             | (
@@ -573,6 +573,18 @@ fn set_commands_pages(docs_json: &mut Value, pages: Vec<Value>) {
 /// schema.
 fn complete_config() -> Config {
     Config {
+        network: gat_core::settings::NetworkConfig {
+            readiness_timeout_seconds: Some(
+                gat_core::settings::NetworkOptions::default().readiness_timeout,
+            ),
+            operation_timeout_seconds: Some(
+                gat_core::settings::NetworkOptions::default().operation_timeout,
+            ),
+            io_timeout_seconds: Some(gat_core::settings::NetworkOptions::default().io_timeout),
+            request_concurrency: Some(
+                gat_core::settings::NetworkOptions::default().request_concurrency,
+            ),
+        },
         remotes: RemotesConfig {
             default: Some(RemoteName::from_string("origin".to_string())),
             by_name: BTreeMap::from([
@@ -590,9 +602,10 @@ fn complete_config() -> Config {
             ]),
         },
         cache: CacheConfig {
-            location: Some(gat_core::cache_location::CacheLocation::from_path(
-                "/var/cache/gat".into(),
-            )),
+            location: Some(
+                gat_core::cache_location::CacheLocation::try_from_path("/var/cache/gat".into())
+                    .expect("nonempty cache location"),
+            ),
             materialization_strategy: Some(
                 config::MaterializationStrategy::from_values(&["hardlink", "copy"])
                     .expect("valid example materialization_strategy"),
@@ -813,13 +826,14 @@ fn render_persisted_default(default: ConfigDefault) -> String {
 
 fn render_effective_default(default: ConfigDefault) -> Option<String> {
     match default.effective {
+        EffectiveDefault::Setting(key) => Some(render_setting_default(key)),
         EffectiveDefault::SameAsPersisted => None,
         EffectiveDefault::Value(value) => Some(render_doc_value(value)),
         EffectiveDefault::Derived(value) => Some(format!("`{value}`")),
     }
 }
 
-fn render_setter(spec: &ConfigKeySpec, commands: &BTreeMap<String, &Command>) -> Result<String> {
+fn render_setter(spec: &ConfigFieldSpec, commands: &BTreeMap<String, &Command>) -> Result<String> {
     match spec.setter {
         ConfigSetter::Command { path } => {
             find_command(commands, path)?;
@@ -852,10 +866,12 @@ fn render_named_schema(section: ConfigSection, out: &mut String) {
         .iter()
         .filter(|spec| spec.section == section)
         .collect::<Vec<_>>();
-    if !specs
-        .iter()
-        .any(|spec| matches!(spec.path, gat_core::config_keys::ConfigPath::Named { .. }))
-    {
+    if !specs.iter().any(|spec| {
+        matches!(
+            spec.path,
+            gat_core::config_keys::ConfigPath::ResourceField(_)
+        )
+    }) {
         return;
     }
     let section_name = match section {
@@ -870,16 +886,15 @@ fn render_named_schema(section: ConfigSection, out: &mut String) {
     let mut named_started = false;
     for spec in specs {
         match spec.path {
-            gat_core::config_keys::ConfigPath::Static(path) => {
-                let field = path.rsplit('.').next().unwrap();
+            gat_core::config_keys::ConfigPath::Setting(key) => {
+                let field = key.as_str().rsplit('.').next().unwrap();
                 out.push_str(&format!("  {field}: <value>\n"));
             }
-            gat_core::config_keys::ConfigPath::Named { field: None, .. } => {
-                out.push_str("  <name>: <remote-url>\n");
+            gat_core::config_keys::ConfigPath::ResourceDefault(_) => {
+                out.push_str("  default: <value>\n");
             }
-            gat_core::config_keys::ConfigPath::Named {
-                field: Some(field), ..
-            } => {
+            gat_core::config_keys::ConfigPath::ResourceField(field) => {
+                let field = field.name();
                 if !named_started {
                     out.push_str("  <name>:\n");
                     named_started = true;
@@ -939,7 +954,7 @@ fn config_value_lifecycle_status(key: &str, value: &str) -> Option<lifecycle::St
 fn config_key_lifecycle_warning(key: &str) -> Option<String> {
     let page = lifecycle::config_key(key);
     for warning in &page.warnings {
-        if !matches!(warning.surface, lifecycle::Surface::ConfigKey(_)) {
+        if !matches!(warning.surface, lifecycle::Surface::SettingKey(_)) {
             continue;
         }
         return Some(warning.text.clone());
@@ -972,7 +987,7 @@ fn render_constraint(constraint: &str, out: &mut String) {
 }
 
 fn render_configuration_field(
-    spec: &ConfigKeySpec,
+    spec: &ConfigFieldSpec,
     commands: &BTreeMap<String, &Command>,
     out: &mut String,
 ) -> Result<()> {
@@ -1006,13 +1021,13 @@ fn render_configuration_field(
     for warning in &lifecycle::config_key(key).warnings {
         if matches!(
             warning.surface,
-            lifecycle::Surface::ConfigKey(_) | lifecycle::Surface::ConfigValue { .. }
+            lifecycle::Surface::SettingKey(_) | lifecycle::Surface::ConfigValue { .. }
         ) {
             continue;
         }
         let subject = match warning.surface {
             lifecycle::Surface::ConfigAlias { alias, .. } => format!("`{alias}`"),
-            lifecycle::Surface::ConfigKey(key) => format!("`{key}`"),
+            lifecycle::Surface::SettingKey(key) => format!("`{key}`"),
             _ => continue,
         };
         let status = match warning.tag {
@@ -1038,9 +1053,9 @@ fn render_configuration_field(
         "    - **Persisted default:** {}\n",
         render_persisted_default(spec.default)
     ));
-    if let Some(environment) = spec.environment_override {
+    if let Some(environment) = spec.environment_override() {
         out.push_str(&format!(
-            "    - **Environment override:** `{environment}` (not persisted to `gat.yaml`)\n"
+            "    - **Environment override:** `{environment}`\n"
         ));
     }
     if !spec.examples.is_empty() {
@@ -1223,7 +1238,8 @@ fn main() -> Result<()> {
     let options = Options::parse();
     let workspace_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .context("gat-tools must live directly beneath the workspace root")?;
+        .and_then(Path::parent)
+        .context("gat-docs must live in tools/docs beneath the workspace root")?;
     let docs_dir = workspace_dir.join("docs");
     let generated = generate_docs(&docs_dir)?;
     if options.check {
@@ -1236,6 +1252,41 @@ fn main() -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn render_setting_default(key: gat_core::settings::SettingKey) -> String {
+    use gat_core::settings::SettingAssignment as A;
+    let Some(value) = key.default_value() else {
+        return "`<repo>/.gat/objects`".to_string();
+    };
+    let text = match value {
+        A::CacheLocation(_) => unreachable!("cache default is derived"),
+        A::CacheMaterializationStrategy(value) => format!(
+            "{:?}",
+            value
+                .modes()
+                .iter()
+                .map(|mode| mode.as_str())
+                .collect::<Vec<_>>()
+        ),
+        A::CacheIngestStrategy(value) => value.as_str().to_string(),
+        A::SyncTrustState(value) | A::SyncAutoFetch(value) | A::SyncAutoRepair(value) => {
+            value.to_string()
+        }
+        A::LockShardLevels(value) => value.get().to_string(),
+        A::GitIgnorePatterns(value) => format!(
+            "{:?}",
+            value
+                .iter()
+                .map(gat_core::git_ignore::GitIgnorePattern::as_str)
+                .collect::<Vec<_>>()
+        ),
+        A::NetworkReadinessTimeout(value)
+        | A::NetworkOperationTimeout(value)
+        | A::NetworkIoTimeout(value) => value.get().to_string(),
+        A::NetworkRequestConcurrency(value) => value.get().to_string(),
+    };
+    format!("`{text}`")
 }
 
 #[cfg(test)]
@@ -1446,7 +1497,7 @@ mod tests {
     #[test]
     fn remote_provider_examples_parse_as_remote_add() {
         let root = root();
-        let guide = include_str!("../docs/references/remote-providers.mdx");
+        let guide = include_str!("../../../docs/references/remote-providers.mdx");
         let mut schemes = BTreeSet::new();
         for example in guide
             .lines()

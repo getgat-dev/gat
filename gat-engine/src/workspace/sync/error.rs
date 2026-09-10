@@ -306,7 +306,9 @@ fn classify_repository(
     use crate::repository::RepositoryError;
 
     match source {
-        RepositoryError::ConfigLoad { scope, .. }
+        RepositoryError::SettingLock { source } => classify_atomic(source),
+        RepositoryError::ConfigurationChanged { scope }
+        | RepositoryError::ConfigLoad { scope, .. }
         | RepositoryError::ConfigLoadScoped { scope, .. }
         | RepositoryError::ConfigDirectoryCreate { scope, .. }
         | RepositoryError::ConfigSerialize { scope, .. }
@@ -316,8 +318,10 @@ fn classify_repository(
         RepositoryError::CurrentDirectory(source) => {
             MutationAuthorityFailureKind::Filesystem(classify_io(source))
         }
-        RepositoryError::NotRepository
+        RepositoryError::PendingMountRecovery(_)
+        | RepositoryError::NotRepository
         | RepositoryError::ConfigPathUnavailable
+        | RepositoryError::UndefinedResourceRemote { .. }
         | RepositoryError::InvalidEffectiveMounts(_)
         | RepositoryError::InvalidEffectiveSelections(_)
         | RepositoryError::InvalidEffectiveRoutes(_) => {
@@ -507,6 +511,15 @@ impl From<crate::repository_state::DesiredRevisionError> for SyncError {
     fn from(source: crate::repository_state::DesiredRevisionError) -> Self {
         let kind = SyncErrorKind::MutationAuthority(classify_mutation_authority(&source));
         Self::new(kind, source)
+    }
+}
+
+impl From<crate::RepositoryError> for SyncError {
+    fn from(source: crate::RepositoryError) -> Self {
+        Self::new(
+            SyncErrorKind::MutationAuthority(classify_repository(&source)),
+            source,
+        )
     }
 }
 

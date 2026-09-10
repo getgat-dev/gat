@@ -60,8 +60,8 @@ fn status_reports_a_symlinked_gat_lock_as_a_local_state_error() {
     let error = run_status(&repo, Selection::root(), &NoopProgress).unwrap_err();
     assert!(matches!(
         error,
-        StatusError::Compare(source)
-            if matches!(source.kind(), gat_engine::CompareErrorKind::Lock(_))
+        StatusError::Snapshot(source)
+            if matches!(source.kind(), gat_engine::RepoSnapshotErrorKind::Lock(gat_engine::LockFailureKind::UnsupportedFileType))
     ));
 }
 

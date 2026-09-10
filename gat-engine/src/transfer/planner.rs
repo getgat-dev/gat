@@ -29,6 +29,16 @@ impl<'a, V> WindowBatch<'a, V> {
     }
 }
 
+// A callback can fail or unwind without draining its batch. Always restore
+// the planner's empty-buffer invariant before the next use.
+struct ClearWindowOnDrop<'a, V>(&'a mut Vec<V>);
+
+impl<V> Drop for ClearWindowOnDrop<'_, V> {
+    fn drop(&mut self) {
+        self.0.clear();
+    }
+}
+
 /// Deduplicates a streamed operation globally while retaining at most one
 /// bounded window of full per-item metadata.
 ///
@@ -55,7 +65,9 @@ impl<K: Eq + Hash, V> StreamingWindow<K, V> {
     /// Records the first value for `key`, preserving insertion order in the
     /// window buffer. When the window fills, `on_full` is invoked with the
     /// buffered items and the buffer is cleared in place afterward,
-    /// retaining its allocation for the next window.
+    /// retaining its allocation for the next window, including on error or unwind.
+    /// Keys remain recorded after callback failure: delivery is attempted once,
+    /// and retrying failed work requires a new planner.
     pub fn record<E>(
         &mut self,
         key: K,
@@ -67,10 +79,10 @@ impl<K: Eq + Hash, V> StreamingWindow<K, V> {
         }
         self.window.push(make());
         if self.window.len() >= self.window_size.get() {
+            let window = ClearWindowOnDrop(&mut self.window);
             on_full(WindowBatch {
-                items: &mut self.window,
+                items: &mut *window.0,
             })?;
-            self.window.clear();
         }
         Ok(())
     }
@@ -98,6 +110,47 @@ impl<K: Eq + Hash, V> StreamingWindow<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_callback_clears_the_window_before_reuse() {
+        let mut window = StreamingWindow::new(NonZeroUsize::new(2).unwrap());
+        window.record(0, || 0, |_| Ok::<_, ()>(())).unwrap();
+        assert_eq!(window.record(1, || 1, |_| Err(())), Err(()));
+        let allocation = window.window.as_ptr();
+        assert!(window.window.is_empty());
+        window.record(2, || 2, |_| Ok::<_, ()>(())).unwrap();
+        window
+            .record(
+                3,
+                || 3,
+                |batch| {
+                    assert_eq!(batch.drain().collect::<Vec<_>>(), [2, 3]);
+                    Ok::<_, ()>(())
+                },
+            )
+            .unwrap();
+        assert_eq!(window.window.as_ptr(), allocation);
+        assert_eq!(window.unique_count(), 4);
+    }
+
+    #[test]
+    fn unwinding_callback_restores_the_window_bound() {
+        let mut window = StreamingWindow::new(NonZeroUsize::new(1).unwrap());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            window.record(0, || 0, |_| -> Result<(), ()> { panic!("callback failed") })
+        }));
+        assert!(result.is_err());
+        window
+            .record(
+                1,
+                || 1,
+                |batch| {
+                    assert_eq!(batch.drain().collect::<Vec<_>>(), [1]);
+                    Ok::<_, ()>(())
+                },
+            )
+            .unwrap();
+    }
 
     #[test]
     fn yields_a_window_as_soon_as_it_fills() {

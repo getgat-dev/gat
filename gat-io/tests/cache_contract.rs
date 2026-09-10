@@ -12,7 +12,12 @@ fn cache_alias_into_local_storage_gets_local_ignore_protection() {
     std::os::unix::fs::symlink(repo.path().join(".gat"), &alias).unwrap();
     let location = alias.join("objects");
     let layout = RepositoryLayout::at(repo.path().to_path_buf());
-    let root = layout.resolve_cache_root(Some(location.as_os_str()), None);
+    let root = layout.resolve_cache_root(Some(
+        &gat_core::cache_location::CacheLocation::try_from_path(std::path::PathBuf::from(
+            location.as_os_str(),
+        ))
+        .expect("nonempty fixture cache path"),
+    ));
     root.writer().ingest(&b"content"[..]).unwrap();
     assert_eq!(
         std::fs::read(repo.path().join(".gat/.gitignore")).unwrap(),
@@ -31,7 +36,12 @@ fn cache_symlink_out_of_local_storage_still_protects_the_local_symlink_entry() {
     std::os::unix::fs::symlink(external.path(), &location).unwrap();
     let layout = RepositoryLayout::at(repo.path().to_path_buf());
     layout
-        .resolve_cache_root(Some(location.as_os_str()), None)
+        .resolve_cache_root(Some(
+            &gat_core::cache_location::CacheLocation::try_from_path(std::path::PathBuf::from(
+                location.as_os_str(),
+            ))
+            .expect("nonempty fixture cache path"),
+        ))
         .writer()
         .ingest(&b"content"[..])
         .unwrap();
@@ -55,23 +65,21 @@ fn resolution_is_pure_and_preserves_configured_location_semantics() {
     let shared = tempfile::tempdir().unwrap();
     let layout = RepositoryLayout::at(repo.path().to_path_buf());
 
-    let default = layout.resolve_cache_root(None, None);
+    let default = layout.resolve_cache_root(None);
     assert_eq!(default.display_path(), repo.path().join(".gat/objects"));
     assert!(!repo.path().join(".gat").exists());
 
-    let relative = CacheLocation::from_path(std::path::PathBuf::from("../shared-cache"));
+    let relative = CacheLocation::try_from_path(std::path::PathBuf::from("../shared-cache"))
+        .expect("nonempty cache location");
     assert_eq!(
-        layout
-            .resolve_cache_root(None, Some(&relative))
-            .display_path(),
+        layout.resolve_cache_root(Some(&relative)).display_path(),
         repo.path().join("../shared-cache")
     );
 
-    let absolute = CacheLocation::from_path(shared.path().to_path_buf());
+    let absolute =
+        CacheLocation::try_from_path(shared.path().to_path_buf()).expect("nonempty cache location");
     assert_eq!(
-        layout
-            .resolve_cache_root(None, Some(&absolute))
-            .display_path(),
+        layout.resolve_cache_root(Some(&absolute)).display_path(),
         shared.path()
     );
 }
@@ -80,7 +88,7 @@ fn resolution_is_pure_and_preserves_configured_location_semantics() {
 fn presence_is_proof_free_and_client_open_is_explicit() {
     let repo = tempfile::tempdir().unwrap();
     let layout = RepositoryLayout::at(repo.path().to_path_buf());
-    let root = layout.resolve_cache_root(None, None);
+    let root = layout.resolve_cache_root(None);
     let database = root.display_path().join("cache.sqlite3");
     let oid = Oid::from_hex(&"0".repeat(64)).unwrap();
 
@@ -122,7 +130,12 @@ fn cache_verification_uses_the_typed_client_and_reuses_warm_proofs() {
     let temp = tempfile::tempdir().unwrap();
     let objects_dir = temp.path().join("objects");
     let layout = RepositoryLayout::at(temp.path().to_path_buf());
-    let root = layout.resolve_cache_root(Some(objects_dir.as_os_str()), None);
+    let root = layout.resolve_cache_root(Some(
+        &gat_core::cache_location::CacheLocation::try_from_path(std::path::PathBuf::from(
+            objects_dir.as_os_str(),
+        ))
+        .expect("nonempty fixture cache path"),
+    ));
     let (ingested, _) = root.writer().ingest(&b"payload"[..]).unwrap();
     let oid = ingested.oid;
 

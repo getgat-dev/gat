@@ -7,7 +7,12 @@ use gat_engine::InitializationErrorKind;
 
 impl From<InitError> for Failure {
     fn from(err: InitError) -> Self {
-        let InitError::Engine(source) = &err;
+        if let InitError::Repository(source) = err {
+            return (*source).into();
+        }
+        let InitError::Engine(source) = &err else {
+            unreachable!()
+        };
         match source.kind() {
             InitializationErrorKind::OpenRepository => Self::infrastructure(
                 Diagnostic::new(
@@ -104,7 +109,9 @@ mod tests {
         let tmp = test_support::git_repo_with_initial_commit();
         let lock = tmp.path().join(".git/config.lock");
         std::fs::write(&lock, b"owned by another process").unwrap();
-        let repo = gat_engine::Repository::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let error = repo
             .initialization()
             .unwrap()
@@ -125,7 +132,9 @@ mod tests {
     #[test]
     fn missing_repository_keeps_its_repository_classification() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = gat_engine::Repository::at(tmp.path().join("missing"));
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().join("missing"));
         let Err(error) = repo.initialization() else {
             panic!("missing repository unexpectedly opened");
         };

@@ -65,7 +65,11 @@ mod tests {
         let template = RemoteUrlTemplate::from_string(
             "unsupported://host/path?token=SYNTHETIC-SECRET".to_string(),
         );
-        let source = gat_engine::validate_remote_url(&template).unwrap_err();
+        let source = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(std::path::PathBuf::from("unused"))
+            .validate_remote_url(&template)
+            .unwrap_err();
         let failure: Failure = gat_command::RemoteError::ValidateUrl(source).into();
 
         assert_eq!(failure.diagnostic().code(), ErrorCode::RemoteInvalid);
@@ -85,7 +89,11 @@ mod tests {
         let template = RemoteUrlTemplate::from_string(
             "file:///tmp?token=SYNTHETIC-SECRET&value=${TOKEN=SECRET}".to_string(),
         );
-        let source = gat_engine::validate_remote_url(&template).unwrap_err();
+        let source = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(std::path::PathBuf::from("unused"))
+            .validate_remote_url(&template)
+            .unwrap_err();
         let failure: Failure = gat_command::RemoteError::ValidateUrl(source).into();
 
         assert_eq!(failure.diagnostic().code(), ErrorCode::InvalidArgumentValue);

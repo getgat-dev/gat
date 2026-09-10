@@ -15,6 +15,12 @@ use std::path::{Path, PathBuf};
 /// fields (e.g. [`Self::ConfigLoad`], [`Self::InvalidEffectiveMounts`]).
 #[derive(Debug, thiserror::Error)]
 pub enum RepositoryError {
+    #[error("could not recover pending mount changes before editing configuration")]
+    PendingMountRecovery(#[source] Box<crate::MountWorkflowError>),
+    #[error("configuration changed since it was read")]
+    ConfigurationChanged { scope: ConfigScope },
+    #[error("could not lock settings")]
+    SettingLock { source: gat_io::AtomicError },
     /// [`std::env::current_dir`] failed (e.g. the directory was deleted
     /// out from under the process, or is otherwise unreadable).
     #[error("could not resolve the current working directory")]
@@ -44,6 +50,9 @@ pub enum RepositoryError {
     /// The effective (merged) mount configuration is invalid.
     #[error("invalid effective mount configuration")]
     InvalidEffectiveMounts(#[source] gat_core::config::ConfigError),
+
+    #[error("persisted configuration references an undefined remote")]
+    UndefinedResourceRemote { name: gat_core::name::RemoteName },
 
     /// The effective (merged) route configuration is invalid.
     #[error("invalid effective route configuration")]
@@ -190,6 +199,27 @@ impl From<gat_io::LayoutError> for RepositoryError {
 #[derive(Debug)]
 pub struct Repository {
     layout: gat_io::RepositoryLayout,
+    pub(crate) inputs: std::sync::Arc<gat_io::InvocationInputs>,
+}
+
+/// Publication capability tied to the repository whose configuration locks it owns.
+/// It can only be created after pending mount recovery has completed.
+pub(crate) struct ConfigurationEdit<'repo> {
+    repo: &'repo Repository,
+    _guard: RepoLock,
+}
+
+impl ConfigurationEdit<'_> {
+    pub(crate) fn commit(
+        &self,
+        layers: &ConfigLayers,
+        candidate: &Config,
+        scope: ConfigScope,
+    ) -> Result<(), RepositoryError> {
+        self.repo
+            .validate_config_candidate(layers, candidate, scope)?;
+        self.repo.save_config_scoped(candidate, scope)
+    }
 }
 
 /// One operation-scoped read of every `gat.yaml` layer.
@@ -199,7 +229,15 @@ pub struct Repository {
 /// layers together avoids re-reading the same files for each check.
 #[derive(Clone, Debug)]
 pub struct ConfigLayers {
-    layers: [Config; 3],
+    layers: [CapturedConfig; 3],
+    overrides: gat_core::settings::SettingsLayer,
+}
+
+// Keep decoded content attached to the evidence captured from the same file.
+#[derive(Clone, Debug)]
+struct CapturedConfig {
+    config: Config,
+    revision: Option<gat_io::ConfigRevision>,
 }
 
 impl ConfigLayers {
@@ -213,17 +251,31 @@ impl ConfigLayers {
 
     #[must_use]
     pub const fn scoped(&self, scope: ConfigScope) -> &Config {
-        &self.layers[Self::index(scope)]
+        &self.layers[Self::index(scope)].config
+    }
+
+    pub(crate) fn unvalidated_effective(&self) -> Config {
+        let mut config = self.resource_view();
+        self.overrides.apply_to(&mut config);
+        config
+    }
+
+    pub(crate) fn resource_view(&self) -> Config {
+        Config::merge_layers(self.layers.iter().map(|layer| layer.config.clone()))
     }
 
     pub fn effective(&self) -> std::result::Result<Config, RepositoryError> {
-        self.clone().into_effective()
+        validate_effective(self.unvalidated_effective())
     }
 
     // Ordinary reads no longer need provenance after merging; move their decoded
     // layers instead of cloning every definition and compiled pattern.
     fn into_effective(self) -> std::result::Result<Config, RepositoryError> {
-        validate_effective(Config::merge_layers(self.layers))
+        {
+            let mut config = Config::merge_layers(self.layers.map(|layer| layer.config));
+            self.overrides.apply_to(&mut config);
+            validate_effective(config)
+        }
     }
 
     pub fn candidate_effective(
@@ -232,11 +284,14 @@ impl ConfigLayers {
         scoped: &Config,
     ) -> std::result::Result<Config, RepositoryError> {
         let replaced = Self::index(scope);
-        let layers = self
-            .layers
-            .iter()
-            .enumerate()
-            .map(|(index, layer)| if index == replaced { scoped } else { layer }.clone());
+        let layers = self.layers.iter().enumerate().map(|(index, layer)| {
+            if index == replaced {
+                scoped
+            } else {
+                &layer.config
+            }
+            .clone()
+        });
         validate_effective(Config::merge_layers(layers))
     }
 
@@ -282,22 +337,6 @@ pub(crate) struct RepositoryMutationAccess {
 }
 
 impl Repository {
-    pub fn discover() -> std::result::Result<Self, RepositoryError> {
-        Ok(Self::from_layout(gat_io::RepositoryLayout::discover()?))
-    }
-
-    #[cfg(test)]
-    fn discover_from(dir: PathBuf) -> std::result::Result<Self, RepositoryError> {
-        Ok(Self::from_layout(gat_io::RepositoryLayout::discover_from(
-            dir,
-        )?))
-    }
-
-    #[must_use]
-    pub fn at(root: PathBuf) -> Self {
-        Self::from_layout(gat_io::RepositoryLayout::at(root))
-    }
-
     /// Observe the current canonical desired revision through the
     /// repository service without exposing lock layout or stat-cache
     /// acceleration details.
@@ -328,7 +367,7 @@ impl Repository {
         expected: &crate::repository_state::DesiredRevision,
     ) -> std::result::Result<RepositoryMutationAccess, crate::repository_state::DesiredRevisionError>
     {
-        let lock = RepoLock::acquire_repository(self.layout())?;
+        let lock = self.acquire_configuration_lock()?;
         if self.current_desired_revision()? != *expected {
             return Err(crate::repository_state::StaleDesiredRevisionError.into());
         }
@@ -345,8 +384,11 @@ impl Repository {
         self.layout.worktree_client()
     }
 
-    const fn from_layout(layout: gat_io::RepositoryLayout) -> Self {
-        Self { layout }
+    pub(crate) const fn from_layout(
+        layout: gat_io::RepositoryLayout,
+        inputs: std::sync::Arc<gat_io::InvocationInputs>,
+    ) -> Self {
+        Self { layout, inputs }
     }
 
     /// Open one unlocked, refreshed repository-state service for add
@@ -392,8 +434,7 @@ impl Repository {
 
     /// Presence-only cache inspection without exposing physical cache paths
     /// or opening the cache proof database.
-    #[must_use]
-    pub fn cache_presence(&self) -> crate::CachePresenceSession {
+    pub fn cache_presence(&self) -> Result<crate::CachePresenceSession, RepositoryError> {
         crate::CachePresenceSession::new(self)
     }
 
@@ -407,62 +448,40 @@ impl Repository {
         crate::desired_snapshot::visit_current_desired_entries(self, selection, visit)
     }
 
-    /// `~/.gat/gat.yaml` (global) location's directory, if `$HOME` (or
-    /// `%USERPROFILE%` on Windows) is set. `None` (rather than an error)
-    /// when it isn't, so a missing home directory only breaks an explicit
-    /// `--global` read/write, not every other command's effective-config
-    /// read (which simply treats the global layer as empty).
-    ///
-    /// Reads the environment once here and delegates to
-    /// the pure global-config resolver, so tests can
-    /// exercise the resolution logic against an explicit home directory
-    /// instead of mutating the process-wide `HOME`/`USERPROFILE`
-    /// environment variables (which is unsound to do from parallel unit
-    /// tests).
-    ///
-    /// Public so the command-owned init environment boundary can
-    /// explicit-input entry point (see
-    /// the root init orchestration can resolve the
-    /// real ambient global-config directory once at gat's own production
-    /// call site, while test fixtures supply their own deterministic fake
-    /// directory instead of calling this at all -- see `test-support`'s
-    /// `GatInitContext`.
-    pub(crate) fn global_config_dir() -> Option<PathBuf> {
-        Self::global_config_dir_from(gat_io::home_dir().as_deref())
+    pub(crate) fn acquire_configuration_lock(&self) -> Result<RepoLock, gat_io::AtomicError> {
+        RepoLock::acquire_configuration(self.layout(), self.global_config_dir().as_deref())
     }
 
-    /// Pure variant of [`Self::global_config_dir`]: resolves the global
-    /// config directory from an explicit, already-resolved home directory
-    /// (or `None` if there isn't one) instead of reading the environment
-    /// itself.
-    fn global_config_dir_from(home: Option<&Path>) -> Option<PathBuf> {
-        gat_io::RepositoryLayout::global_config_dir_from(home)
+    pub(crate) fn begin_configuration_edit(
+        &self,
+    ) -> Result<ConfigurationEdit<'_>, RepositoryError> {
+        let guard = self
+            .acquire_configuration_lock()
+            .map_err(|source| RepositoryError::SettingLock { source })?;
+        self.mounts()
+            .recover_pending_locked(&guard, &gat_core::progress::NoopProgress)
+            .map_err(|source| RepositoryError::PendingMountRecovery(Box::new(source)))?;
+        Ok(ConfigurationEdit {
+            repo: self,
+            _guard: guard,
+        })
     }
 
-    /// Resolve the operational object cache without exposing its host path.
-    pub(crate) fn resolved_cache_root(&self) -> gat_io::CacheRoot {
-        let cache_dir_override = gat_io::cache_dir_override();
-        if let Some(dir) = &cache_dir_override {
-            return self
-                .layout()
-                .resolve_cache_root(Some(dir.as_os_str()), None);
-        }
+    pub(crate) fn global_config_dir(&self) -> Option<PathBuf> {
+        gat_io::RepositoryLayout::global_config_dir_from(self.inputs.home())
+    }
 
-        match self.load_config() {
-            Ok(cfg) => self.resolved_cache_root_from(&cfg),
-            Err(_) => self.layout().resolve_cache_root(None, None),
-        }
+    pub(crate) fn resolved_cache_root(&self) -> Result<gat_io::CacheRoot, RepositoryError> {
+        Ok(self.resolved_cache_root_from(&self.load_config()?))
     }
 
     pub(crate) fn resolved_cache_root_from(&self, config: &Config) -> gat_io::CacheRoot {
         #[cfg(any(test, feature = "test-support"))]
         crate::test_support::record_cache_location_resolution();
-        let cache_dir_override = gat_io::cache_dir_override();
-        self.resolved_cache_root_from_override(cache_dir_override.as_deref(), config)
+        self.layout()
+            .resolve_cache_root(config.cache.location.as_ref())
     }
 
-    /// Resolve the effective cache location from an already-loaded config
-    /// without exposing the repository's physical layout.
     #[must_use]
     pub fn resolve_cache_location(
         &self,
@@ -471,9 +490,12 @@ impl Repository {
         crate::initialization::ResolvedCacheLocation,
         CacheLocationOrigin,
     ) {
-        let override_dir = gat_io::cache_dir_override();
-        let root = self.resolved_cache_root_from_override(override_dir.as_deref(), config);
-        let origin = if override_dir.is_some() {
+        let root = self.resolved_cache_root_from(config);
+        let origin = if self
+            .inputs
+            .settings()
+            .contains(gat_core::settings::SettingKey::CacheLocation)
+        {
             CacheLocationOrigin::Environment
         } else {
             CacheLocationOrigin::Configuration
@@ -484,28 +506,11 @@ impl Repository {
         )
     }
 
-    pub(crate) fn resolved_cache_root_from_override(
+    pub fn validate_remote_url(
         &self,
-        cache_dir_override: Option<&std::ffi::OsStr>,
-        config: &Config,
-    ) -> gat_io::CacheRoot {
-        self.layout()
-            .resolve_cache_root(cache_dir_override, config.cache.location.as_ref())
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn resolved_cache_root_with(
-        &self,
-        cache_dir_override: Option<&std::ffi::OsStr>,
-        global_config_dir: Option<PathBuf>,
-    ) -> gat_io::CacheRoot {
-        if let Some(dir) = cache_dir_override {
-            return self.layout().resolve_cache_root(Some(dir), None);
-        }
-        match self.load_config_with_global_dir(global_config_dir) {
-            Ok(cfg) => self.resolved_cache_root_from_override(None, &cfg),
-            Err(_) => self.layout().resolve_cache_root(None, None),
-        }
+        template: &gat_core::endpoint::RemoteUrlTemplate,
+    ) -> Result<(), crate::RemoteUrlValidationError> {
+        crate::remote_catalog::validate_remote_url(template, &self.inputs.templates())
     }
 
     /// The effective `gat.yaml`: the global (`~/.gat/gat.yaml`), project
@@ -532,49 +537,45 @@ impl Repository {
     pub fn load_config_layers(&self) -> std::result::Result<ConfigLayers, RepositoryError> {
         #[cfg(any(test, feature = "test-support"))]
         crate::test_support::record_config_load();
-        self.load_config_layers_with_global_dir(Self::global_config_dir())
-    }
-
-    /// Pure variant of [`Self::load_config`] that merges the global layer
-    /// from an explicit, already-resolved global config directory (or
-    /// `None`, treating the global layer as empty) instead of reading the
-    /// environment itself. `pub(crate)` so explicit cache resolution and
-    /// command-owned init's explicit-input entry point can reuse it.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn load_config_with_global_dir(
-        &self,
-        global_config_dir: Option<PathBuf>,
-    ) -> std::result::Result<Config, RepositoryError> {
-        self.load_config_layers_with_global_dir(global_config_dir)?
-            .into_effective()
+        self.load_config_layers_with_global_dir(self.global_config_dir())
     }
 
     fn load_config_layers_with_global_dir(
         &self,
         global_config_dir: Option<PathBuf>,
     ) -> std::result::Result<ConfigLayers, RepositoryError> {
-        let global = match global_config_dir {
-            Some(dir) => self.load_effective_scope(ConfigScope::Global, Some(&dir))?,
-            None => Config::default(),
-        };
-        let project = self.load_effective_scope(ConfigScope::Project, None)?;
-        let local = self.load_effective_scope(ConfigScope::Local, None)?;
-        Ok(ConfigLayers {
-            layers: [global, project, local],
-        })
-    }
-
-    fn load_effective_scope(
-        &self,
-        scope: ConfigScope,
-        global_config_dir: Option<&Path>,
-    ) -> std::result::Result<Config, RepositoryError> {
-        ConfigStore::load_scope(self.layout(), scope, global_config_dir).map_err(
-            |error| match error {
+        let capture = |scope, global| {
+            ConfigStore::capture_scope(self.layout(), scope, global).map_err(|error| match error {
                 ScopedConfigError::Layout(source) => source.into(),
                 ScopedConfigError::Read(source) => RepositoryError::ConfigLoad { scope, source },
-            },
-        )
+            })
+        };
+        let (global, global_revision) = match global_config_dir.as_deref() {
+            Some(dir) => {
+                let (config, revision) = capture(ConfigScope::Global, Some(dir))?;
+                (config, Some(revision))
+            }
+            None => (Config::default(), None),
+        };
+        let (project, project_revision) = capture(ConfigScope::Project, None)?;
+        let (local, local_revision) = capture(ConfigScope::Local, None)?;
+        Ok(ConfigLayers {
+            layers: [
+                CapturedConfig {
+                    config: global,
+                    revision: global_revision,
+                },
+                CapturedConfig {
+                    config: project,
+                    revision: Some(project_revision),
+                },
+                CapturedConfig {
+                    config: local,
+                    revision: Some(local_revision),
+                },
+            ],
+            overrides: self.inputs.settings().clone(),
+        })
     }
 
     /// Reads only the `gat.yaml` at `scope`, without merging in the other
@@ -589,7 +590,7 @@ impl Repository {
     ) -> std::result::Result<Config, RepositoryError> {
         #[cfg(any(test, feature = "test-support"))]
         crate::test_support::record_scoped_config_load();
-        self.load_config_scoped_with_global_dir(scope, Self::global_config_dir().as_deref())
+        self.load_config_scoped_with_global_dir(scope, self.global_config_dir().as_deref())
     }
 
     fn load_config_scoped_with_global_dir(
@@ -636,7 +637,52 @@ impl Repository {
         )
     }
 
-    pub fn save_config(&self, cfg: &Config) -> std::result::Result<(), RepositoryError> {
+    pub(crate) fn validate_config_candidate(
+        &self,
+        layers: &ConfigLayers,
+        candidate: &Config,
+        scope: ConfigScope,
+    ) -> Result<(), RepositoryError> {
+        let effective = layers.candidate_effective(scope, candidate)?;
+        for name in effective
+            .remotes
+            .default
+            .iter()
+            .chain(effective.routes.by_name.values().map(|route| &route.remote))
+        {
+            if !effective.remotes.by_name.contains_key(name) {
+                return Err(RepositoryError::UndefinedResourceRemote { name: name.clone() });
+            }
+        }
+        for check_scope in [
+            ConfigScope::Global,
+            ConfigScope::Project,
+            ConfigScope::Local,
+        ] {
+            if let Some(revision) = &layers.layers[ConfigLayers::index(check_scope)].revision {
+                let current = revision
+                    .is_current(
+                        self.layout(),
+                        check_scope,
+                        self.global_config_dir().as_deref(),
+                    )
+                    .map_err(|error| match error {
+                        ScopedConfigError::Layout(source) => source.into(),
+                        ScopedConfigError::Read(source) => RepositoryError::ConfigLoad {
+                            scope: check_scope,
+                            source,
+                        },
+                    })?;
+                if !current {
+                    return Err(RepositoryError::ConfigurationChanged { scope: check_scope });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn save_config(&self, cfg: &Config) -> std::result::Result<(), RepositoryError> {
         self.save_config_scoped(cfg, ConfigScope::Project)
     }
 
@@ -644,7 +690,7 @@ impl Repository {
     /// (`~/.gat/` or `<repo_root>/.gat/`) first if needed -- unlike the
     /// project location, the global and local directories aren't
     /// guaranteed to exist yet.
-    pub fn save_config_scoped(
+    pub(crate) fn save_config_scoped(
         &self,
         cfg: &Config,
         scope: ConfigScope,
@@ -652,7 +698,7 @@ impl Repository {
         ConfigStore::save_scope(
             self.layout(),
             scope,
-            Self::global_config_dir().as_deref(),
+            self.global_config_dir().as_deref(),
             cfg,
         )
         .map_err(|error| match error {
@@ -752,6 +798,123 @@ impl Repository {
     }
 }
 
+impl ConfigLayers {
+    #[must_use]
+    pub fn setting(
+        &self,
+        key: gat_core::settings::SettingKey,
+    ) -> (
+        Option<gat_core::settings::SettingAssignment>,
+        gat_core::settings::SettingSource,
+    ) {
+        use gat_core::settings::SettingSource;
+        let source = self.setting_source(key, None);
+        let value = match source {
+            SettingSource::Environment(_) => self.overrides.get(key),
+            SettingSource::Scope(scope) => key.read(self.scoped(scope)),
+            SettingSource::Default => key.default_value(),
+        };
+        (value, source)
+    }
+
+    fn setting_source(
+        &self,
+        key: gat_core::settings::SettingKey,
+        candidate: Option<(ConfigScope, &Config)>,
+    ) -> gat_core::settings::SettingSource {
+        use gat_core::settings::SettingSource;
+        if self.overrides.contains(key) {
+            return SettingSource::Environment(key);
+        }
+        for scope in [
+            ConfigScope::Local,
+            ConfigScope::Project,
+            ConfigScope::Global,
+        ] {
+            let config = match candidate {
+                Some((replaced, config)) if scope == replaced => config,
+                _ => self.scoped(scope),
+            };
+            if key.is_set(config) {
+                return SettingSource::Scope(scope);
+            }
+        }
+        SettingSource::Default
+    }
+}
+
+impl Repository {
+    #[allow(
+        clippy::missing_panics_doc,
+        reason = "Catalog defaults are exhaustive and resolved cache paths are nonempty"
+    )]
+    pub fn read_setting(
+        &self,
+        key: gat_core::settings::SettingKey,
+    ) -> Result<
+        (
+            gat_core::settings::SettingAssignment,
+            gat_core::settings::SettingSource,
+        ),
+        RepositoryError,
+    > {
+        let layers = self.load_config_layers()?;
+        let (value, source) = layers.setting(key);
+        let value = if key == gat_core::settings::SettingKey::CacheLocation {
+            let mut config = Config::default();
+            if let Some(value) = value {
+                value.apply(&mut config);
+            }
+            gat_core::settings::SettingAssignment::CacheLocation(
+                gat_core::cache_location::CacheLocation::try_from_path(
+                    self.resolved_cache_root_from(&config)
+                        .display_path()
+                        .to_path_buf(),
+                )
+                .expect("nonempty cache location"),
+            )
+        } else {
+            value.expect("every scalar/list setting has a default")
+        };
+        Ok((value, source))
+    }
+
+    pub fn change_setting(
+        &self,
+        scope: ConfigScope,
+        change: gat_core::settings::SettingChange,
+    ) -> Result<gat_core::settings::SettingSource, RepositoryError> {
+        let edit = self.begin_configuration_edit()?;
+        let layers = self.load_config_layers()?;
+        let key = match &change {
+            gat_core::settings::SettingChange::Set(value) => value.key(),
+            gat_core::settings::SettingChange::Unset(key) => *key,
+        };
+        let mut candidate = layers.scoped(scope).clone();
+        match change {
+            gat_core::settings::SettingChange::Set(assignment) => assignment.apply(&mut candidate),
+            gat_core::settings::SettingChange::Unset(key) => key.unset(&mut candidate),
+        }
+        edit.commit(&layers, &candidate, scope)?;
+        Ok(layers.setting_source(key, Some((scope, &candidate))))
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Repository {
+    /// Fixture-only raw document publication; production uses semantic workflows.
+    pub fn write_config_fixture(&self, config: &Config) -> Result<(), RepositoryError> {
+        self.save_config(config)
+    }
+    pub fn write_scoped_config_fixture(
+        &self,
+        config: &Config,
+        scope: ConfigScope,
+    ) -> Result<(), RepositoryError> {
+        self.save_config_scoped(config, scope)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Repository as Repo;
@@ -772,11 +935,16 @@ mod tests {
             config
         };
         let layers = ConfigLayers {
+            overrides: Default::default(),
             layers: [
                 definition("global"),
                 definition("project"),
                 definition("local"),
-            ],
+            ]
+            .map(|config| CapturedConfig {
+                config,
+                revision: None,
+            }),
         };
         let baseline = layers.effective().unwrap();
         let candidate = definition("replacement");
@@ -849,9 +1017,12 @@ mod tests {
         let nested = root.join("a").join("b").join("c");
         std::fs::create_dir_all(&nested).unwrap();
 
-        let repo = Repo::discover_from(nested).unwrap();
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .discover_from(nested)
+            .unwrap();
         assert_eq!(
-            repo.resolved_cache_root_from_override(None, &Config::default())
+            repo.resolved_cache_root_from(&Config::default())
                 .display_path(),
             root.join(".gat/objects")
         );
@@ -878,7 +1049,9 @@ mod tests {
     #[test]
     fn global_scoped_load_reports_config_path_unavailable_without_a_home_directory() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let err = repo
             .load_config_scoped_with_global_dir(ConfigScope::Global, None)
             .unwrap_err();
@@ -893,7 +1066,9 @@ mod tests {
     fn config_load_hides_the_raw_parser_message_but_keeps_it_as_a_technical_source() {
         const SENTINEL: &str = "gat-repository-test-sentinel-malformed-yaml";
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         // `git.ignore_patterns` is a sequence field; giving it a scalar
         // string makes `serde`'s own "invalid type" message echo that
         // string back verbatim -- exactly the kind of raw third-party
@@ -922,22 +1097,20 @@ mod tests {
     #[test]
     fn objects_dir_override_wins_without_reading_process_environment() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
-        let mut config = Config::default();
-        config.cache.location = Some(gat_core::cache_location::CacheLocation::from_path(
-            "configured-cache".into(),
-        ));
         let override_path = tmp.path().join("override-cache");
-
-        assert_eq!(
-            repo.resolved_cache_root_from_override(Some(override_path.as_os_str()), &config)
-                .display_path(),
-            override_path.as_path()
+        let repo =
+            crate::Invocation::from_pairs([("GAT_CACHE_LOCATION", override_path.as_os_str())])
+                .unwrap()
+                .repository_at(tmp.path().to_path_buf());
+        let mut config = Config::default();
+        config.cache.location = Some(
+            gat_core::cache_location::CacheLocation::try_from_path("configured-cache".into())
+                .expect("nonempty cache location"),
         );
+        repo.save_config(&config).unwrap();
         assert_eq!(
-            repo.resolved_cache_root_from_override(None, &config)
-                .display_path(),
-            tmp.path().join("configured-cache").as_path()
+            repo.resolved_cache_root().unwrap().display_path(),
+            override_path
         );
     }
 
@@ -947,7 +1120,9 @@ mod tests {
     #[test]
     fn load_config_fails_closed_on_hand_authored_overlapping_mount_targets() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(
             tmp.path().join("gat.yaml"),
             "version: 1\n\
@@ -971,7 +1146,9 @@ mod tests {
     #[test]
     fn reshape_lock_is_a_no_op_when_nothing_is_on_disk_yet() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let loads_before = gat_io::lock_test_support::reshape_full_loads();
         let (attempted_tx, attempted_rx) = std::sync::mpsc::channel();
         let result = gat_io::atomic_test_support::with_acquire_attempt_hook(
@@ -991,7 +1168,9 @@ mod tests {
     #[test]
     fn save_lock_upgrades_the_layout_when_shard_levels_config_changed() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
 
         let mut lock = Lock::default();
         lock.upsert(gp("a.bin"), oid('a'));
@@ -1025,7 +1204,9 @@ mod tests {
         use gat_io::lock_identity_test_support as identity_test_support;
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut lock = Lock::default();
         lock.upsert(gp("a.bin"), oid('a'));
 
@@ -1066,7 +1247,9 @@ mod tests {
     #[test]
     fn reshape_lock_is_a_no_op_when_on_disk_shape_already_matches_config() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
 
         let mut lock = Lock::default();
         lock.upsert(gp("a.bin"), oid('a'));
@@ -1095,7 +1278,9 @@ mod tests {
     #[test]
     fn reshape_lock_converts_flat_to_sharded_and_reports_the_new_depth() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
 
         let mut lock = Lock::default();
         lock.upsert(gp("a.bin"), oid('a'));
@@ -1129,7 +1314,7 @@ mod tests {
     /// SAFETY: mutating `$HOME` would race with any other test that reads
     /// or writes it concurrently, which is unsound under the default
     /// parallel test runner. These tests instead call the pure
-    /// [`Repo::load_config_with_global_dir`] entry point with a fake home
+    /// [`crate::Invocation::from_pairs`] entry point with a fake home
     /// directory, so no process-global environment mutation -- and no
     /// serializing mutex -- is needed at all. Real `HOME`/`USERPROFILE`
     /// wiring is covered once at the spawned-binary level instead (see
@@ -1137,15 +1322,19 @@ mod tests {
     #[test]
     fn load_config_merges_global_project_and_local_with_local_winning() {
         let fake_home = tempfile::tempdir().unwrap();
-        let global_dir = Repo::global_config_dir_from(Some(fake_home.path())).unwrap();
+        let global_dir =
+            gat_io::RepositoryLayout::global_config_dir_from(Some(fake_home.path())).unwrap();
 
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
 
         let mut global_cfg = gat_core::config::Config::default();
-        global_cfg.cache.location = Some(gat_core::cache_location::CacheLocation::from_path(
-            "global-cache".into(),
-        ));
+        global_cfg.cache.location = Some(
+            gat_core::cache_location::CacheLocation::try_from_path("global-cache".into())
+                .expect("nonempty cache location"),
+        );
         global_cfg
             .selections
             .by_name
@@ -1163,9 +1352,10 @@ mod tests {
         .unwrap();
 
         let mut project_cfg = gat_core::config::Config::default();
-        project_cfg.cache.location = Some(gat_core::cache_location::CacheLocation::from_path(
-            "project-cache".into(),
-        ));
+        project_cfg.cache.location = Some(
+            gat_core::cache_location::CacheLocation::try_from_path("project-cache".into())
+                .expect("nonempty cache location"),
+        );
         repo.save_config_scoped(&project_cfg, ConfigScope::Project)
             .unwrap();
 
@@ -1181,13 +1371,20 @@ mod tests {
         repo.save_config_scoped(&local_cfg, ConfigScope::Local)
             .unwrap();
 
-        let merged = repo.load_config_with_global_dir(Some(global_dir)).unwrap();
+        let repo = crate::Invocation::from_pairs([(
+            if cfg!(windows) { "USERPROFILE" } else { "HOME" },
+            fake_home.path().as_os_str(),
+        )])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
+        let merged = repo.load_config().unwrap();
         // project overrides global's `cache.location`...
         assert_eq!(
             merged.cache.location,
-            Some(gat_core::cache_location::CacheLocation::from_path(
-                "project-cache".into()
-            ))
+            Some(
+                gat_core::cache_location::CacheLocation::try_from_path("project-cache".into())
+                    .expect("nonempty cache location")
+            )
         );
         // ...and local replaces the global selection; the absent project
         // selection does not affect inheritance.
@@ -1202,19 +1399,23 @@ mod tests {
     #[test]
     fn save_config_scoped_local_and_project_do_not_clobber_each_other() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
 
         let mut project_cfg = gat_core::config::Config::default();
-        project_cfg.cache.location = Some(gat_core::cache_location::CacheLocation::from_path(
-            "project-cache".into(),
-        ));
+        project_cfg.cache.location = Some(
+            gat_core::cache_location::CacheLocation::try_from_path("project-cache".into())
+                .expect("nonempty cache location"),
+        );
         repo.save_config_scoped(&project_cfg, ConfigScope::Project)
             .unwrap();
 
         let mut local_cfg = gat_core::config::Config::default();
-        local_cfg.cache.location = Some(gat_core::cache_location::CacheLocation::from_path(
-            "local-cache".into(),
-        ));
+        local_cfg.cache.location = Some(
+            gat_core::cache_location::CacheLocation::try_from_path("local-cache".into())
+                .expect("nonempty cache location"),
+        );
         repo.save_config_scoped(&local_cfg, ConfigScope::Local)
             .unwrap();
 
@@ -1223,18 +1424,20 @@ mod tests {
                 .unwrap()
                 .cache
                 .location,
-            Some(gat_core::cache_location::CacheLocation::from_path(
-                "project-cache".into()
-            ))
+            Some(
+                gat_core::cache_location::CacheLocation::try_from_path("project-cache".into())
+                    .expect("nonempty cache location")
+            )
         );
         assert_eq!(
             repo.load_config_scoped(ConfigScope::Local)
                 .unwrap()
                 .cache
                 .location,
-            Some(gat_core::cache_location::CacheLocation::from_path(
-                "local-cache".into()
-            ))
+            Some(
+                gat_core::cache_location::CacheLocation::try_from_path("local-cache".into())
+                    .expect("nonempty cache location")
+            )
         );
         // The local write must land under `.gat/`, not the project root.
         assert!(tmp.path().join(".gat").join("gat.yaml").is_file());
@@ -1251,7 +1454,9 @@ mod tests {
     #[test]
     fn save_config_scoped_reports_a_typed_error_when_the_parent_directory_cannot_be_created() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         // Occupy `.gat/` with a plain file so `create_dir_all` fails.
         std::fs::remove_dir_all(tmp.path().join(".gat")).ok();
         std::fs::write(tmp.path().join(".gat"), b"not a directory").unwrap();
@@ -1278,7 +1483,9 @@ mod tests {
     #[test]
     fn save_config_scoped_reports_a_typed_error_when_the_write_itself_fails() {
         let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::remove_file(tmp.path().join("gat.yaml")).ok();
         std::fs::create_dir_all(tmp.path().join("gat.yaml")).unwrap();
 
@@ -1296,5 +1503,66 @@ mod tests {
             ),
             "expected ConfigWrite, got {err:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod revision_tests {
+    use super::*;
+
+    #[test]
+    fn stale_or_foreign_scoped_candidates_cannot_overwrite_a_document() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let invocation = crate::Invocation::from_pairs([] as [(&str, &str); 0]).unwrap();
+        let repo = invocation.repository_at(first.path().to_path_buf());
+        let foreign = invocation.repository_at(second.path().to_path_buf());
+        let layers = repo.load_config_layers().unwrap();
+        let mut candidate = Config::default();
+        candidate.sync.auto_fetch = Some(true);
+        let foreign_edit = foreign.begin_configuration_edit().unwrap();
+        assert!(matches!(
+            foreign_edit.commit(&layers, &candidate, ConfigScope::Project),
+            Err(RepositoryError::ConfigurationChanged { .. })
+        ));
+        repo.save_config(&candidate).unwrap();
+        let edit = repo.begin_configuration_edit().unwrap();
+        assert!(matches!(
+            edit.commit(&layers, &Config::default(), ConfigScope::Project),
+            Err(RepositoryError::ConfigurationChanged {
+                scope: ConfigScope::Project
+            })
+        ));
+        assert_eq!(
+            repo.load_config_scoped(ConfigScope::Project)
+                .unwrap()
+                .sync
+                .auto_fetch,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn changed_global_dependency_invalidates_a_project_candidate() {
+        let home = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let repo = crate::Invocation::from_pairs([(
+            if cfg!(windows) { "USERPROFILE" } else { "HOME" },
+            home.path().as_os_str(),
+        )])
+        .unwrap()
+        .repository_at(directory.path().to_path_buf());
+        let edit = repo.begin_configuration_edit().unwrap();
+        let layers = repo.load_config_layers().unwrap();
+        let mut global = Config::default();
+        global.sync.auto_fetch = Some(true);
+        repo.save_config_scoped(&global, ConfigScope::Global)
+            .unwrap();
+        assert!(matches!(
+            edit.commit(&layers, &Config::default(), ConfigScope::Project),
+            Err(RepositoryError::ConfigurationChanged {
+                scope: ConfigScope::Global
+            })
+        ));
     }
 }

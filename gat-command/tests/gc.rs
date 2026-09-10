@@ -19,7 +19,9 @@ fn repository() -> (tempfile::TempDir, Repository) {
         temp.path(),
         &["commit", "-q", "--allow-empty", "-m", "initial"],
     );
-    let repo = Repository::at(temp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(temp.path().to_path_buf());
     (temp, repo)
 }
 

@@ -453,10 +453,15 @@ mod tests {
         let local = tempfile::tempdir().unwrap();
         let secret_path = remote.path().join("FILE-READ-SECRET");
         std::fs::create_dir(&secret_path).unwrap();
-        let client =
-            gat_io::RemoteClient::open(&gat_io::remote_file_url_for_test(&secret_path)).unwrap();
-        let cache =
-            gat_io::RepositoryLayout::at(local.path().to_owned()).resolve_cache_root(None, None);
+        let client = gat_io::RemoteClient::open(
+            &gat_io::remote_file_url_for_test(&secret_path),
+            &gat_io::InvocationInputs::from_pairs([] as [(&str, &str); 0])
+                .unwrap()
+                .templates(),
+            gat_core::settings::NetworkOptions::default(),
+        )
+        .unwrap();
+        let cache = gat_io::RepositoryLayout::at(local.path().to_owned()).resolve_cache_root(None);
         let error = client
             .prepare_file_read(gat_core::oid::Oid::from_bytes([0; 32]))
             .unwrap()

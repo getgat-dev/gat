@@ -37,7 +37,9 @@ fn git_repo() -> tempfile::TempDir {
 
 fn source_repo(entries: &[(&str, char)]) -> tempfile::TempDir {
     let dir = git_repo();
-    let repo = Repository::at(dir.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(dir.path().to_path_buf());
     repo.save_lock(&Lock {
         entries: entries
             .iter()
@@ -78,7 +80,9 @@ fn desired_paths(repo: &Repository) -> Vec<GatPath> {
 fn add_show_list_update_and_remove_share_the_authoritative_path() {
     let source = source_repo(&[("a.bin", 'a'), ("nested/b.bin", 'b')]);
     let destination = git_repo();
-    let repo = Repository::at(destination.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(destination.path().to_path_buf());
 
     let added = mount(
         &repo,
@@ -172,7 +176,9 @@ fn clearing_mount_filters_expands_the_snapshot_and_preserves_the_other_list() {
     use gat_core::globs::GatGlobPattern;
     let source = source_repo(&[("a.bin", 'a'), ("other.txt", 'b'), ("nested/b.bin", 'c')]);
     let destination = git_repo();
-    let repo = Repository::at(destination.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(destination.path().to_path_buf());
     let mut request = add_request(source.path(), Some("vendor"), ConfigScope::Project);
     let MountRequest::Add {
         include, exclude, ..
@@ -238,7 +244,9 @@ fn add_infers_the_repository_name_and_explicit_target_wins() {
     run_git(&source_path, &["init", "-q", "-b", "main"]);
     std::fs::write(source_path.join("README"), "fixture").unwrap();
     commit_all(&source_path, "initial");
-    let source = Repository::at(source_path.clone());
+    let source = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(source_path.clone());
     source
         .save_lock(&Lock {
             entries: vec![Entry {
@@ -250,7 +258,9 @@ fn add_infers_the_repository_name_and_explicit_target_wins() {
     commit_all(&source_path, "source lock");
 
     let inferred_dir = git_repo();
-    let inferred_repo = Repository::at(inferred_dir.path().to_path_buf());
+    let inferred_repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(inferred_dir.path().to_path_buf());
     let outcome = mount(
         &inferred_repo,
         add_request(&source_path, None, ConfigScope::Project),
@@ -263,7 +273,9 @@ fn add_infers_the_repository_name_and_explicit_target_wins() {
     ));
 
     let explicit_dir = git_repo();
-    let explicit_repo = Repository::at(explicit_dir.path().to_path_buf());
+    let explicit_repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(explicit_dir.path().to_path_buf());
     let outcome = mount(
         &explicit_repo,
         add_request(&source_path, Some("chosen"), ConfigScope::Project),
@@ -280,7 +292,9 @@ fn add_infers_the_repository_name_and_explicit_target_wins() {
 fn add_rejects_root_owned_rows_without_mutating_config() {
     let source = source_repo(&[("asset.bin", 'd')]);
     let destination = git_repo();
-    let repo = Repository::at(destination.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(destination.path().to_path_buf());
     repo.save_lock(&Lock {
         entries: vec![Entry {
             path: gp("vendor/local.bin"),
@@ -313,21 +327,24 @@ fn add_rejects_root_owned_rows_without_mutating_config() {
 fn scope_precedence_errors_remain_typed_through_the_public_command() {
     let source = source_repo(&[("asset.bin", 'f')]);
     let destination = git_repo();
-    let repo = Repository::at(destination.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(destination.path().to_path_buf());
     let name = MountName::from_string("vendor".to_string());
     let mut project = Config::default();
     project
         .mounts
         .by_name
         .insert(name.clone(), mount_config("project-vendor"));
-    repo.save_config_scoped(&project, ConfigScope::Project)
+    repo.write_scoped_config_fixture(&project, ConfigScope::Project)
         .unwrap();
     let mut local = Config::default();
     local
         .mounts
         .by_name
         .insert(name.clone(), mount_config("local-vendor"));
-    repo.save_config_scoped(&local, ConfigScope::Local).unwrap();
+    repo.write_scoped_config_fixture(&local, ConfigScope::Local)
+        .unwrap();
 
     let error = mount(
         &repo,
@@ -386,13 +403,16 @@ fn scope_precedence_errors_remain_typed_through_the_public_command() {
 #[test]
 fn invalid_additions_fail_before_preparing_the_source() {
     let destination = git_repo();
-    let repo = Repository::at(destination.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(destination.path().to_path_buf());
     let mut local = Config::default();
     local.mounts.by_name.insert(
         MountName::from_string("vendor".to_string()),
         mount_config("local-vendor"),
     );
-    repo.save_config_scoped(&local, ConfigScope::Local).unwrap();
+    repo.write_scoped_config_fixture(&local, ConfigScope::Local)
+        .unwrap();
     let missing_source = destination.path().join("missing-source");
     for scope in [ConfigScope::Local, ConfigScope::Project] {
         let error = mount(
@@ -412,7 +432,9 @@ fn invalid_additions_fail_before_preparing_the_source() {
 #[test]
 fn invalid_updates_fail_before_preparing_the_source() {
     let destination = git_repo();
-    let repo = Repository::at(destination.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(destination.path().to_path_buf());
     let name = MountName::from_string("vendor".to_string());
     let mut project = Config::default();
     let mut local = Config::default();
@@ -423,13 +445,14 @@ fn invalid_updates_fail_before_preparing_the_source() {
                 .mounts
                 .by_name
                 .insert(name.clone(), mount_config("local-vendor"));
-            repo.save_config_scoped(&local, ConfigScope::Local).unwrap();
+            repo.write_scoped_config_fixture(&local, ConfigScope::Local)
+                .unwrap();
         } else if case == 2 {
             project
                 .mounts
                 .by_name
                 .insert(name.clone(), mount_config("project-vendor"));
-            repo.save_config_scoped(&project, ConfigScope::Project)
+            repo.write_scoped_config_fixture(&project, ConfigScope::Project)
                 .unwrap();
         }
         let error = mount(
@@ -479,7 +502,9 @@ fn invalid_updates_fail_before_preparing_the_source() {
 #[test]
 fn malformed_effective_mounts_fail_without_touching_desired_rows() {
     let destination = git_repo();
-    let repo = Repository::at(destination.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(destination.path().to_path_buf());
     let mut project = Config::default();
     project.mounts.by_name.insert(
         MountName::from_string("parent".to_string()),
@@ -489,7 +514,7 @@ fn malformed_effective_mounts_fail_without_touching_desired_rows() {
         MountName::from_string("child".to_string()),
         mount_config("vendor/nested"),
     );
-    repo.save_config_scoped(&project, ConfigScope::Project)
+    repo.write_scoped_config_fixture(&project, ConfigScope::Project)
         .unwrap();
 
     let error = mount(&repo, MountRequest::List, &NoopProgress).unwrap_err();
@@ -505,7 +530,9 @@ fn malformed_effective_mounts_fail_without_touching_desired_rows() {
 fn detach_only_removes_configuration_but_preserves_owned_rows() {
     let source = source_repo(&[("asset.bin", '1')]);
     let destination = git_repo();
-    let repo = Repository::at(destination.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(destination.path().to_path_buf());
     mount(
         &repo,
         add_request(source.path(), Some("vendor"), ConfigScope::Project),
@@ -544,7 +571,9 @@ fn detach_only_removes_configuration_but_preserves_owned_rows() {
 #[test]
 fn automatic_setup_imports_reuses_and_can_be_skipped() {
     let source = source_repo(&[("asset.bin", '2')]);
-    let source_repo = Repository::at(source.path().to_path_buf());
+    let source_repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(source.path().to_path_buf());
     let remote = RemoteName::from_string("archive".to_string());
     let mut source_config = Config::default();
     source_config.remotes.default = Some(remote.clone());
@@ -557,7 +586,7 @@ fn automatic_setup_imports_reuses_and_can_be_skipped() {
         .into(),
     );
     source_repo
-        .save_config_scoped(&source_config, ConfigScope::Project)
+        .write_scoped_config_fixture(&source_config, ConfigScope::Project)
         .unwrap();
     commit_all(source.path(), "source config");
 
@@ -568,7 +597,9 @@ fn automatic_setup_imports_reuses_and_can_be_skipped() {
         (None, true, "archive"),
     ] {
         let destination = git_repo();
-        let repo = Repository::at(destination.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(destination.path().to_path_buf());
         if let Some(name) = existing_name {
             let mut config = Config::default();
             config.remotes.by_name.insert(
@@ -584,7 +615,7 @@ fn automatic_setup_imports_reuses_and_can_be_skipped() {
                 },
             );
             config.remotes.default = Some(name.into());
-            repo.save_config(&config).unwrap();
+            repo.write_config_fixture(&config).unwrap();
         }
         let expected_default = existing_name.map(RemoteName::from);
         let expected_count = if existing_name == Some("archive") {

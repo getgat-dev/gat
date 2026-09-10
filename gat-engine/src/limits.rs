@@ -1,13 +1,11 @@
-//! Typed, independently-tunable execution-resource limits.
+//! Typed execution-resource limits. Public network settings derive every remote
+//! concurrency bound; internal memory windows remain subsystem-owned.
 //!
-//! Every bound an operation-scoped command enforces on its own transient
-//! work -- how many transfer obligations/repair oids/sync actions it keeps
-//! in memory at once, and how much remote-I/O concurrency it allows
-//! globally and per remote -- is a distinct resource. Retuning one must
-//! never implicitly retune another, and none of these are the same knob as the
-//! storage layer's own `gat-io` verification window /
-//! proof transaction chunk, which protect SQL/proof-DB
-//! batching, not operation execution memory, and stay owned by that layer.
+//! Memory windows bound transfer obligations, repair objects and reconciliation
+//! actions independently of network concurrency. Retuning these windows must
+//! not change request admission, and they remain separate from the storage
+//! layer's verification windows and proof transaction chunks. Global and
+//! per-remote admission limits derive together from the public request budget.
 //!
 //! Every field is a [`NonZeroUsize`]: each one
 //! is used somewhere as a `.chunks(n)`/`Semaphore::new(n)` divisor or
@@ -64,6 +62,7 @@ pub struct RemoteConcurrency {
 }
 
 impl RemoteConcurrency {
+    #[cfg(any(test, feature = "test-support"))]
     fn new(global: usize, per_remote: usize, name: &str) -> Self {
         Self {
             global: NonZeroUsize::new(global)
@@ -109,8 +108,8 @@ pub struct RemoteGcLimits {
 impl Default for GcLimits {
     fn default() -> Self {
         Self {
-            repository_concurrency: NonZeroUsize::new(4)
-                .expect("remote repository concurrency must be positive"),
+            // Peer inspection parallelism is internal execution policy.
+            repository_concurrency: NonZeroUsize::new(4).unwrap(),
             remote: RemoteGcLimits::default(),
         }
     }
@@ -119,8 +118,9 @@ impl Default for GcLimits {
 impl Default for RemoteGcLimits {
     fn default() -> Self {
         Self {
-            physical_requests: NonZeroUsize::new(256)
-                .expect("remote physical request limit must be positive"),
+            physical_requests: gat_core::settings::NetworkOptions::default()
+                .request_concurrency
+                .capacity(),
         }
     }
 }
@@ -142,17 +142,7 @@ pub struct ExecutionLimits {
 
 impl Default for ExecutionLimits {
     fn default() -> Self {
-        Self::with_remote_limits(
-            1024,
-            10_000,
-            4096,
-            RemoteLimits {
-                presence: RemoteConcurrency::new(256, 128, "remote_presence"),
-                transfer: RemoteConcurrency::new(256, 128, "remote_transfer"),
-                physical_requests: NonZeroUsize::new(256)
-                    .expect("physical request limit must be positive"),
-            },
-        )
+        Self::from_network(gat_core::settings::NetworkOptions::default())
     }
 }
 
@@ -253,9 +243,50 @@ impl ExecutionLimits {
         )
     }
 }
+
+impl ExecutionLimits {
+    pub(crate) const fn from_network(options: gat_core::settings::NetworkOptions) -> Self {
+        let global = options.request_concurrency.capacity();
+        let per_remote =
+            NonZeroUsize::new(global.get().div_ceil(2)).expect("positive derived capacity");
+        let concurrency = RemoteConcurrency { global, per_remote };
+        Self::with_remote_limits(
+            1024,
+            10_000,
+            4096,
+            RemoteLimits {
+                presence: concurrency,
+                transfer: concurrency,
+                physical_requests: global,
+            },
+        )
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_remote_budget_is_derived_from_request_concurrency() {
+        for request_limit in [1, 2, 3, 65535] {
+            let options = gat_core::settings::NetworkOptions {
+                request_concurrency: gat_core::settings::ConcurrencyLimit::new(request_limit)
+                    .unwrap(),
+                ..Default::default()
+            };
+            let limits = ExecutionLimits::from_network(options);
+            assert_eq!(
+                limits.remote.physical_requests.get(),
+                request_limit as usize
+            );
+            assert_eq!(limits.remote.presence, limits.remote.transfer);
+            assert_eq!(limits.remote.transfer.global.get(), request_limit as usize);
+            assert_eq!(
+                limits.remote.transfer.per_remote.get(),
+                (request_limit as usize).div_ceil(2)
+            );
+        }
+    }
 
     #[test]
     fn production_defaults_match_the_configured_defaults() {

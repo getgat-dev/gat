@@ -1964,7 +1964,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let layout = crate::RepositoryLayout::at(tmp.path().to_path_buf());
         let objects_dir = tmp.path().join("objects");
-        let root = layout.resolve_cache_root(Some(objects_dir.as_os_str()), None);
+        let root = layout.resolve_cache_root(Some(
+            &gat_core::cache_location::CacheLocation::try_from_path(std::path::PathBuf::from(
+                objects_dir.as_os_str(),
+            ))
+            .expect("nonempty fixture cache path"),
+        ));
         let before = crate::cache::proof::test_support::snapshot().cache_db_opens;
         let writer = root.writer();
 
@@ -2107,7 +2112,7 @@ mod tests {
     fn incremental_ingest_checks_identity_before_publication_and_discards_temps() {
         let tmp = tempfile::tempdir().unwrap();
         let layout = crate::RepositoryLayout::at(tmp.path().to_path_buf());
-        let root = layout.resolve_cache_root(None, None);
+        let root = layout.resolve_cache_root(None);
         let writer = root.writer();
         let expected = Oid::from_bytes(*blake3::hash(b"expected").as_bytes());
         let wrong = Oid::from_bytes(*blake3::hash(b"wrong").as_bytes());
@@ -2136,8 +2141,7 @@ mod tests {
     fn incremental_ingest_cancellation_after_sync_preserves_existing_cache() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let tmp = tempfile::tempdir().unwrap();
-        let root =
-            crate::RepositoryLayout::at(tmp.path().to_owned()).resolve_cache_root(None, None);
+        let root = crate::RepositoryLayout::at(tmp.path().to_owned()).resolve_cache_root(None);
         let writer = root.writer();
         let oid = Oid::from_bytes(*blake3::hash(b"valid").as_bytes());
         writer.ingest_expected(oid, Cursor::new(b"valid")).unwrap();
@@ -2181,7 +2185,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let layout = crate::RepositoryLayout::at(tmp.path().to_path_buf());
         let objects_dir = tmp.path().join("objects");
-        let root = layout.resolve_cache_root(Some(objects_dir.as_os_str()), None);
+        let root = layout.resolve_cache_root(Some(
+            &gat_core::cache_location::CacheLocation::try_from_path(std::path::PathBuf::from(
+                objects_dir.as_os_str(),
+            ))
+            .expect("nonempty fixture cache path"),
+        ));
         let writer = root.writer();
         let content = b"a small known-size remote object";
 
@@ -3308,7 +3317,12 @@ mod tests {
             let oid = write_object(&objects_dir, b"payload");
             let missing = Oid::from_hex(&"a".repeat(64)).unwrap();
             let layout = crate::RepositoryLayout::at(tmp.path().to_path_buf());
-            let root = layout.resolve_cache_root(Some(objects_dir.as_os_str()), None);
+            let root = layout.resolve_cache_root(Some(
+                &gat_core::cache_location::CacheLocation::try_from_path(std::path::PathBuf::from(
+                    objects_dir.as_os_str(),
+                ))
+                .expect("nonempty fixture cache path"),
+            ));
             let presence = root.presence();
 
             let hashes = with_exclusive_hash_file_call_count(|| {

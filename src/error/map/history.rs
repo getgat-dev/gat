@@ -93,7 +93,9 @@ mod tests {
     #[test]
     fn repository_open_failure_uses_the_production_history_chain() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = gat_engine::Repository::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let error = repo
             .visit_history_commits::<HistoryError>(
                 &gat_core::history::HistorySelection::default(),

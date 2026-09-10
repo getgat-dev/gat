@@ -159,7 +159,7 @@ mod tests {
     fn default_performs_no_side_effects() {
         let remote_opens_before = crate::remote_session::test_support::remote_opens();
         let _session = CacheSession::default();
-        let _unrelated = crate::session::Session::new();
+        let _unrelated = crate::session::Session::for_test();
         let remote_opens_after = crate::remote_session::test_support::remote_opens();
 
         assert_eq!(remote_opens_after, remote_opens_before);
@@ -172,7 +172,12 @@ mod tests {
         let objects_dir = tmp.path().join(".gat/cache/objects");
         std::fs::create_dir_all(&objects_dir).unwrap();
         let layout = gat_io::RepositoryLayout::at(tmp.path().to_path_buf());
-        let cache_root = layout.resolve_cache_root(Some(objects_dir.as_os_str()), None);
+        let cache_root = layout.resolve_cache_root(Some(
+            &gat_core::cache_location::CacheLocation::try_from_path(std::path::PathBuf::from(
+                objects_dir.as_os_str(),
+            ))
+            .expect("nonempty fixture cache path"),
+        ));
 
         let mut session = CacheSession::default();
         let before = gat_io::cache_proof_test_support::snapshot().cache_db_opens;

@@ -80,6 +80,11 @@ selections:
 
 ```yaml Complete
 version: 1
+network:
+  readiness_timeout_seconds: 5
+  operation_timeout_seconds: 30
+  io_timeout_seconds: 60
+  request_concurrency: 256
 remotes:
   default: origin
   backup:
@@ -206,7 +211,7 @@ remotes:
 
   <Accordion title="Configuration details" id="cache-location">
     - **Persisted default:** unset
-    - **Environment override:** `GAT_CACHE_DIR` (not persisted to `gat.yaml`)
+    - **Environment override:** `GAT_CACHE_LOCATION`
     - **Example:** `/mnt/gat-cache`
   </Accordion>
 </ResponseField>
@@ -214,7 +219,7 @@ remotes:
 <ResponseField name="cache.materialization_strategy" type="list">
   Ordered fallback modes used to materialize cached objects into the working tree.
 
-  **Default:** [`copy`]
+  **Default:** `["copy"]`
 
   **Set with:** [`gat config cache.materialization_strategy <value>...`](/commands/config)
 
@@ -225,6 +230,7 @@ remotes:
     - Order is significant.
     - Duplicate values are not allowed.
     - **Persisted default:** unset
+    - **Environment override:** `GAT_CACHE_MATERIALIZATION_STRATEGY`
     - **Example:** [`reflink`, `copy`]
   </Accordion>
 </ResponseField>
@@ -246,6 +252,7 @@ remotes:
 
   <Accordion title="Configuration details" id="cache-ingest-strategy">
     - **Persisted default:** unset
+    - **Environment override:** `GAT_CACHE_INGEST_STRATEGY`
     - **Example:** `safe`
   </Accordion>
 </ResponseField>
@@ -262,6 +269,7 @@ remotes:
   <Accordion title="Configuration details" id="sync-trust-state">
     - **Values:** `true` | `false`
     - **Persisted default:** unset
+    - **Environment override:** `GAT_SYNC_TRUST_STATE`
     - **Example:** `true`
   </Accordion>
 </ResponseField>
@@ -276,6 +284,7 @@ remotes:
   <Accordion title="Configuration details" id="sync-auto-fetch">
     - **Values:** `true` | `false`
     - **Persisted default:** unset
+    - **Environment override:** `GAT_SYNC_AUTO_FETCH`
     - **Example:** `true`
   </Accordion>
 </ResponseField>
@@ -290,6 +299,7 @@ remotes:
   <Accordion title="Configuration details" id="sync-auto-repair">
     - **Values:** `true` | `false`
     - **Persisted default:** unset
+    - **Environment override:** `GAT_SYNC_AUTO_REPAIR`
     - **Example:** `true`
   </Accordion>
 </ResponseField>
@@ -368,6 +378,7 @@ remotes:
   <Accordion title="Configuration details" id="lock-shard-levels">
     - **Range:** `0`-`2`
     - **Persisted default:** unset
+    - **Environment override:** `GAT_LOCK_SHARD_LEVELS`
     - **Example:** `2`
   </Accordion>
 </ResponseField>
@@ -512,7 +523,7 @@ routes:
 <ResponseField name="git.ignore_patterns" type="list">
   Single-line, non-negated Git-ignore patterns used to derive Gat's managed `.git/info/exclude` block.
 
-  **Default:** []
+  **Default:** `[]`
 
   **Set with:** [`gat config git.ignore_patterns <value>...`](/commands/config)
 
@@ -523,6 +534,69 @@ routes:
     - **Empty list:** allowed
     - Order is significant.
     - **Persisted default:** unset
+    - **Environment override:** `GAT_GIT_IGNORE_PATTERNS`
     - **Example:** [`*.safetensors`, `/artifacts/**/*.bin`]
+  </Accordion>
+</ResponseField>
+
+### Network
+
+<ResponseField name="network.readiness_timeout_seconds" type="integer">
+  Total budget in seconds for establishing remote readiness.
+
+  **Default:** `5`
+
+  **Set with:** [`gat config network.readiness_timeout_seconds <value>`](/commands/config)
+
+  <Accordion title="Configuration details" id="network-readiness-timeout-seconds">
+    - **Range:** `1`-`86400`
+    - **Persisted default:** unset
+    - **Environment override:** `GAT_NETWORK_READINESS_TIMEOUT_SECONDS`
+    - **Example:** `5`
+  </Accordion>
+</ResponseField>
+
+<ResponseField name="network.operation_timeout_seconds" type="integer">
+  Timeout in seconds for one backend operation attempt, not an entire transfer.
+
+  **Default:** `30`
+
+  **Set with:** [`gat config network.operation_timeout_seconds <value>`](/commands/config)
+
+  <Accordion title="Configuration details" id="network-operation-timeout-seconds">
+    - **Range:** `1`-`86400`
+    - **Persisted default:** unset
+    - **Environment override:** `GAT_NETWORK_OPERATION_TIMEOUT_SECONDS`
+    - **Example:** `60`
+  </Accordion>
+</ResponseField>
+
+<ResponseField name="network.io_timeout_seconds" type="integer">
+  Timeout in seconds for one read, write, or body operation.
+
+  **Default:** `60`
+
+  **Set with:** [`gat config network.io_timeout_seconds <value>`](/commands/config)
+
+  <Accordion title="Configuration details" id="network-io-timeout-seconds">
+    - **Range:** `1`-`86400`
+    - **Persisted default:** unset
+    - **Environment override:** `GAT_NETWORK_IO_TIMEOUT_SECONDS`
+    - **Example:** `60`
+  </Accordion>
+</ResponseField>
+
+<ResponseField name="network.request_concurrency" type="integer">
+  Maximum simultaneous physical network requests per operation; logical scheduling is derived internally.
+
+  **Default:** `256`
+
+  **Set with:** [`gat config network.request_concurrency <value>`](/commands/config)
+
+  <Accordion title="Configuration details" id="network-request-concurrency">
+    - **Range:** `1`-`65535`
+    - **Persisted default:** unset
+    - **Environment override:** `GAT_NETWORK_REQUEST_CONCURRENCY`
+    - **Example:** `256`
   </Accordion>
 </ResponseField>

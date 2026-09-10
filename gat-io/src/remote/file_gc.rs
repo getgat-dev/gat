@@ -4,7 +4,7 @@ use super::{RemoteClient, RemoteError, classify_opendal_error};
 use gat_core::oid::Oid;
 use std::{fs::ReadDir, io, path::PathBuf};
 
-pub const FILE_GC_BATCH_SIZE: usize = 128;
+const FILE_GC_BATCH_SIZE: usize = 128;
 
 pub struct FileObjectScan {
     root: PathBuf,
@@ -29,28 +29,44 @@ fn remote_error(error: io::Error) -> RemoteError {
     classify_opendal_error(opendal::Error::new(kind, "file GC failed").set_source(error))
 }
 
+/// File-backed inventory and deletion authority, resolved once from a remote.
+/// Constructing it performs no filesystem work.
+pub struct FileGc {
+    root: PathBuf,
+}
+
 impl RemoteClient {
     #[must_use]
-    pub fn prepare_file_listing(&self) -> Option<FileObjectScan> {
+    pub fn file_gc(&self) -> Option<FileGc> {
         let info = self.operator.info();
-        (info.scheme() == "fs").then(|| FileObjectScan {
-            root: PathBuf::from(info.root()).join(crate::cache::OBJECT_HASH_NAMESPACE),
-            started: false,
-            stack: Vec::new(),
+        (info.scheme() == "fs").then(|| FileGc {
+            root: PathBuf::from(info.root()),
         })
     }
+}
 
-    /// # Panics
-    /// Panics if `oids` exceeds [`FILE_GC_BATCH_SIZE`].
+impl FileGc {
     #[must_use]
-    pub fn prepare_file_delete(&self, oids: &[Oid]) -> Option<FileDeleteBatch> {
-        let info = self.operator.info();
-        (info.scheme() == "fs").then(|| {
-            assert!(oids.len() <= FILE_GC_BATCH_SIZE);
-            let root = PathBuf::from(info.root());
+    pub fn listing(&self) -> FileObjectScan {
+        FileObjectScan {
+            root: self.root.join(crate::cache::OBJECT_HASH_NAMESPACE),
+            started: false,
+            stack: Vec::new(),
+        }
+    }
+
+    /// Prepare bounded owned batches lazily, without touching the filesystem.
+    /// Every batch contains at most the internal file-GC work limit.
+    #[must_use]
+    pub fn deletion_batches<'a>(
+        &'a self,
+        oids: &'a [Oid],
+    ) -> impl ExactSizeIterator<Item = FileDeleteBatch> + 'a {
+        oids.chunks(FILE_GC_BATCH_SIZE).map(|batch| {
             FileDeleteBatch(
-                oids.iter()
-                    .map(|oid| root.join(crate::cache::object_key_oid(oid)))
+                batch
+                    .iter()
+                    .map(|oid| self.root.join(crate::cache::object_key_oid(oid)))
                     .collect(),
             )
         })
@@ -167,8 +183,9 @@ mod tests {
         super::super::initialize_backends();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let root = tempfile::tempdir().unwrap();
-        let client = runtime
-            .block_on(async { RemoteClient::open(&super::super::file_url(root.path())).unwrap() });
+        let client = runtime.block_on(async {
+            RemoteClient::open_for_test(&super::super::file_url(root.path())).unwrap()
+        });
         (root, client)
     }
 
@@ -183,6 +200,41 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"object").unwrap();
         path
+    }
+
+    #[test]
+    fn deletion_capability_bounds_batches_and_preserves_input_order() {
+        let (_root, client) = fixture();
+        let gc = client.file_gc().unwrap();
+        for size in [
+            0,
+            1,
+            FILE_GC_BATCH_SIZE,
+            FILE_GC_BATCH_SIZE + 1,
+            2 * FILE_GC_BATCH_SIZE + 1,
+        ] {
+            let oids: Vec<_> = (0..size)
+                .map(|index| oid(u16::try_from(index).unwrap()))
+                .collect();
+            let mut batches = gc.deletion_batches(&oids);
+            assert_eq!(batches.len(), size.div_ceil(FILE_GC_BATCH_SIZE));
+            let mut observed = Vec::new();
+            while let Some(batch) = batches.next() {
+                assert!(!batch.0.is_empty());
+                assert!(batch.0.len() <= FILE_GC_BATCH_SIZE);
+                observed.extend(batch.0);
+                assert_eq!(
+                    batches.len(),
+                    (size - observed.len()).div_ceil(FILE_GC_BATCH_SIZE)
+                );
+            }
+            assert_eq!(
+                observed,
+                oids.iter()
+                    .map(|oid| gc.root.join(crate::cache::object_key_oid(oid)))
+                    .collect::<Vec<_>>(),
+            );
+        }
     }
 
     #[test]
@@ -202,7 +254,7 @@ mod tests {
         let invalid = root.path().join("blake3/zz/00");
         std::fs::create_dir_all(&invalid).unwrap();
         std::fs::write(invalid.join(oid(999).to_string()), b"invalid").unwrap();
-        let mut scan = client.prepare_file_listing().unwrap();
+        let mut scan = client.file_gc().unwrap().listing();
         let mut seen = Vec::new();
         let mut pages = 0;
         while let Some(batch) = scan.next_batch().unwrap() {
@@ -227,14 +279,15 @@ mod tests {
         let (root, client) = fixture();
         assert!(
             client
-                .prepare_file_listing()
+                .file_gc()
                 .unwrap()
+                .listing()
                 .next_batch()
                 .unwrap()
                 .is_none()
         );
         std::fs::write(root.path().join("blake3"), b"invalid").unwrap();
-        assert!(client.prepare_file_listing().unwrap().next_batch().is_err());
+        assert!(client.file_gc().unwrap().listing().next_batch().is_err());
     }
 
     #[test]
@@ -246,7 +299,10 @@ mod tests {
         std::fs::create_dir(&invalid).unwrap();
         let later = object(root.path(), 3);
         let result = client
-            .prepare_file_delete(&[oid(0), oid(1), oid(2), oid(3)])
+            .file_gc()
+            .unwrap()
+            .deletion_batches(&[oid(0), oid(1), oid(2), oid(3)])
+            .next()
             .unwrap()
             .delete();
         assert_eq!(result.confirmed, 2);
@@ -271,11 +327,17 @@ mod tests {
             root.path().join("blake3/aa"),
         )
         .unwrap();
-        let mut scan = client.prepare_file_listing().unwrap();
+        let mut scan = client.file_gc().unwrap().listing();
         while let Some(batch) = scan.next_batch().unwrap() {
             assert!(batch.is_empty());
         }
-        let result = client.prepare_file_delete(&[oid(1)]).unwrap().delete();
+        let result = client
+            .file_gc()
+            .unwrap()
+            .deletion_batches(&[oid(1)])
+            .next()
+            .unwrap()
+            .delete();
         assert_eq!(result.confirmed, 1);
         assert!(result.error.is_none());
         assert!(target.is_file());

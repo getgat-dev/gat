@@ -73,6 +73,9 @@ fn client(mode: Mode) -> (RemoteClient, Arc<AtomicUsize>, RemoteRequestBudget) {
     .layer(budget.layer.clone());
     (
         RemoteClient {
+            io_timeout: gat_core::settings::NetworkOptions::default()
+                .io_timeout
+                .duration(),
             operator: Arc::new(operator),
             runtime: tokio::runtime::Handle::current(),
         },
@@ -162,7 +165,12 @@ async fn cancelling_internal_lister_releases_http_body_permit() {
 #[tokio::test(start_paused = true)]
 async fn readiness_budget_does_not_apply_to_subsequent_io() {
     let (mut client, calls, _) = client(Mode::SlowAfterReady);
-    client.operator = Arc::new(with_gat_defaults((*client.operator).clone(), "s3", None));
+    client.operator = Arc::new(with_gat_defaults(
+        (*client.operator).clone(),
+        "s3",
+        None,
+        gat_core::settings::NetworkOptions::default(),
+    ));
     client.check(Duration::from_secs(10)).await.unwrap();
     let started = tokio::time::Instant::now();
     let mut objects = client.enumerate_objects().await.unwrap();

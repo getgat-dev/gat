@@ -4,27 +4,29 @@ use gat_command::{
     config_with_lifecycle_observer,
 };
 use gat_core::config::{ConfigScope, IngestStrategy, MaterializationMode};
-use gat_core::config_keys::{ConfigKey, ConfigResource};
+use gat_core::config_keys::{ConfigResource, SettingKey};
 use gat_core::lifecycle::Surface;
 use gat_core::lock::LockShardLevels;
 use gat_engine::Repository;
 
 fn repository() -> (tempfile::TempDir, Repository) {
     let temp = tempfile::tempdir().unwrap();
-    let repo = Repository::at(temp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(temp.path().to_path_buf());
     (temp, repo)
 }
 
-const fn request(key: ConfigKey, action: ConfigAction) -> ConfigRequest {
-    ConfigRequest {
-        key,
-        action,
-        scope: ConfigScope::Project,
-    }
+const fn request(key: SettingKey, action: ConfigAction) -> ConfigRequest {
+    ConfigRequest::new(key, action, ConfigScope::Project)
 }
 
-const fn scoped_request(key: ConfigKey, action: ConfigAction, scope: ConfigScope) -> ConfigRequest {
-    ConfigRequest { key, action, scope }
+const fn scoped_request(
+    key: SettingKey,
+    action: ConfigAction,
+    scope: ConfigScope,
+) -> ConfigRequest {
+    ConfigRequest::new(key, action, scope)
 }
 
 #[test]
@@ -41,7 +43,7 @@ fn raw_keys_and_action_cardinality_follow_the_typed_registry() {
     assert_eq!(key, "cache.link");
 
     let (_temp, repo) = repository();
-    for key in ConfigKey::CANONICAL {
+    for key in SettingKey::CANONICAL {
         config(&repo, request(key, ConfigAction::Get))
             .unwrap_or_else(|error| panic!("{key} has no command handler: {error}"));
     }
@@ -49,29 +51,29 @@ fn raw_keys_and_action_cardinality_follow_the_typed_registry() {
     assert!(matches!(
         config(
             &repo,
-            request(ConfigKey::CacheLocation, ConfigAction::Set(Vec::new()))
+            request(SettingKey::CacheLocation, ConfigAction::Set(Vec::new()))
         ),
         Err(ConfigError::WrongValueCount {
-            key: ConfigKey::CacheLocation,
+            key: SettingKey::CacheLocation,
             got: 0
         })
     ));
     assert!(matches!(
         config(
             &repo,
-            request(ConfigKey::CacheLocation, ConfigAction::Clear)
+            request(SettingKey::CacheLocation, ConfigAction::Clear)
         ),
         Err(ConfigError::ClearNotSupportedForScalar {
-            key: ConfigKey::CacheLocation
+            key: SettingKey::CacheLocation
         })
     ));
     assert!(matches!(
         config(
             &repo,
-            request(ConfigKey::GitIgnorePatterns, ConfigAction::Set(Vec::new()))
+            request(SettingKey::GitIgnorePatterns, ConfigAction::Set(Vec::new()))
         ),
         Err(ConfigError::EmptyListNotAllowed {
-            key: ConfigKey::GitIgnorePatterns
+            key: SettingKey::GitIgnorePatterns
         })
     ));
 }
@@ -123,7 +125,7 @@ fn materialization_strategy_preserves_order_and_rejected_changes_do_not_write() 
     let set = config(
         &repo,
         request(
-            ConfigKey::CacheMaterializationStrategy,
+            SettingKey::CacheMaterializationStrategy,
             ConfigAction::Set(vec![
                 "reflink".to_string(),
                 "hardlink".to_string(),
@@ -135,7 +137,7 @@ fn materialization_strategy_preserves_order_and_rejected_changes_do_not_write() 
     assert_eq!(
         set,
         ConfigOutcome::SetList {
-            key: ConfigKey::CacheMaterializationStrategy,
+            key: SettingKey::CacheMaterializationStrategy,
             values: vec![
                 "reflink".to_string(),
                 "hardlink".to_string(),
@@ -163,7 +165,7 @@ fn materialization_strategy_preserves_order_and_rejected_changes_do_not_write() 
         config(
             &repo,
             request(
-                ConfigKey::CacheMaterializationStrategy,
+                SettingKey::CacheMaterializationStrategy,
                 ConfigAction::Set(vec!["teleport".to_string()])
             )
         ),
@@ -175,7 +177,7 @@ fn materialization_strategy_preserves_order_and_rejected_changes_do_not_write() 
         config(
             &repo,
             request(
-                ConfigKey::CacheMaterializationStrategy,
+                SettingKey::CacheMaterializationStrategy,
                 ConfigAction::Set(vec!["copy".to_string(), "copy".to_string()])
             )
         ),
@@ -186,10 +188,13 @@ fn materialization_strategy_preserves_order_and_rejected_changes_do_not_write() 
     assert!(matches!(
         config(
             &repo,
-            request(ConfigKey::CacheMaterializationStrategy, ConfigAction::Clear)
+            request(
+                SettingKey::CacheMaterializationStrategy,
+                ConfigAction::Clear
+            )
         ),
         Err(ConfigError::ClearAlwaysInvalid {
-            key: ConfigKey::CacheMaterializationStrategy,
+            key: SettingKey::CacheMaterializationStrategy,
             ..
         })
     ));
@@ -197,17 +202,20 @@ fn materialization_strategy_preserves_order_and_rejected_changes_do_not_write() 
 
     config(
         &repo,
-        request(ConfigKey::CacheMaterializationStrategy, ConfigAction::Unset),
+        request(
+            SettingKey::CacheMaterializationStrategy,
+            ConfigAction::Unset,
+        ),
     )
     .unwrap();
     assert_eq!(
         config(
             &repo,
-            request(ConfigKey::CacheMaterializationStrategy, ConfigAction::Get)
+            request(SettingKey::CacheMaterializationStrategy, ConfigAction::Get)
         )
         .unwrap(),
         ConfigOutcome::Values {
-            key: ConfigKey::CacheMaterializationStrategy,
+            key: SettingKey::CacheMaterializationStrategy,
             values: vec!["copy".to_string()],
             source: ConfigSource::Default
         }
@@ -222,7 +230,7 @@ fn ingest_strategy_is_typed_and_lifecycle_reads_reuse_the_config_snapshot() {
     let before = gat_engine::test_support::config_loads();
     let outcome = config_with_lifecycle_observer(
         &repo,
-        request(ConfigKey::CacheIngestStrategy, ConfigAction::Get),
+        request(SettingKey::CacheIngestStrategy, ConfigAction::Get),
         &|surface| {
             if let Surface::ConfigValue { key, value } = surface {
                 observed
@@ -237,7 +245,7 @@ fn ingest_strategy_is_typed_and_lifecycle_reads_reuse_the_config_snapshot() {
     assert_eq!(
         outcome,
         ConfigOutcome::Value {
-            key: ConfigKey::CacheIngestStrategy,
+            key: SettingKey::CacheIngestStrategy,
             value: ConfigScalarValue::IngestStrategy(IngestStrategy::Safe),
             source: ConfigSource::Default
         }
@@ -255,13 +263,13 @@ fn ingest_strategy_is_typed_and_lifecycle_reads_reuse_the_config_snapshot() {
             config(
                 &repo,
                 request(
-                    ConfigKey::CacheIngestStrategy,
+                    SettingKey::CacheIngestStrategy,
                     ConfigAction::Set(vec![raw.to_string()])
                 )
             )
             .unwrap(),
             ConfigOutcome::Set {
-                key: ConfigKey::CacheIngestStrategy,
+                key: SettingKey::CacheIngestStrategy,
                 value: ConfigScalarValue::IngestStrategy(expected),
             }
         );
@@ -270,7 +278,7 @@ fn ingest_strategy_is_typed_and_lifecycle_reads_reuse_the_config_snapshot() {
         config(
             &repo,
             request(
-                ConfigKey::CacheIngestStrategy,
+                SettingKey::CacheIngestStrategy,
                 ConfigAction::Set(vec!["teleport".to_string()])
             )
         ),
@@ -286,7 +294,7 @@ fn cache_location_stays_typed_and_get_loads_config_once() {
     let outcome = config(
         &repo,
         request(
-            ConfigKey::CacheLocation,
+            SettingKey::CacheLocation,
             ConfigAction::Set(vec!["shared-cache".to_string()]),
         ),
     )
@@ -294,20 +302,20 @@ fn cache_location_stays_typed_and_get_loads_config_once() {
     assert!(matches!(
         outcome,
         ConfigOutcome::Set {
-            key: ConfigKey::CacheLocation,
+            key: SettingKey::CacheLocation,
             value: ConfigScalarValue::CacheLocation(ref value),
         } if value.as_path() == std::path::Path::new("shared-cache")
     ));
 
     #[cfg(feature = "test-support")]
     let before_loads = gat_engine::test_support::config_loads();
-    let outcome = config(&repo, request(ConfigKey::CacheLocation, ConfigAction::Get)).unwrap();
+    let outcome = config(&repo, request(SettingKey::CacheLocation, ConfigAction::Get)).unwrap();
     #[cfg(feature = "test-support")]
     assert_eq!(gat_engine::test_support::config_loads() - before_loads, 1);
     assert_eq!(
         outcome,
         ConfigOutcome::Value {
-            key: ConfigKey::CacheLocation,
+            key: SettingKey::CacheLocation,
             value: ConfigScalarValue::Path(temp.path().join("shared-cache")),
             source: ConfigSource::Scope(ConfigScope::Project)
         }
@@ -318,9 +326,9 @@ fn cache_location_stays_typed_and_get_loads_config_once() {
 fn boolean_settings_are_typed_and_local_false_overrides_project_true() {
     let (_temp, repo) = repository();
     for key in [
-        ConfigKey::SyncTrustState,
-        ConfigKey::SyncAutoFetch,
-        ConfigKey::SyncAutoRepair,
+        SettingKey::SyncTrustState,
+        SettingKey::SyncAutoFetch,
+        SettingKey::SyncAutoRepair,
     ] {
         assert_eq!(
             config(&repo, request(key, ConfigAction::Get)).unwrap(),
@@ -347,7 +355,10 @@ fn boolean_settings_are_typed_and_local_false_overrides_project_true() {
                 request(key, ConfigAction::Set(vec!["nope".to_string()]))
             ),
             Err(ConfigError::Config(
-                gat_core::config::ConfigError::InvalidBooleanValue { .. }
+                gat_core::config::ConfigError::InvalidSettingValue {
+                    reason: gat_core::settings::SettingValueError::InvalidBoolean,
+                    ..
+                }
             ))
         ));
         config(
@@ -376,11 +387,11 @@ fn shard_levels_are_typed_and_invalid_values_do_not_replace_the_saved_value() {
     assert_eq!(
         config(
             &repo,
-            request(ConfigKey::LockShardLevels, ConfigAction::Get)
+            request(SettingKey::LockShardLevels, ConfigAction::Get)
         )
         .unwrap(),
         ConfigOutcome::Value {
-            key: ConfigKey::LockShardLevels,
+            key: SettingKey::LockShardLevels,
             value: ConfigScalarValue::ShardLevels(LockShardLevels::new(0).unwrap()),
             source: ConfigSource::Default
         }
@@ -388,7 +399,7 @@ fn shard_levels_are_typed_and_invalid_values_do_not_replace_the_saved_value() {
     config(
         &repo,
         request(
-            ConfigKey::LockShardLevels,
+            SettingKey::LockShardLevels,
             ConfigAction::Set(vec!["2".to_string()]),
         ),
     )
@@ -399,7 +410,7 @@ fn shard_levels_are_typed_and_invalid_values_do_not_replace_the_saved_value() {
             config(
                 &repo,
                 request(
-                    ConfigKey::LockShardLevels,
+                    SettingKey::LockShardLevels,
                     ConfigAction::Set(vec![invalid.to_string()])
                 )
             ),
@@ -423,10 +434,12 @@ fn ignore_patterns_preserve_commas_and_alias_writes_the_canonical_key() {
     ];
     let outcome = config_with_lifecycle_observer(
         &repo,
-        request(
-            ConfigKey::GitExcludePatterns,
+        ConfigRequest::from_raw(
+            "git.exclude_patterns".to_string(),
             ConfigAction::Set(values.clone()),
-        ),
+            ConfigScope::Project,
+        )
+        .unwrap(),
         &|surface| {
             if matches!(
                 surface,
@@ -444,18 +457,23 @@ fn ignore_patterns_preserve_commas_and_alias_writes_the_canonical_key() {
     assert_eq!(
         outcome,
         ConfigOutcome::SetList {
-            key: ConfigKey::GitIgnorePatterns,
+            key: SettingKey::GitIgnorePatterns,
             values: values.clone(),
         }
     );
     assert_eq!(
         config(
             &repo,
-            request(ConfigKey::GitExcludePatterns, ConfigAction::Get)
+            ConfigRequest::from_raw(
+                "git.exclude_patterns".into(),
+                ConfigAction::Get,
+                ConfigScope::Project
+            )
+            .unwrap()
         )
         .unwrap(),
         ConfigOutcome::Values {
-            key: ConfigKey::GitIgnorePatterns,
+            key: SettingKey::GitIgnorePatterns,
             values: values.clone(),
             source: ConfigSource::Scope(ConfigScope::Project)
         }
@@ -467,7 +485,7 @@ fn ignore_patterns_preserve_commas_and_alias_writes_the_canonical_key() {
     config(
         &repo,
         scoped_request(
-            ConfigKey::GitIgnorePatterns,
+            SettingKey::GitIgnorePatterns,
             ConfigAction::Clear,
             ConfigScope::Local,
         ),
@@ -476,11 +494,11 @@ fn ignore_patterns_preserve_commas_and_alias_writes_the_canonical_key() {
     assert_eq!(
         config(
             &repo,
-            request(ConfigKey::GitIgnorePatterns, ConfigAction::Get)
+            request(SettingKey::GitIgnorePatterns, ConfigAction::Get)
         )
         .unwrap(),
         ConfigOutcome::Values {
-            key: ConfigKey::GitIgnorePatterns,
+            key: SettingKey::GitIgnorePatterns,
             values: Vec::new(),
             source: ConfigSource::Scope(ConfigScope::Local)
         }
@@ -488,7 +506,7 @@ fn ignore_patterns_preserve_commas_and_alias_writes_the_canonical_key() {
     config(
         &repo,
         scoped_request(
-            ConfigKey::GitIgnorePatterns,
+            SettingKey::GitIgnorePatterns,
             ConfigAction::Unset,
             ConfigScope::Local,
         ),
@@ -497,11 +515,11 @@ fn ignore_patterns_preserve_commas_and_alias_writes_the_canonical_key() {
     assert_eq!(
         config(
             &repo,
-            request(ConfigKey::GitIgnorePatterns, ConfigAction::Get)
+            request(SettingKey::GitIgnorePatterns, ConfigAction::Get)
         )
         .unwrap(),
         ConfigOutcome::Values {
-            key: ConfigKey::GitIgnorePatterns,
+            key: SettingKey::GitIgnorePatterns,
             values,
             source: ConfigSource::Scope(ConfigScope::Project)
         }
@@ -573,20 +591,15 @@ fn saved_selections_resolve_without_worktree_or_lock_and_keep_sparse_definitions
     let outcome = saved_selection(
         &repo,
         SelectionRequest::Default {
-            name: None,
-            unset: false,
+            action: gat_engine::DefaultAction::Get,
             scope: ConfigScope::Project,
         },
     )
     .unwrap();
-    let SelectionOutcome::Default {
-        record: Some(record),
-        ..
-    } = outcome
-    else {
+    let SelectionOutcome::Default(Some(default)) = outcome else {
         panic!("expected the persisted default");
     };
-    assert!(record.definition.is_unrestricted());
+    assert!(default.record.definition.is_unrestricted());
 }
 
 #[test]
@@ -611,7 +624,7 @@ fn default_mutations_report_candidate_provenance_from_one_config_snapshot() {
                 },
             );
         }
-        repo.save_config_scoped(&config, ConfigScope::Project)
+        repo.write_scoped_config_fixture(&config, ConfigScope::Project)
             .unwrap();
         for (name, scope, expected, chosen) in [
             (
@@ -644,43 +657,47 @@ fn default_mutations_report_candidate_provenance_from_one_config_snapshot() {
             #[cfg(feature = "test-support")]
             let before = gat_engine::test_support::config_loads();
             let (actual, chosen_in, defined_in) = if selection {
-                let SelectionOutcome::Default { record, chosen_in } = gat_command::saved_selection(
+                let SelectionOutcome::Default(default) = gat_command::saved_selection(
                     &repo,
                     SelectionRequest::Default {
-                        name: name.map(Into::into),
-                        unset: name.is_none(),
+                        action: name.map_or(gat_engine::DefaultAction::Unset, |name| {
+                            gat_engine::DefaultAction::Set(name.into())
+                        }),
                         scope,
                     },
                 )
                 .unwrap() else {
                     panic!("expected selection default");
                 };
-                assert!(record.as_ref().is_none_or(|record| record.is_default));
-                let defined_in = record.as_ref().map(|record| record.scope);
+                assert!(
+                    default
+                        .as_ref()
+                        .is_none_or(|default| default.record.is_default)
+                );
+                let chosen_in = default.as_ref().map(|default| default.chosen_in);
+                let defined_in = default.as_ref().map(|default| default.record.scope);
                 (
-                    record.map(|record| record.name.as_str().to_owned()),
+                    default.map(|default| default.record.name.as_str().to_owned()),
                     chosen_in,
                     defined_in,
                 )
             } else {
-                let RemoteOutcome::Default {
-                    name,
-                    chosen_in,
-                    defined_in,
-                } = gat_command::remote(
+                let RemoteOutcome::Default(default) = gat_command::remote(
                     &repo,
                     RemoteRequest::Default {
-                        name: name.map(Into::into),
-                        unset: name.is_none(),
+                        action: name.map_or(gat_engine::DefaultAction::Unset, |name| {
+                            gat_engine::DefaultAction::Set(name.into())
+                        }),
                         scope,
                     },
                 )
-                .unwrap()
-                else {
+                .unwrap() else {
                     panic!("expected remote default");
                 };
+                let chosen_in = default.as_ref().map(|default| default.chosen_in);
+                let defined_in = default.as_ref().and_then(|default| default.defined_in);
                 (
-                    name.map(|name| name.as_str().to_owned()),
+                    default.map(|default| default.name.as_str().to_owned()),
                     chosen_in,
                     defined_in,
                 )

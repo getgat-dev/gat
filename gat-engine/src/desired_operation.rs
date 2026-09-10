@@ -73,7 +73,7 @@ impl<'repo> DesiredOperation<'repo> {
     pub fn acquire(repo: &'repo Repo, progress: &dyn ProgressReporter) -> Result<Self> {
         let (snapshot, desired) =
             crate::repo_snapshot::recover_and_open_coherent_snapshot(repo, progress)?;
-        let session = crate::session::Session::new();
+        let session = crate::session::Session::new(repo, snapshot.config());
         let operation = Operation::new(repo, snapshot, session);
         Ok(Self::new(operation, desired))
     }
@@ -90,7 +90,11 @@ impl<'repo> DesiredOperation<'repo> {
     ) -> Result<Self> {
         let (snapshot, desired) =
             crate::repo_snapshot::recover_and_open_coherent_snapshot(repo, progress)?;
-        let session = crate::session::Session::with_limits(limits);
+        let session = crate::session::Session::configured(
+            limits,
+            repo.inputs.templates(),
+            snapshot.config().network.resolve(),
+        );
         let operation = Operation::new(repo, snapshot, session);
         Ok(Self::new(operation, desired))
     }
@@ -145,7 +149,6 @@ impl<'repo> DesiredOperation<'repo> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::Repository as Repo;
 
     /// Constructing a `DesiredOperation` from already-captured
     /// operation/desired values must not perform any additional resource
@@ -154,7 +157,9 @@ mod tests {
     #[test]
     fn construction_performs_no_additional_side_effects() {
         let tmp = crate::test_harness::test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
 
         let remote_opens_before = crate::remote_session::test_support::remote_opens();
         let (snapshot, desired) = super::super::repo_snapshot::recover_and_open_coherent_snapshot(
@@ -162,7 +167,7 @@ mod tests {
             &gat_core::progress::NoopProgress,
         )
         .unwrap();
-        let session = crate::session::Session::new();
+        let session = crate::session::Session::for_test();
         let operation = Operation::new(&repo, snapshot, session);
         let remote_opens_after_operation = crate::remote_session::test_support::remote_opens();
 
@@ -185,7 +190,9 @@ mod tests {
         use gat_io::StateStore;
 
         let tmp = crate::test_harness::test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
 
         let mut store = StateStore::open(repo.layout()).unwrap();
         store
@@ -204,7 +211,7 @@ mod tests {
             &gat_core::progress::NoopProgress,
         )
         .unwrap();
-        let session = crate::session::Session::new();
+        let session = crate::session::Session::for_test();
         let operation = Operation::new(&repo, snapshot, session);
         let desired_op = DesiredOperation::new(operation, desired);
 
@@ -249,7 +256,9 @@ mod tests {
         use gat_io::StateStore;
 
         let tmp = crate::test_harness::test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
 
         // Seed desired state so the pinned reader has something to pin
         // against, exactly as the lower-level state-store test does.
@@ -271,7 +280,7 @@ mod tests {
             &gat_core::progress::NoopProgress,
         )
         .unwrap();
-        let session = crate::session::Session::new();
+        let session = crate::session::Session::for_test();
         let operation = Operation::new(&repo, snapshot, session);
         let desired_op = DesiredOperation::new(operation, desired);
 
@@ -342,14 +351,16 @@ mod tests {
     #[test]
     fn finish_selection_returns_the_same_operation_and_drops_the_desired_snapshot() {
         let tmp = crate::test_harness::test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
 
         let (snapshot, desired) = super::super::repo_snapshot::recover_and_open_coherent_snapshot(
             &repo,
             &gat_core::progress::NoopProgress,
         )
         .unwrap();
-        let session = crate::session::Session::new();
+        let session = crate::session::Session::for_test();
         let operation = Operation::new(&repo, snapshot, session);
         let desired_op = DesiredOperation::new(operation, desired);
 
@@ -365,7 +376,9 @@ mod tests {
     #[test]
     fn config_edit_after_acquisition_does_not_rewrite_the_captured_config() {
         let tmp = crate::test_harness::test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
 
         let desired_op =
             DesiredOperation::acquire(&repo, &gat_core::progress::NoopProgress).unwrap();
@@ -417,7 +430,9 @@ mod tests {
     #[test]
     fn config_edit_at_local_scope_after_acquisition_does_not_rewrite_the_captured_config() {
         let tmp = crate::test_harness::test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
 
         let desired_op =
             DesiredOperation::acquire(&repo, &gat_core::progress::NoopProgress).unwrap();

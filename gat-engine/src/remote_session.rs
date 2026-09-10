@@ -119,9 +119,12 @@ impl RemoteHandle {
 pub(crate) struct RemoteSession {
     first: Option<(RemoteId, Result<gat_io::RemoteClient>)>,
     additional: HashMap<RemoteId, Result<gat_io::RemoteClient>>,
-    request_budget: Option<gat_io::RemoteRequestBudget>,
+    request_budget: gat_io::RemoteRequestBudget,
+    resolver: gat_io::TemplateResolver,
+    options: gat_core::settings::NetworkOptions,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl Default for RemoteSession {
     fn default() -> Self {
         Self::new()
@@ -129,19 +132,30 @@ impl Default for RemoteSession {
 }
 
 impl RemoteSession {
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn new() -> Self {
-        Self {
-            first: None,
-            additional: HashMap::new(),
-            request_budget: None,
-        }
+        let options = gat_core::settings::NetworkOptions::default();
+        let capacity = options.request_concurrency.capacity();
+        Self::with_request_budget(
+            gat_io::RemoteRequestBudget::new(capacity, capacity),
+            gat_io::InvocationInputs::from_pairs([] as [(&str, &str); 0])
+                .unwrap()
+                .templates(),
+            options,
+        )
     }
 
-    pub(crate) fn with_request_budget(request_budget: gat_io::RemoteRequestBudget) -> Self {
+    pub(crate) fn with_request_budget(
+        request_budget: gat_io::RemoteRequestBudget,
+        resolver: gat_io::TemplateResolver,
+        options: gat_core::settings::NetworkOptions,
+    ) -> Self {
         Self {
             first: None,
             additional: HashMap::new(),
-            request_budget: Some(request_budget),
+            request_budget,
+            resolver,
+            options,
         }
     }
 
@@ -161,15 +175,17 @@ impl RemoteSession {
         id: RemoteId,
         progress: Option<&ProgressHandle>,
     ) -> Result<gat_io::RemoteClient> {
+        let resolver = self.resolver.clone();
+        let options = self.options;
         self.open_with(id, |request_budget| {
-            Self::build(catalog, id, request_budget, progress)
+            Self::build(catalog, id, request_budget, progress, &resolver, options)
         })
     }
 
     fn open_with(
         &mut self,
         id: RemoteId,
-        initialize: impl FnOnce(Option<&gat_io::RemoteRequestBudget>) -> Result<gat_io::RemoteClient>,
+        initialize: impl FnOnce(&gat_io::RemoteRequestBudget) -> Result<gat_io::RemoteClient>,
     ) -> Result<gat_io::RemoteClient> {
         if let Some((first_id, client)) = &self.first {
             if *first_id == id {
@@ -178,12 +194,12 @@ impl RemoteSession {
             if let Some(client) = self.additional.get(&id) {
                 return client.clone();
             }
-            let built = initialize(self.request_budget.as_ref());
+            let built = initialize(&self.request_budget);
             self.additional.insert(id, built.clone());
             return built;
         }
 
-        let built = initialize(self.request_budget.as_ref());
+        let built = initialize(&self.request_budget);
         self.first = Some((id, built.clone()));
         built
     }
@@ -209,16 +225,17 @@ impl RemoteSession {
     fn build(
         catalog: &RemoteCatalog,
         id: RemoteId,
-        request_budget: Option<&gat_io::RemoteRequestBudget>,
+        request_budget: &gat_io::RemoteRequestBudget,
         progress: Option<&ProgressHandle>,
+        resolver: &gat_io::TemplateResolver,
+        options: gat_core::settings::NetworkOptions,
     ) -> Result<gat_io::RemoteClient> {
-        let result = match request_budget {
-            Some(request_budget) => gat_io::RemoteClient::open_with_request_budget(
-                catalog.url(id).as_template_str(),
-                Some(request_budget),
-            ),
-            None => gat_io::RemoteClient::open(catalog.url(id).as_template_str()),
-        };
+        let result = gat_io::RemoteClient::open_with_request_budget(
+            catalog.url(id).as_template_str(),
+            Some(request_budget),
+            resolver,
+            options,
+        );
         let client = result.map_err(|source| RemoteSessionError {
             source: Arc::new(crate::remote_open::RemoteOpenError::from_io(
                 catalog.url(id),
@@ -228,12 +245,7 @@ impl RemoteSession {
         #[cfg(any(test, feature = "test-support"))]
         test_support::record_remote_open(catalog.name(id).as_ref());
         if client.requires_readiness() {
-            let budget = gat_io::remote_connect_timeout().map_err(|source| RemoteSessionError {
-                source: Arc::new(crate::remote_open::RemoteOpenError::from_io(
-                    catalog.url(id),
-                    source.into(),
-                )),
-            })?;
+            let budget = options.readiness_timeout.duration();
             if let Some(progress) = progress {
                 progress.set_activity(ProgressActivity::Connecting);
             }
@@ -251,15 +263,19 @@ impl RemoteSession {
         Ok(client)
     }
 
-    pub(crate) fn validate(catalog: &RemoteCatalog, id: RemoteId) -> Result<()> {
-        gat_io::RemoteClient::validate(catalog.url(id).as_template_str()).map_err(|source| {
-            RemoteSessionError {
+    pub(crate) fn validate(
+        catalog: &RemoteCatalog,
+        id: RemoteId,
+        resolver: &gat_io::TemplateResolver,
+    ) -> Result<()> {
+        gat_io::RemoteClient::validate(catalog.url(id).as_template_str(), resolver).map_err(
+            |source| RemoteSessionError {
                 source: Arc::new(crate::remote_open::RemoteOpenError::from_io(
                     catalog.url(id),
                     source,
                 )),
-            }
-        })
+            },
+        )
     }
 }
 

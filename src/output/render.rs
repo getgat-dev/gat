@@ -118,6 +118,7 @@ fn config_scalar_line(value: &gat_command::ConfigScalarValue) -> UserLine {
     match value {
         gat_command::ConfigScalarValue::CacheLocation(value) => UserLine::path(value.as_path()),
         gat_command::ConfigScalarValue::Path(value) => UserLine::path(value),
+        gat_command::ConfigScalarValue::Unsigned(value) => UserLine::number(i64::from(*value)),
         gat_command::ConfigScalarValue::IngestStrategy(value) => {
             UserLine::identifier(&value.to_string())
         }
@@ -132,7 +133,7 @@ fn config_scalar_line(value: &gat_command::ConfigScalarValue) -> UserLine {
 
 fn render_config_values(
     output: &mut Output<'_>,
-    key: gat_core::config_keys::ConfigKey,
+    key: gat_core::config_keys::SettingKey,
     values: &[UserLine],
     source: gat_command::ConfigSource,
 ) -> Result<(), WriteFailure> {
@@ -154,9 +155,10 @@ fn render_config_values(
     let source = match source {
         gat_command::ConfigSource::Default => UserLine::authored("built-in default"),
         gat_command::ConfigSource::Scope(scope) => scope_line(scope),
-        gat_command::ConfigSource::CacheEnvironment => {
-            UserLine::authored("GAT_CACHE_DIR environment variable")
-        }
+        gat_command::ConfigSource::Environment(key) => UserLine::compose([
+            UserLine::identifier(&key.environment_name()),
+            UserLine::authored(" environment variable"),
+        ]),
     };
     let metadata = UserLine::compose([UserLine::authored("Source: "), source]);
     ui::paragraph(output, Stream::Stdout, &metadata, 2, ui::Emphasis::Muted)
@@ -368,7 +370,8 @@ fn render_saved_selection(
                 revealed_definition(output, *scope)?;
             }
         }
-        O::Default { record, chosen_in } => {
+        O::Default(default) => {
+            let record = default.as_ref().map(|default| &default.record);
             let mut fields = Vec::new();
             if let Some(record) = record {
                 fields.extend(selection_fields(record));
@@ -381,8 +384,8 @@ fn render_saved_selection(
                     |r| UserLine::identifier(r.name.as_str()),
                 ),
                 &fields,
-                *chosen_in,
-                record.as_ref().map(|record| record.scope),
+                default.as_ref().map(|default| default.chosen_in),
+                record.map(|record| record.scope),
             )?;
         }
     }
@@ -1140,21 +1143,17 @@ pub fn render(output: &mut Output<'_>, outcome: Outcome) -> Result<(), WriteFail
         }
         Outcome::Selection(outcome) => render_saved_selection(output, outcome)?,
         Outcome::Remote(outcome) => match outcome {
-            gat_command::RemoteOutcome::Default {
-                name,
-                chosen_in,
-                defined_in,
-            } => {
+            gat_command::RemoteOutcome::Default(default) => {
                 resource_details(
                     output,
                     "Default remote",
-                    name.as_ref().map_or_else(
+                    default.as_ref().map_or_else(
                         || UserLine::authored("none"),
-                        |n| UserLine::identifier(n.as_str()),
+                        |default| UserLine::identifier(default.name.as_str()),
                     ),
                     &[],
-                    *chosen_in,
-                    *defined_in,
+                    default.as_ref().map(|default| default.chosen_in),
+                    default.as_ref().and_then(|default| default.defined_in),
                 )?;
             }
             gat_command::RemoteOutcome::Show { record, scope } => {
@@ -1229,6 +1228,27 @@ pub fn render(output: &mut Output<'_>, outcome: Outcome) -> Result<(), WriteFail
             }
         },
         Outcome::Configured(outcome) => match outcome {
+            gat_command::ConfigOutcome::Masked { change, source } => {
+                render(output, Outcome::Configured((**change).clone()))?;
+                let source = match source {
+                    gat_command::ConfigSource::Environment(key) => {
+                        UserLine::identifier(&key.environment_name())
+                    }
+                    gat_command::ConfigSource::Scope(scope) => scope_line(*scope),
+                    gat_command::ConfigSource::Default => UserLine::authored("built-in default"),
+                };
+                ui::paragraph(
+                    output,
+                    Stream::Stderr,
+                    &UserLine::compose([
+                        UserLine::authored("Saved configuration is currently overridden by "),
+                        source,
+                    ]),
+                    0,
+                    ui::Emphasis::Normal,
+                )?;
+            }
+
             gat_command::ConfigOutcome::Value { key, value, source } => {
                 render_config_values(output, *key, &[config_scalar_line(value)], *source)?;
             }
@@ -1251,6 +1271,7 @@ pub fn render(output: &mut Output<'_>, outcome: Outcome) -> Result<(), WriteFail
                     gat_command::ConfigScalarValue::Path(value) => value.display().to_string(),
                     gat_command::ConfigScalarValue::IngestStrategy(value) => value.to_string(),
                     gat_command::ConfigScalarValue::Boolean(value) => value.to_string(),
+                    gat_command::ConfigScalarValue::Unsigned(value) => value.to_string(),
                     gat_command::ConfigScalarValue::ShardLevels(value) => value.get().to_string(),
                 };
                 render_message(
@@ -2148,7 +2169,7 @@ mod resource_hint_tests {
         let mut stdout = Vec::new();
         render_config_values(
             &mut Output::new(&mut stdout, &mut Vec::new()),
-            gat_core::config_keys::ConfigKey::GitIgnorePatterns,
+            gat_core::config_keys::SettingKey::GitIgnorePatterns,
             &[
                 UserLine::identifier("a,b"),
                 UserLine::identifier("data\nfiles"),
@@ -2480,7 +2501,7 @@ mod outcome_tests {
         render(
             &mut Output::new(&mut stdout, &mut stderr),
             Outcome::Configured(gat_command::ConfigOutcome::SetList {
-                key: gat_core::config_keys::ConfigKey::GitIgnorePatterns,
+                key: gat_core::config_keys::SettingKey::GitIgnorePatterns,
                 values: vec!["a,b".into(), "data files".into()],
             }),
         )

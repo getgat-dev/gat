@@ -94,8 +94,7 @@ pub fn remote_add_with_default(
         gat_command::remote(
             repo,
             gat_command::RemoteRequest::Default {
-                name: Some(name.into()),
-                unset: false,
+                action: gat_engine::DefaultAction::Set(name.into()),
                 scope: gat_core::config::ConfigScope::Project,
             },
         )?;
@@ -146,16 +145,12 @@ pub fn remove(
 /// exclusively beneath its own owned temporary directory, and none of
 /// them ever depend on: the caller's current directory; any
 /// pre-existing repository state; the developer/CI machine's real
-/// `$HOME`/`%USERPROFILE%`; the `GAT_CACHE_DIR` environment variable; a
+/// `$HOME`/`%USERPROFILE%`; the `GAT_CACHE_LOCATION` environment variable; a
 /// real, ambient global Gat configuration (`~/.gat/gat.yaml`); or the
 /// developer/CI machine's real global/system Git configuration
 /// (`~/.gitconfig`/`/etc/gitconfig`). [`TestRepo::empty_gat_repo`] and
-/// [`TestRepo::gat_repo`] specifically achieve this by routing their
-/// in-process `gat init` through
-/// [`gat_command::init_with_cache_resolution`]'s explicit
-/// `cache_dir_override`/`global_config_dir` inputs (see
-/// `GatInitContext`) rather than gat's ordinary, ambient-environment-
-/// reading `gat_command::init`; every `git`/subprocess invocation
+/// [`TestRepo::gat_repo`] construct an invocation from explicit empty inputs;
+/// every Git subprocess invocation
 /// these fixtures make goes through [`run_git`]/[`test_support_git::GitCommand`], which
 /// isolate global/system Git config the same way (see
 /// [`test_support_git::isolated_gitconfig`]). That same `gat init` opens the repository
@@ -170,64 +165,16 @@ pub struct TestRepo {
     cache_dir: Option<String>,
 }
 
-/// Deterministic, fixture-owned inputs for `gat init`'s cache/global-
-/// config resolution (see [`gat_command::init_with_cache_resolution`]),
-/// used in place of the real process `$HOME`/`%USERPROFILE%` and
-/// `GAT_CACHE_DIR` so [`TestRepo::empty_gat_repo`]/[`TestRepo::gat_repo`]
-/// are fully hermetic regardless of the developer/CI machine's ambient
-/// state: no accidental read of a real `~/.gat/gat.yaml`, no accidental
-/// relocation via a `GAT_CACHE_DIR` the test process happens to have
-/// inherited, and no mutation of the current process's environment
-/// (which would be unsound for parallel tests).
-///
-/// Owns a `TempDir` standing in for a fake home directory so the
-/// resolved global-config directory (`<fake_home>/.gat`) is a real,
-/// inspectable, but otherwise empty path -- not merely `None` -- and
-/// deliberately passes no `GAT_CACHE_DIR`-style override, so cache
-/// resolution falls through to gat's own deterministic
-/// `<repo>/.gat/objects` default exactly as a real `gat init` would with
-/// no relocation configured anywhere.
-struct GatInitContext {
-    // Kept alive only for the duration of the `gat init` call itself;
-    // nothing reads it afterward, so it does not need to outlive this
-    // struct.
-    _fake_home: tempfile::TempDir,
-    global_config_dir: PathBuf,
-}
-
-impl GatInitContext {
-    fn new() -> Self {
-        let fake_home = tempfile::tempdir().expect("creating TestRepo fixture's fake-home tempdir");
-        let global_config_dir = fake_home.path().join(".gat");
-        Self {
-            _fake_home: fake_home,
-            global_config_dir,
-        }
-    }
-}
-
-/// Runs `gat init` in-process against `repo` through the explicit-input
-/// entry point ([`gat_command::init_with_cache_resolution`]) instead of
-/// [`gat_command::init`], so this fixture's `gat init` never reads
-/// ambient `HOME`/`USERPROFILE`/`GAT_CACHE_DIR` (see `GatInitContext`).
-/// Returns the resolved cache directory `init_with_cache_resolution`
-/// itself produced, so callers can assert on it directly (see
-/// [`TestRepo::cache_dir`]) instead of re-deriving it through an
-/// ambient-reading wrapper.
+/// Initializes a fixture using exactly the same explicit invocation path as production.
 fn run_gat_init(repo: &TestRepo) -> String {
-    let gat_repo = gat_engine::Repository::at(repo.path().to_path_buf());
-    let ctx = GatInitContext::new();
-    gat_command::init_with_cache_resolution(
-        &gat_repo,
-        gat_command::InitRequest::default(),
-        None,
-        Some(ctx.global_config_dir),
-    )
-    .expect("gat init in TestRepo fixture")
-    .cache_location
-    .display_path()
-    .display()
-    .to_string()
+    let invocation = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0]).unwrap();
+    let repo = invocation.repository_at(repo.path().to_path_buf());
+    gat_command::init(&repo, gat_command::InitRequest::default())
+        .expect("gat init in TestRepo fixture")
+        .cache_location
+        .display_path()
+        .display()
+        .to_string()
 }
 
 impl TestRepo {
@@ -256,7 +203,7 @@ impl TestRepo {
     }
 
     /// [`Self::empty_git_repo`] plus `gat init` run in-process against the
-    /// real production entry point ([`gat_command::init_with_cache_resolution`])
+    /// real production entry point ([`gat_command::init`])
     /// -- exercising the same initialization code path a spawned `gat
     /// init` would, without spawning a process. Unlike [`Self::gat_repo`],
     /// this has no commits yet, matching what a real `git init && gat
@@ -264,7 +211,7 @@ impl TestRepo {
     ///
     /// Fully hermetic: never reads (or depends on the presence/absence
     /// of) the developer/CI machine's real `$HOME`/`%USERPROFILE%`,
-    /// `GAT_CACHE_DIR`, or global Gat configuration; see `GatInitContext`.
+    /// `GAT_CACHE_LOCATION`, or global Gat configuration; see `Invocation`.
     #[must_use]
     pub fn empty_gat_repo() -> Self {
         let mut repo = Self::empty_git_repo();
@@ -274,13 +221,13 @@ impl TestRepo {
 
     /// [`Self::git_repo_with_initial_commit`] plus `gat init` run
     /// in-process against the real production entry point
-    /// ([`gat_command::init_with_cache_resolution`]) -- exercising the
+    /// ([`gat_command::init`]) -- exercising the
     /// same initialization code path a spawned `gat init` would, without
     /// spawning a process.
     ///
     /// Fully hermetic: never reads (or depends on the presence/absence
     /// of) the developer/CI machine's real `$HOME`/`%USERPROFILE%`,
-    /// `GAT_CACHE_DIR`, or global Gat configuration; see `GatInitContext`.
+    /// `GAT_CACHE_LOCATION`, or global Gat configuration; see `Invocation`.
     #[must_use]
     pub fn gat_repo() -> Self {
         let mut repo = Self::git_repo_with_initial_commit();

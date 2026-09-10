@@ -38,15 +38,12 @@ pub(crate) enum LocalTransferError {
     Task(#[source] tokio::task::JoinError),
 }
 
-pub(crate) enum RemoteLease {
-    Presence {
-        _global: tokio::sync::OwnedSemaphorePermit,
-        _remote: tokio::sync::OwnedSemaphorePermit,
-    },
-    Transfer {
-        _lease: admission::TransferLease,
-    },
+/// Presence admission cannot be used as evidence of transfer admission.
+pub(crate) struct PresenceLease {
+    _global: tokio::sync::OwnedSemaphorePermit,
+    _remote: tokio::sync::OwnedSemaphorePermit,
 }
+pub(crate) use admission::TransferLease;
 
 /// One remote-I/O job bundled with the exact opened [`RemoteHandle`] whose
 /// scheduling budget it must acquire and whose operator it must use. Carrying
@@ -163,20 +160,20 @@ impl RemoteExecutor {
             result = future => Ok(result),
         }
     }
-    pub(crate) fn try_presence(&self, id: RemoteId) -> Option<RemoteLease> {
+    pub(crate) fn try_presence(&self, id: RemoteId) -> Option<PresenceLease> {
         let remote = self
             .presence
             .per_remote_semaphore(id)
             .try_acquire_owned()
             .ok()?;
         let global = self.presence.global.clone().try_acquire_owned().ok()?;
-        Some(RemoteLease::Presence {
+        Some(PresenceLease {
             _global: global,
             _remote: remote,
         })
     }
 
-    pub(crate) async fn acquire_presence(&self, id: RemoteId) -> Result<RemoteLease, ()> {
+    pub(crate) async fn acquire_presence(&self, id: RemoteId) -> Result<PresenceLease, ()> {
         let remote = self
             .cancellable(self.presence.per_remote_semaphore(id).acquire_owned())
             .await?
@@ -185,16 +182,14 @@ impl RemoteExecutor {
             .cancellable(self.presence.global.clone().acquire_owned())
             .await?
             .expect("presence budget remains open");
-        Ok(RemoteLease::Presence {
+        Ok(PresenceLease {
             _global: global,
             _remote: remote,
         })
     }
 
-    pub(crate) fn try_transfer(&self, id: RemoteId, bytes: usize) -> Option<RemoteLease> {
-        self.transfer
-            .try_acquire(id, bytes)
-            .map(|lease| RemoteLease::Transfer { _lease: lease })
+    pub(crate) fn try_transfer(&self, id: RemoteId, bytes: usize) -> Option<TransferLease> {
+        self.transfer.try_acquire(id, bytes)
     }
 
     pub(crate) fn forget_transfer_waiter(&self, id: RemoteId) {
@@ -302,12 +297,15 @@ impl RemoteExecutor {
         use futures::{StreamExt, stream::FuturesUnordered};
         use std::collections::VecDeque;
         let mut queues = Vec::<(RemoteId, VecDeque<usize>)>::new();
+        let mut positions = std::collections::BTreeMap::new();
         for (index, job) in jobs.iter().enumerate() {
-            if let Some((_, queue)) = queues.iter_mut().find(|(id, _)| *id == job.handle.id()) {
-                queue.push_back(index);
-            } else {
-                queues.push((job.handle.id(), VecDeque::from([index])));
-            }
+            let id = job.handle.id();
+            let position = *positions.entry(id).or_insert_with(|| {
+                let position = queues.len();
+                queues.push((id, VecDeque::new()));
+                position
+            });
+            queues[position].1.push_back(index);
         }
         let mut active = FuturesUnordered::new();
         let mut results: Vec<Option<R>> = (0..jobs.len()).map(|_| None).collect();
@@ -939,8 +937,7 @@ mod tests {
     }
 
     /// Deliberately make later-indexed jobs finish
-    /// *before* earlier-indexed ones (index 0 sleeps longest, the last
-    /// index doesn't sleep at all) and assert the returned result order
+    /// *before* earlier-indexed ones using explicit completion gates and assert the returned result order
     /// still follows semantic input order, not completion order.
     #[test]
     fn run_ordered_preserves_input_order_under_reversed_completion_order() {
@@ -948,13 +945,14 @@ mod tests {
             let executor = executor(8, 8);
             let (_dir, remote_of) = remotes(&["a", "b", "c", "d", "e"]);
             let total = remote_of.len();
+            let (completed, _) = tokio::sync::watch::channel(total);
             let results = executor.run_transfer_window(&remote_of, move |_handle, i| {
                 let i = *i;
+                let completed = completed.clone();
+                let mut turn = completed.subscribe();
                 async move {
-                    // Reversed: index 0 sleeps the longest, so completion
-                    // order is exactly the reverse of input order.
-                    let delay_ms = (total - i) as u64 * 5;
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    turn.wait_for(|next| *next == i + 1).await.unwrap();
+                    completed.send_replace(i);
                     i
                 }
             });
@@ -975,15 +973,15 @@ mod tests {
         with_runtime(|| {
             let executor = executor(8, 8);
             let (_dir, remote_of) = remotes(&["a", "b", "c"]);
+            let (completed, _) = tokio::sync::watch::channel(3);
             let results: Vec<Result<usize, String>> =
                 executor.run_transfer_window(&remote_of, |_handle, i| {
                     let i = *i;
+                    let completed = completed.clone();
+                    let mut turn = completed.subscribe();
                     async move {
-                        // Index 0 sleeps longest (finishes last) but must
-                        // still be reported first if `results` is consumed
-                        // in input order.
-                        let delay_ms = (3 - i) as u64 * 5;
-                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        turn.wait_for(|next| *next == i + 1).await.unwrap();
+                        completed.send_replace(i);
                         if i == 0 {
                             Err(format!("job {i} failed"))
                         } else {
@@ -1013,10 +1011,7 @@ mod tests {
                 async move {
                     let now = current.fetch_add(1, Ordering::SeqCst) + 1;
                     peak.fetch_max(now, Ordering::SeqCst);
-                    // sleep-ok: elapsed job duration is the actual property
-                    // under test here (observed peak concurrency over
-                    // overlapping "durations"), not a synchronization delay.
-                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    tokio::task::yield_now().await;
                     current.fetch_sub(1, Ordering::SeqCst);
                 }
             });
@@ -1044,8 +1039,7 @@ mod tests {
                 async move {
                     let now = current.fetch_add(1, Ordering::SeqCst) + 1;
                     peak.fetch_max(now, Ordering::SeqCst);
-                    // sleep-ok: see above.
-                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    tokio::task::yield_now().await;
                     current.fetch_sub(1, Ordering::SeqCst);
                 }
             });
@@ -1071,23 +1065,32 @@ mod tests {
                 .zip(names)
                 .map(|(handle, name)| RemoteJob::new(handle, name))
                 .collect();
-            let completion_order: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-            let _ = executor.run_transfer_window(&jobs, |_: &RemoteHandle, remote| {
-                let completion_order = Arc::clone(&completion_order);
-                let remote = remote.to_string();
-                async move {
-                    if remote == "slow" {
-                        // sleep-ok: elapsed job duration is the actual
-                        // property under test here (a slow remote's jobs
-                        // must not starve a fast remote's), not a
-                        // synchronization delay.
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                    }
-                    completion_order.lock().unwrap().push(remote);
-                }
+            let completion_order: Arc<Mutex<Vec<&str>>> = Arc::default();
+            let (finished, fast_finished) = tokio::sync::watch::channel(false);
+            tokio::runtime::Handle::current().block_on(async {
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    executor.run_transfer_window_async(&jobs, |_: &RemoteHandle, remote| {
+                        let completion_order = Arc::clone(&completion_order);
+                        let mut fast_finished = fast_finished.clone();
+                        let finished = finished.clone();
+                        let remote = *remote;
+                        async move {
+                            if remote == "slow" {
+                                fast_finished.wait_for(|done| *done).await.unwrap();
+                            }
+                            completion_order.lock().unwrap().push(remote);
+                            if remote == "fast" {
+                                finished.send_replace(true);
+                            }
+                        }
+                    }),
+                )
+                .await
+                .expect("scheduler must admit the fast remote while slow work is blocked");
             });
             let order = completion_order.lock().unwrap();
-            let fast_pos = order.iter().position(|r| r == "fast").unwrap();
+            let fast_pos = order.iter().position(|r| *r == "fast").unwrap();
             assert!(
                 fast_pos < order.len() - 1,
                 "the fast remote's single job must not be stuck behind every slow-remote job: \
@@ -1169,8 +1172,7 @@ mod tests {
                 async move {
                     let now = current.fetch_add(1, Ordering::SeqCst) + 1;
                     peak.fetch_max(now, Ordering::SeqCst);
-                    // sleep-ok: see other concurrency tests above.
-                    tokio::time::sleep(Duration::from_millis(2)).await;
+                    tokio::task::yield_now().await;
                     current.fetch_sub(1, Ordering::SeqCst);
                     i
                 }
@@ -1217,7 +1219,7 @@ mod tests {
                     async move {
                         let now = concurrent.fetch_add(1, Ordering::SeqCst) + 1;
                         max_seen.fetch_max(now, Ordering::SeqCst);
-                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        tokio::task::yield_now().await;
                         concurrent.fetch_sub(1, Ordering::SeqCst);
                     }
                 });
@@ -1243,7 +1245,7 @@ mod tests {
     /// just one call:
     ///
     /// - remote concurrency never exceeds the session's configured global
-    ///   limit in any window, including under reversed completion order;
+    ///   limit in any window, including while admitted jobs overlap;
     /// - each window's result order still follows semantic input order
     ///   despite later-indexed jobs finishing before earlier ones;
     /// - each `run_window` call's returned `Vec` is exactly that window's
@@ -1270,11 +1272,8 @@ mod tests {
                     async move {
                         let now = current.fetch_add(1, Ordering::SeqCst) + 1;
                         peak.fetch_max(now, Ordering::SeqCst);
-                        // Reversed completion order within this window:
-                        // index 0 sleeps longest, the last index doesn't
-                        // sleep at all.
-                        let delay_ms = (total - i) as u64 * 3;
-                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        // Allow admitted jobs to overlap without a wall-clock delay.
+                        tokio::task::yield_now().await;
                         current.fetch_sub(1, Ordering::SeqCst);
                         i
                     }
@@ -1320,10 +1319,7 @@ mod tests {
         let body = |current: Arc<AtomicUsize>, peak: Arc<AtomicUsize>| async move {
             let now = current.fetch_add(1, Ordering::SeqCst) + 1;
             peak.fetch_max(now, Ordering::SeqCst);
-            // sleep-ok: elapsed job duration is the actual property
-            // under test (combined observed peak concurrency across
-            // both entry points), not a synchronization delay.
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::task::yield_now().await;
             current.fetch_sub(1, Ordering::SeqCst);
         };
 
@@ -1474,8 +1470,7 @@ mod tests {
                     rt.block_on(executor.run_transfer_one(&job, |_handle, _| async move {
                         let now = current.fetch_add(1, Ordering::SeqCst) + 1;
                         peak.fetch_max(now, Ordering::SeqCst);
-                        // sleep-ok: see other concurrency tests above.
-                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        tokio::task::yield_now().await;
                         current.fetch_sub(1, Ordering::SeqCst);
                     }));
                 })
@@ -1548,7 +1543,7 @@ mod tests {
                     executor.run_presence_one(job, move |_handle, _| async move {
                         let now = current.fetch_add(1, Ordering::SeqCst) + 1;
                         peak.fetch_max(now, Ordering::SeqCst);
-                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        tokio::task::yield_now().await;
                         current.fetch_sub(1, Ordering::SeqCst);
                     })
                 });
@@ -1558,7 +1553,7 @@ mod tests {
                     executor.run_transfer_one(job, move |_handle, _| async move {
                         let now = current.fetch_add(1, Ordering::SeqCst) + 1;
                         peak.fetch_max(now, Ordering::SeqCst);
-                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        tokio::task::yield_now().await;
                         current.fetch_sub(1, Ordering::SeqCst);
                     })
                 });

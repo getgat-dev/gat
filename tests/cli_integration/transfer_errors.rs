@@ -364,53 +364,40 @@ fn successful_push_and_fetch_never_mention_backend_internals_on_stderr() {
 }
 
 #[test]
-fn invalid_connect_timeout_is_rejected_only_when_network_io_is_needed() {
+fn invalid_network_settings_fail_before_any_repository_work() {
     use crate::common::gat_with_env;
     let tmp = init_repo();
-    let dir = tmp.path();
-    let env = [("GAT_CONNECT_TIMEOUT", Some("SYNTHETIC-SECRET"))];
-    // hygiene-ok: construction-only fixture; the invalid timeout prevents network I/O.
-    let url = "s3://fixture/root?region=fixture";
+    let env = [(
+        "GAT_NETWORK_READINESS_TIMEOUT_SECONDS",
+        Some("SYNTHETIC-SECRET"),
+    )];
+    for args in [&["status"][..], &["config", "cache.location"][..]] {
+        let out = gat_with_env(tmp.path(), args, &env);
+        assert!(!out.status.success());
+        let err = stderr(&out);
+        assert!(
+            err.contains("GAT_NETWORK_READINESS_TIMEOUT_SECONDS"),
+            "{err}"
+        );
+        assert!(!err.contains("SYNTHETIC-SECRET"), "{err}");
+        assert_no_internal_wording(&err);
+    }
     assert_ok(
-        &gat_with_env(dir, &["remote", "add", "origin", url], &env),
-        "network-free remote validation",
+        &gat_with_env(tmp.path(), &["--help"], &env),
+        "help bypasses environment validation",
     );
-    assert_ok(
-        &gat_with_env(dir, &["status", "--remote", "origin"], &env),
-        "empty selection does not need readiness",
-    );
-    std::fs::write(dir.join("data.bin"), b"payload").unwrap();
-    assert_ok(&gat(dir, &["add", "data.bin"]), "gat add");
-    let out = gat_with_env(dir, &["push", "--remote", "origin"], &env);
-    assert!(!out.status.success());
-    let err = stderr(&out);
-    assert!(err.contains("Invalid GAT_CONNECT_TIMEOUT"), "{err}");
-    assert!(err.contains("positive whole number of seconds"), "{err}");
-    assert!(!err.contains("SYNTHETIC-SECRET"), "{err}");
-    assert_no_internal_wording(&err);
 }
 
 #[test]
-fn file_remote_ignores_connect_timeout_override() {
+fn removed_timeout_name_has_no_effect() {
     use crate::common::gat_with_env;
     let tmp = init_repo();
-    let dir = tmp.path();
-    let remote_dir = tempfile::tempdir().unwrap();
-    assert_ok(
-        &gat(
-            dir,
-            &["remote", "add", "origin", &remote_url(remote_dir.path())],
-        ),
-        "gat remote add",
-    );
-    std::fs::write(dir.join("data.bin"), b"payload").unwrap();
-    assert_ok(&gat(dir, &["add", "data.bin"]), "gat add");
     assert_ok(
         &gat_with_env(
-            dir,
-            &["push", "--remote", "origin"],
+            tmp.path(),
+            &["status"],
             &[("GAT_CONNECT_TIMEOUT", Some("invalid"))],
         ),
-        "file push ignores network timeout override",
+        "removed timeout ignored",
     );
 }

@@ -376,7 +376,9 @@ mod tests {
     #[test]
     fn lifecycle_is_observed_before_validation_fails() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = Repository::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let observed = std::cell::Cell::new(false);
 
         let error = system_with_lifecycle_observer(
@@ -400,7 +402,9 @@ mod tests {
     #[test]
     fn cache_inspection_loads_config_once_without_registering_cache_usage() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = Repository::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let before_loads = gat_engine::test_support::config_loads();
         let before_resolutions = gat_engine::test_support::cache_location_resolutions();
 
@@ -424,7 +428,9 @@ mod tests {
     fn all_scope_reports_the_exact_domain_total() {
         let tmp = tempfile::tempdir().unwrap();
         test_support_git::run_git(tmp.path(), &["init", "--quiet"]);
-        let repo = Repository::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let progress = RecordingProgress::default();
 
         system(
@@ -445,7 +451,9 @@ mod tests {
     #[test]
     fn one_domain_scope_reports_a_total_of_one() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = Repository::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let progress = RecordingProgress::default();
 
         system(
@@ -466,7 +474,9 @@ mod tests {
     #[test]
     fn inspect_stops_progress_before_the_first_failing_domain() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = Repository::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let progress = RecordingProgress::default();
 
         system(
@@ -487,7 +497,9 @@ mod tests {
     #[test]
     fn repair_stops_progress_before_the_first_failing_domain() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = Repository::at(tmp.path().to_path_buf());
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let progress = RecordingProgress::default();
 
         system(

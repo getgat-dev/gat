@@ -112,9 +112,6 @@ pub fn repair_problem(err: Arc<gat_command::RepairError>) -> UserProblem {
         RepairError::DataPlane(source) => match source {
             gat_engine::RepairError::Cancelled => "repair cancelled",
             gat_engine::RepairError::RemoteOpen { source, .. } => match source.kind() {
-                gat_engine::RemoteOpenFailureKind::InvalidConnectTimeout => {
-                    "GAT_CONNECT_TIMEOUT must be a positive whole number of seconds"
-                }
                 gat_engine::RemoteOpenFailureKind::ReadinessTimedOut { .. } => {
                     "the remote readiness check timed out; check the credential provider and network access"
                 }

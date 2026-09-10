@@ -7,31 +7,97 @@ use gat_core::oid::Oid;
 use gat_core::selection::Selection;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use crate::lock::{LockError, LockStore};
 use crate::{PreparedGitWorktree, RepositoryLayout};
 
-pub const MOUNT_TXN_VERSION: u32 = 1;
+pub const MOUNT_TXN_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MountTxnOp {
+enum MountTxnOp {
     Add,
     Update,
     Remove,
 }
 
+/// Structurally valid publication operations. Remove cannot carry staged rows;
+/// add and update always carry their required targets.
+///
+/// ```compile_fail
+/// use gat_core::lexical_path::GatPath;
+/// use gat_io::MountTxnChange;
+/// let remove = MountTxnChange::Remove {
+///     target: GatPath::parse_canonical("models").unwrap(),
+///     row_windows: 1,
+/// };
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MountTxnChange {
+    Add {
+        target: GatPath,
+        row_windows: usize,
+    },
+    Update {
+        old_target: GatPath,
+        new_target: GatPath,
+        row_windows: usize,
+    },
+    Remove {
+        target: GatPath,
+    },
+}
+impl MountTxnChange {
+    #[must_use]
+    pub const fn row_windows(&self) -> usize {
+        match self {
+            Self::Add { row_windows, .. } | Self::Update { row_windows, .. } => *row_windows,
+            Self::Remove { .. } => 0,
+        }
+    }
+    #[must_use]
+    pub const fn old_target(&self) -> Option<&GatPath> {
+        match self {
+            Self::Update { old_target, .. } => Some(old_target),
+            Self::Remove { target } => Some(target),
+            Self::Add { .. } => None,
+        }
+    }
+    #[must_use]
+    pub const fn new_target(&self) -> Option<&GatPath> {
+        match self {
+            Self::Update { new_target, .. } => Some(new_target),
+            Self::Add { target, .. } => Some(target),
+            Self::Remove { .. } => None,
+        }
+    }
+    const fn operation(&self) -> MountTxnOp {
+        match self {
+            Self::Add { .. } => MountTxnOp::Add,
+            Self::Update { .. } => MountTxnOp::Update,
+            Self::Remove { .. } => MountTxnOp::Remove,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MountTxnPhase {
+    /// Configuration and desired rows may be incomplete; replay uses staged rows.
+    Publish,
+    /// Publication is durable; only derived excludes and journal cleanup remain.
+    Regenerate,
+}
+
 #[derive(Debug, Clone)]
 pub struct MountTxnRecord {
-    pub version: u32,
-    pub op: MountTxnOp,
+    pub change: MountTxnChange,
     pub scope: ConfigScope,
     pub name: MountName,
-    pub old_target: Option<GatPath>,
-    pub new_target: Option<GatPath>,
     pub post_config: Config,
     pub pre_config: Config,
-    pub row_windows: usize,
+    pub shard_levels: gat_core::lock::LockShardLevels,
+    pub phase: MountTxnPhase,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,8 +124,6 @@ pub enum MountJournalValidationError {
     RemoveHasNewTarget,
     #[error("a remove transaction unexpectedly names staged row windows")]
     RemoveHasStagedWindows,
-    #[error("staged row window size is zero")]
-    ZeroWindowSize,
     #[error("staged row window {window} is missing")]
     MissingStagedWindow { window: usize },
     #[error("staged-row storage contains an undeclared entry")]
@@ -76,11 +140,13 @@ struct EncodedMountTxnRecord<'a> {
     op: MountTxnOp,
     scope: &'static str,
     name: &'a MountName,
-    old_target: &'a Option<GatPath>,
-    new_target: &'a Option<GatPath>,
+    old_target: Option<&'a GatPath>,
+    new_target: Option<&'a GatPath>,
     post_config: &'a Config,
     pre_config: &'a Config,
     row_windows: usize,
+    shard_levels: gat_core::lock::LockShardLevels,
+    published: bool,
 }
 
 #[derive(Deserialize)]
@@ -94,6 +160,8 @@ struct DecodedMountTxnRecord {
     post_config: Config,
     pre_config: Config,
     row_windows: usize,
+    shard_levels: gat_core::lock::LockShardLevels,
+    published: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -214,38 +282,49 @@ impl MountJournal {
                 path: path.clone(),
                 tag: decoded.scope.clone(),
             })?;
+        let change = decode_change(
+            &path,
+            decoded.op,
+            decoded.old_target,
+            decoded.new_target,
+            decoded.row_windows,
+        )?;
         let record = MountTxnRecord {
-            version: decoded.version,
-            op: decoded.op,
+            change,
             scope,
             name: decoded.name,
-            old_target: decoded.old_target,
-            new_target: decoded.new_target,
             post_config: decoded.post_config,
             pre_config: decoded.pre_config,
-            row_windows: decoded.row_windows,
+            shard_levels: decoded.shard_levels,
+            phase: if decoded.published {
+                MountTxnPhase::Regenerate
+            } else {
+                MountTxnPhase::Publish
+            },
         };
-        validate_record_shape(&path, &record)?;
-        self.validate_staged_files(record.row_windows)?;
-        for window in self.validated_staged_windows(&record) {
-            window?;
+        if record.phase == MountTxnPhase::Publish {
+            self.validate_staged_files(record.change.row_windows())?;
+            for window in self.validated_staged_windows(&record) {
+                window?;
+            }
         }
         Ok(Some(record))
     }
 
     pub fn write(&self, record: &MountTxnRecord) -> Result<()> {
         let path = self.path();
-        validate_record_shape(&path, record)?;
         let encoded = EncodedMountTxnRecord {
-            version: record.version,
-            op: record.op,
+            version: MOUNT_TXN_VERSION,
+            op: record.change.operation(),
             scope: encode_scope(record.scope),
             name: &record.name,
-            old_target: &record.old_target,
-            new_target: &record.new_target,
+            old_target: record.change.old_target(),
+            new_target: record.change.new_target(),
             post_config: &record.post_config,
             pre_config: &record.pre_config,
-            row_windows: record.row_windows,
+            row_windows: record.change.row_windows(),
+            shard_levels: record.shard_levels,
+            published: record.phase == MountTxnPhase::Regenerate,
         };
         let body = serde_json::to_string_pretty(&encoded)
             .map_err(|source| MountJournalError::serde("serializing", &path, source))?;
@@ -305,8 +384,8 @@ impl MountJournal {
         StagedWindows {
             journal: self,
             next: 0,
-            count: record.row_windows,
-            target: record.new_target.as_ref(),
+            count: record.change.row_windows(),
+            target: record.change.new_target(),
         }
     }
 
@@ -318,21 +397,9 @@ impl MountJournal {
         source: &PreparedGitWorktree,
         selection: &Selection,
         target: &GatPath,
-        window_size: usize,
+        window_size: NonZeroUsize,
     ) -> Result<usize> {
         self.stage_selected_root(source.root(), selection, target, window_size)
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn stage_selected_layout(
-        &self,
-        source: &RepositoryLayout,
-        selection: &Selection,
-        target: &GatPath,
-        window_size: usize,
-    ) -> Result<usize> {
-        self.stage_selected_root(source.root_path(), selection, target, window_size)
     }
 
     fn stage_selected_root(
@@ -340,14 +407,9 @@ impl MountJournal {
         source_root: &Path,
         selection: &Selection,
         target: &GatPath,
-        window_size: usize,
+        window_size: NonZeroUsize,
     ) -> Result<usize> {
-        if window_size == 0 {
-            return Err(MountJournalError::invalid(
-                self.staged_rows_dir(),
-                MountJournalValidationError::ZeroWindowSize,
-            ));
-        }
+        let window_size = window_size.get();
         self.reset_staged_rows()?;
         let exact_source_path = selection
             .has_no_glob_filter()
@@ -499,34 +561,40 @@ impl Iterator for StagedWindows<'_> {
 
 impl ExactSizeIterator for StagedWindows<'_> {}
 
-fn validate_record_shape(path: &Path, record: &MountTxnRecord) -> Result<()> {
-    let invalid = match record.op {
-        MountTxnOp::Add if record.old_target.is_some() => {
-            Some(MountJournalValidationError::AddHasOldTarget)
+fn decode_change(
+    path: &Path,
+    op: MountTxnOp,
+    old: Option<GatPath>,
+    new: Option<GatPath>,
+    windows: usize,
+) -> Result<MountTxnChange> {
+    use MountJournalValidationError as E;
+    let invalid = |reason| MountJournalError::invalid(path, reason);
+    match op {
+        MountTxnOp::Add => {
+            if old.is_some() {
+                return Err(invalid(E::AddHasOldTarget));
+            }
+            Ok(MountTxnChange::Add {
+                target: new.ok_or_else(|| invalid(E::AddMissingNewTarget))?,
+                row_windows: windows,
+            })
         }
-        MountTxnOp::Add if record.new_target.is_none() => {
-            Some(MountJournalValidationError::AddMissingNewTarget)
+        MountTxnOp::Update => Ok(MountTxnChange::Update {
+            old_target: old.ok_or_else(|| invalid(E::UpdateMissingOldTarget))?,
+            new_target: new.ok_or_else(|| invalid(E::UpdateMissingNewTarget))?,
+            row_windows: windows,
+        }),
+        MountTxnOp::Remove => {
+            let target = old.ok_or_else(|| invalid(E::RemoveMissingOldTarget))?;
+            if new.is_some() {
+                return Err(invalid(E::RemoveHasNewTarget));
+            }
+            if windows != 0 {
+                return Err(invalid(E::RemoveHasStagedWindows));
+            }
+            Ok(MountTxnChange::Remove { target })
         }
-        MountTxnOp::Update if record.old_target.is_none() => {
-            Some(MountJournalValidationError::UpdateMissingOldTarget)
-        }
-        MountTxnOp::Update if record.new_target.is_none() => {
-            Some(MountJournalValidationError::UpdateMissingNewTarget)
-        }
-        MountTxnOp::Remove if record.old_target.is_none() => {
-            Some(MountJournalValidationError::RemoveMissingOldTarget)
-        }
-        MountTxnOp::Remove if record.new_target.is_some() => {
-            Some(MountJournalValidationError::RemoveHasNewTarget)
-        }
-        MountTxnOp::Remove if record.row_windows != 0 => {
-            Some(MountJournalValidationError::RemoveHasStagedWindows)
-        }
-        _ => None,
-    };
-    match invalid {
-        Some(reason) => Err(MountJournalError::invalid(path, reason)),
-        None => Ok(()),
     }
 }
 
@@ -573,15 +641,16 @@ mod tests {
 
     fn record() -> MountTxnRecord {
         MountTxnRecord {
-            version: MOUNT_TXN_VERSION,
-            op: MountTxnOp::Add,
+            change: MountTxnChange::Add {
+                target: GatPath::parse_canonical("data").unwrap(),
+                row_windows: 0,
+            },
             scope: ConfigScope::Project,
             name: MountName::from_string("data".to_string()),
-            old_target: None,
-            new_target: Some(GatPath::from_canonical_string("data".to_string()).unwrap()),
             post_config: Config::default(),
             pre_config: Config::default(),
-            row_windows: 0,
+            shard_levels: gat_core::lock::LockShardLevels::FLAT,
+            phase: MountTxnPhase::Publish,
         }
     }
 
@@ -623,12 +692,11 @@ mod tests {
         let text = std::fs::read_to_string(journal.path()).unwrap();
         assert!(text.contains("\"scope\": \"project\""));
         let decoded = journal.read().unwrap().unwrap();
-        assert_eq!(decoded.version, MOUNT_TXN_VERSION);
-        assert_eq!(decoded.op, MountTxnOp::Add);
+        assert_eq!(decoded.change.operation(), MountTxnOp::Add);
         assert_eq!(decoded.scope, ConfigScope::Project);
         assert_eq!(decoded.name.as_str(), "data");
-        assert_eq!(decoded.new_target.unwrap().as_str(), "data");
-        assert_eq!(decoded.row_windows, 0);
+        assert_eq!(decoded.change.new_target().unwrap().as_str(), "data");
+        assert_eq!(decoded.change.row_windows(), 0);
     }
 
     #[test]
@@ -637,9 +705,11 @@ mod tests {
         let repository = layout(tmp.path());
         let journal = MountJournal::open(&repository);
 
-        let mut unsupported = record();
-        unsupported.version += 1;
-        journal.write(&unsupported).unwrap();
+        journal.write(&record()).unwrap();
+        let mut wire: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(journal.path()).unwrap()).unwrap();
+        wire["version"] = (MOUNT_TXN_VERSION + 1).into();
+        std::fs::write(journal.path(), serde_json::to_vec(&wire).unwrap()).unwrap();
         assert!(matches!(
             journal.read(),
             Err(MountJournalError::UnsupportedVersion { .. })
@@ -688,85 +758,61 @@ mod tests {
     }
 
     #[test]
-    fn operation_target_and_window_combinations_fail_closed() {
+    fn operation_target_and_window_combinations_fail_closed_at_decoding() {
+        use MountJournalValidationError as E;
+        let tmp = tempfile::tempdir().unwrap();
+        let journal = MountJournal::open(&layout(tmp.path()));
+        for (op, old, new, windows, expected) in [
+            ("Add", Some("data"), Some("data"), 0, E::AddHasOldTarget),
+            ("Add", None, None, 0, E::AddMissingNewTarget),
+            ("Update", None, Some("data"), 0, E::UpdateMissingOldTarget),
+            ("Update", Some("data"), None, 0, E::UpdateMissingNewTarget),
+            ("Remove", None, None, 0, E::RemoveMissingOldTarget),
+            (
+                "Remove",
+                Some("data"),
+                Some("data"),
+                0,
+                E::RemoveHasNewTarget,
+            ),
+            ("Remove", Some("data"), None, 1, E::RemoveHasStagedWindows),
+        ] {
+            journal.write(&record()).unwrap();
+            let mut wire: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(journal.path()).unwrap()).unwrap();
+            wire["op"] = op.into();
+            wire["old_target"] = old.into();
+            wire["new_target"] = new.into();
+            wire["row_windows"] = windows.into();
+            std::fs::write(journal.path(), serde_json::to_vec(&wire).unwrap()).unwrap();
+            assert!(
+                matches!(journal.read(), Err(MountJournalError::InvalidRecord { reason, .. }) if reason == expected)
+            );
+        }
+    }
+
+    #[test]
+    fn completed_publication_does_not_require_staged_rows() {
         let tmp = tempfile::tempdir().unwrap();
         let repository = layout(tmp.path());
         let journal = MountJournal::open(&repository);
-        let target = GatPath::parse_canonical("data").unwrap();
-
-        let mut add_with_old = record();
-        add_with_old.old_target = Some(target.clone());
+        let mut completed = record();
+        completed.change = MountTxnChange::Add {
+            target: GatPath::parse_canonical("data").unwrap(),
+            row_windows: 1,
+        };
+        completed.phase = MountTxnPhase::Regenerate;
+        journal.write(&completed).unwrap();
+        assert_eq!(
+            journal.read().unwrap().unwrap().phase,
+            MountTxnPhase::Regenerate
+        );
+        completed.phase = MountTxnPhase::Publish;
+        journal.write(&completed).unwrap();
         assert!(matches!(
-            journal.write(&add_with_old),
+            journal.read(),
             Err(MountJournalError::InvalidRecord {
-                reason: MountJournalValidationError::AddHasOldTarget,
-                ..
-            })
-        ));
-
-        let mut add_without_new = record();
-        add_without_new.new_target = None;
-        assert!(matches!(
-            journal.write(&add_without_new),
-            Err(MountJournalError::InvalidRecord {
-                reason: MountJournalValidationError::AddMissingNewTarget,
-                ..
-            })
-        ));
-
-        let mut update_without_old = record();
-        update_without_old.op = MountTxnOp::Update;
-        assert!(matches!(
-            journal.write(&update_without_old),
-            Err(MountJournalError::InvalidRecord {
-                reason: MountJournalValidationError::UpdateMissingOldTarget,
-                ..
-            })
-        ));
-
-        let mut update_without_new = record();
-        update_without_new.op = MountTxnOp::Update;
-        update_without_new.old_target = Some(target.clone());
-        update_without_new.new_target = None;
-        assert!(matches!(
-            journal.write(&update_without_new),
-            Err(MountJournalError::InvalidRecord {
-                reason: MountJournalValidationError::UpdateMissingNewTarget,
-                ..
-            })
-        ));
-
-        let mut remove_without_old = record();
-        remove_without_old.op = MountTxnOp::Remove;
-        remove_without_old.new_target = None;
-        assert!(matches!(
-            journal.write(&remove_without_old),
-            Err(MountJournalError::InvalidRecord {
-                reason: MountJournalValidationError::RemoveMissingOldTarget,
-                ..
-            })
-        ));
-
-        let mut remove_with_new = record();
-        remove_with_new.op = MountTxnOp::Remove;
-        remove_with_new.old_target = Some(target.clone());
-        assert!(matches!(
-            journal.write(&remove_with_new),
-            Err(MountJournalError::InvalidRecord {
-                reason: MountJournalValidationError::RemoveHasNewTarget,
-                ..
-            })
-        ));
-
-        let mut remove_with_rows = record();
-        remove_with_rows.op = MountTxnOp::Remove;
-        remove_with_rows.old_target = Some(target);
-        remove_with_rows.new_target = None;
-        remove_with_rows.row_windows = 1;
-        assert!(matches!(
-            journal.write(&remove_with_rows),
-            Err(MountJournalError::InvalidRecord {
-                reason: MountJournalValidationError::RemoveHasStagedWindows,
+                reason: MountJournalValidationError::MissingStagedWindow { window: 0 },
                 ..
             })
         ));
@@ -778,7 +824,10 @@ mod tests {
         let repository = layout(tmp.path());
         let journal = MountJournal::open(&repository);
         let mut missing = record();
-        missing.row_windows = 1;
+        missing.change = MountTxnChange::Add {
+            target: GatPath::parse_canonical("data").unwrap(),
+            row_windows: 1,
+        };
         journal.write(&missing).unwrap();
         assert!(matches!(
             journal.read(),
@@ -824,7 +873,10 @@ mod tests {
             )
             .unwrap();
         let mut transaction = record();
-        transaction.row_windows = 1;
+        transaction.change = MountTxnChange::Add {
+            target: GatPath::parse_canonical("data").unwrap(),
+            row_windows: 1,
+        };
         journal.write(&transaction).unwrap();
         assert!(matches!(
             journal.read(),

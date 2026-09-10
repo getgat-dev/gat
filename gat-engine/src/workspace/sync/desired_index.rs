@@ -43,8 +43,6 @@ use gat_core::lock::Lock;
 #[cfg(test)]
 use gat_core::lock::LockShardId;
 #[cfg(test)]
-use gat_io::RepoLock;
-#[cfg(test)]
 use gat_io::lock_race_test_hooks as race_test_hooks;
 use gat_io::{DesiredRefreshError, StateStore};
 
@@ -82,23 +80,6 @@ pub(crate) fn refresh(repo: &Repo, store: &mut StateStore) -> Result<RefreshResu
             DesiredRefreshError::Lock(err) => super::SyncError::from(err),
             DesiredRefreshError::State(err) => super::SyncError::from(err),
         })?;
-    Ok(RefreshResult {
-        desired_identity: refreshed.identity(),
-        shard_levels: refreshed.shard_levels(),
-    })
-}
-
-/// Refresh and pin one comparison's current desired-state view before the
-/// refresh lock is released.
-pub(crate) fn refresh_pinned(repo: &Repo, store: &mut StateStore) -> Result<RefreshResult> {
-    let refreshed =
-        store
-            .refresh_and_pin_desired_state(repo.layout())
-            .map_err(|err| match err {
-                DesiredRefreshError::Atomic(err) => super::SyncError::from(err),
-                DesiredRefreshError::Lock(err) => super::SyncError::from(err),
-                DesiredRefreshError::State(err) => super::SyncError::from(err),
-            })?;
     Ok(RefreshResult {
         desired_identity: refreshed.identity(),
         shard_levels: refreshed.shard_levels(),
@@ -169,7 +150,9 @@ mod tests {
     #[test]
     fn refresh_persists_identity_and_rows_derived_from_the_same_byte_buffer_on_a_content_change() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         let mut store = StateStore::open(repo.layout()).unwrap();
         refresh(&repo, &mut store).unwrap();
@@ -209,7 +192,9 @@ mod tests {
     #[test]
     fn refresh_indexes_a_flat_lock_as_one_shard() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         let mut store = StateStore::open(repo.layout()).unwrap();
 
@@ -227,11 +212,13 @@ mod tests {
     #[test]
     fn pinned_refresh_keeps_the_comparison_on_one_desired_generation() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
-        let mut reader = StateStore::open(repo.layout()).unwrap();
-
-        let refreshed = refresh_pinned(&repo, &mut reader).unwrap();
+        let (_, reader, refreshed) =
+            crate::repo_snapshot::recover_and_pin_state(&repo, &gat_core::progress::NoopProgress)
+                .unwrap();
         assert_eq!(
             refreshed.shard_levels,
             gat_core::lock::LockShardLevels::FLAT
@@ -256,7 +243,9 @@ mod tests {
     #[test]
     fn refresh_is_a_no_op_on_a_second_call_with_no_changes() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         let mut store = StateStore::open(repo.layout()).unwrap();
 
@@ -280,7 +269,9 @@ mod tests {
     #[test]
     fn refresh_reparses_a_changed_shard_into_the_parallel_result() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut lock = Lock::default();
         for i in 0..48 {
             let content = format!("payload-{i}");
@@ -329,7 +320,9 @@ mod tests {
     fn refresh_matches_single_threaded_and_default_rayon_pools() {
         let build_repo = || {
             let tmp = git_repo();
-            let repo = Repo::at(tmp.path().to_path_buf());
+            let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+                .unwrap()
+                .repository_at(tmp.path().to_path_buf());
             let mut lock = Lock::default();
             // 24 distinct shards is comfortably above typical core counts,
             // so the default rayon pool genuinely dispatches this across
@@ -391,7 +384,9 @@ mod tests {
     #[test]
     fn a_truly_unchanged_refresh_never_opens_a_write_transaction() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         let mut store = StateStore::open(repo.layout()).unwrap();
         refresh(&repo, &mut store).unwrap();
@@ -415,7 +410,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         let mut store = StateStore::open(repo.layout()).unwrap();
         refresh(&repo, &mut store).unwrap();
@@ -439,7 +436,9 @@ mod tests {
     #[test]
     fn refresh_detects_a_removed_shard() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         let mut store = StateStore::open(repo.layout()).unwrap();
         refresh(&repo, &mut store).unwrap();
@@ -467,7 +466,9 @@ mod tests {
     #[test]
     fn refresh_fails_closed_on_a_pending_reshape_simulated_after_the_first_commit_rename() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         track(&repo, "b.bin", b"world");
         let lock = gat_io::LockStore::load_repository(repo.layout()).unwrap();
@@ -500,7 +501,9 @@ mod tests {
     #[test]
     fn refresh_marks_new_desired_paths_dirty_against_empty_materialized_state() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
         let mut store = StateStore::open(repo.layout()).unwrap();
 
@@ -520,7 +523,9 @@ mod tests {
     #[test]
     fn publish_desired_lock_populates_the_mirror_from_a_freshly_written_lock() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut lock = gat_io::LockStore::load_repository(repo.layout()).unwrap();
         let oid = content_oid(&b"hello"[..]);
         lock.upsert(GatPath::parse_canonical("a.bin").unwrap(), oid);
@@ -547,7 +552,9 @@ mod tests {
     #[test]
     fn refresh_after_seeding_does_not_need_to_rewrite_state() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut lock = gat_io::LockStore::load_repository(repo.layout()).unwrap();
         let oid = content_oid(&b"hello"[..]);
         lock.upsert(GatPath::parse_canonical("a.bin").unwrap(), oid);
@@ -577,7 +584,9 @@ mod tests {
     #[test]
     fn refresh_fails_closed_when_a_shard_is_rewritten_mid_read() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut lock = gat_io::LockStore::load_repository(repo.layout()).unwrap();
         let oid = content_oid(&b"before"[..]);
         lock.upsert(GatPath::parse_canonical("a.bin").unwrap(), oid);
@@ -637,7 +646,9 @@ mod tests {
     #[test]
     fn refresh_establishes_a_brand_new_shards_identity_immediately() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut lock = gat_io::LockStore::load_repository(repo.layout()).unwrap();
         let oid = content_oid(&b"fresh-checkout"[..]);
         lock.upsert(GatPath::parse_canonical("a.bin").unwrap(), oid);
@@ -664,7 +675,9 @@ mod tests {
     #[test]
     fn publish_desired_lock_populates_the_mirror_for_a_sharded_lock() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut lock = gat_io::LockStore::load_repository(repo.layout()).unwrap();
         let oid = content_oid(&b"hello"[..]);
         lock.upsert(GatPath::parse_canonical("a.bin").unwrap(), oid);
@@ -691,7 +704,9 @@ mod tests {
     #[test]
     fn resharding_with_identical_content_produces_no_dirty_rows() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         for i in 0..20 {
             track(&repo, &format!("f{i}.bin"), format!("c{i}").as_bytes());
         }
@@ -731,7 +746,9 @@ mod tests {
         // gets to indexing individual rows (see
         // `gat_core::lock::shard_topology`).
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let dir = tmp.path().join("gat.lock");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -780,7 +797,9 @@ mod tests {
         // this cycle, while a level-2 shard only appears on disk on the
         // *second* refresh -- still a mixed-depth completed tree.
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let dir = tmp.path().join("gat.lock");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -822,7 +841,9 @@ mod tests {
         // file `shard_id_for_path` predicts for it, the same placement
         // invariant `LockStore::load_all` enforces on a full load.
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let dir = tmp.path().join("gat.lock");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -854,7 +875,9 @@ mod tests {
     #[test]
     fn refresh_fails_closed_on_a_cross_shard_directory_prefix_conflict() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let dir = tmp.path().join("gat.lock");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -893,7 +916,9 @@ mod tests {
     #[test]
     fn refresh_fails_closed_when_a_changed_shard_nests_under_an_unrelated_shards_path() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let dir = tmp.path().join("gat.lock");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -940,7 +965,9 @@ mod tests {
     #[test]
     fn refresh_finds_a_directory_conflict_past_an_excluded_shards_lexically_first_descendant() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let dir = tmp.path().join("gat.lock");
         std::fs::create_dir_all(&dir).unwrap();
         // `shard_id_for_path("foo", LockShardLevels::new(1).unwrap())` and `shard_id_for_path("foo/0100", LockShardLevels::new(1).unwrap())`
@@ -992,7 +1019,9 @@ mod tests {
     #[test]
     fn refresh_correctly_reconciles_many_shards_at_once() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut lock = Lock::default();
         // 24 initial shards, 12 replaced, and 12 new -- still "many"
         // shards of each kind (added/changed/removed) reconciled in one
@@ -1070,7 +1099,9 @@ mod tests {
     #[test]
     fn refresh_serializes_behind_a_concurrent_repo_lock_holder() {
         let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         track(&repo, "a.bin", b"hello");
 
         let (holder_acquired_tx, holder_acquired_rx) = std::sync::mpsc::channel::<()>();
@@ -1097,7 +1128,7 @@ mod tests {
                 acquire_attempted_tx,
                 || {
                     let holder = s.spawn(move || {
-                        let guard = RepoLock::acquire_repository(repo_ref.layout()).unwrap();
+                        let guard = repo_ref.acquire_configuration_lock().unwrap();
                         holder_acquired_tx.send(()).unwrap();
                         release_holder_rx.recv().unwrap();
                         drop(guard);

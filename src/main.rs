@@ -3,7 +3,7 @@ use gat::cli::{self, Cli};
 use gat::error::Failure;
 use gat::output::error as error_output;
 use gat::{app, output};
-use gat_engine::Repository;
+use gat_engine::Invocation;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -90,6 +90,8 @@ fn output_result(result: Result<(), output::WriteFailure>) -> Result<(), Process
 }
 
 fn run(output: &mut output::Output<'_>) -> Result<u8, ProcessFailure> {
+    let cli = Cli::try_parse().map_err(ProcessFailure::Usage)?;
+    let invocation = Invocation::capture_process().map_err(Failure::from)?;
     // opendal auto-registers enabled services (S3/Azblob/Fs/...) via a
     // ctor at load time; call this explicitly too so `Operator::from_uri`
     // works even in link configurations where ctors don't run.
@@ -103,10 +105,9 @@ fn run(output: &mut output::Output<'_>) -> Result<u8, ProcessFailure> {
         .map_err(gat::error::map::runtime_bootstrap::runtime_start_failed)?;
     let _guard = rt.enter();
 
-    let cli = Cli::try_parse().map_err(ProcessFailure::Usage)?;
     let full_output = cli.full_output;
     output.set_full_output(full_output);
-    let repo = Repository::discover().map_err(Failure::from)?;
+    let repo = invocation.discover().map_err(Failure::from)?;
     let context = app::Context::new(repo);
 
     // Hooks stay silent regardless of TTY (handled inside `commands::hook`

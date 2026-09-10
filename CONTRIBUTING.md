@@ -60,7 +60,7 @@ semantic validation, `gat-core/src/config_keys.rs`, and the `gat config`
 handler when the key is directly settable. Then run the same three tasks.
 
 Command descriptions and examples live in
-[command_docs.rs](tools/docs/command_docs.rs); authored explanations live in
+[command_docs.rs](tools/docs/src/command_docs.rs); authored explanations live in
 [tools/docs/content](tools/docs/content). Start with [How Gat works](docs/concepts/how-gat-works.mdx)
 for the user-facing model these pages explain.
 
@@ -90,7 +90,7 @@ locking representations as convenience APIs.
 When changing workspace manifests or cross-layer behavior, run:
 
 ```sh
-task lint:workspace-boundary:selftest lint:workspace-boundary
+task test:checks lint:architecture
 ```
 
 The boundary policy also requires that engine code avoid buffered file I/O
@@ -139,7 +139,10 @@ Keep tests deterministic and isolated:
 - Keep shared integration fixtures in `tests/common`, `test-support-git`, or
   `test-support-gat` as appropriate.
 
-`task lint:test-hygiene` enforces these rules across the workspace.
+`task lint:test-hygiene` checks direct isolation-sensitive operations across the
+workspace. Pure URL/path test data needs no annotation. `task lint:architecture`
+checks dependency and source ownership; `task test:checks` tests the checker.
+See [the checker guide](tools/check/README.md) for coverage and limitations.
 
 ## Code and documentation
 

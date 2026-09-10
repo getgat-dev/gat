@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 $tokens = $null
 $parseErrors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile(
-  (Join-Path $PSScriptRoot '../docs/install.ps1'), [ref]$tokens, [ref]$parseErrors)
+  (Join-Path $PSScriptRoot '../../docs/install.ps1'), [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw $parseErrors[0] }
 foreach ($name in @('Resolve-ReleaseRedirect', 'Invoke-ReleaseRequest', 'Get-ReleaseResource')) {
   $helper = $ast.Find({ param($node)

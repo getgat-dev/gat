@@ -388,14 +388,14 @@ fn config_reads_show_values_and_their_effective_source() {
     let cache = repo.path().join("override-cache");
     let out = output_command(repo.path(), &["config", "cache.location"])
         .env("NO_COLOR", "1")
-        .env("GAT_CACHE_DIR", &cache)
+        .env("GAT_CACHE_LOCATION", &cache)
         .output()
         .unwrap();
     assert_ok(&out, "config environment source");
     assert_eq!(
         String::from_utf8(out.stdout).unwrap(),
         format!(
-            "✓ Config: cache.location\n\n  {}\n  Source: GAT_CACHE_DIR environment variable\n",
+            "✓ Config: cache.location\n\n  {}\n  Source: GAT_CACHE_LOCATION environment variable\n",
             cache.display()
         )
     );

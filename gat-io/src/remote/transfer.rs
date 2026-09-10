@@ -87,6 +87,7 @@ fn retain_download_remainder(pending: &mut opendal::Buffer) {
 }
 
 pub struct AsyncRemoteWriter {
+    io_timeout: std::time::Duration,
     inner: opendal::Writer,
     conditional: bool,
     remaining: u64,
@@ -122,16 +123,17 @@ impl AsyncRemoteWriter {
     }
 
     pub async fn abort(&mut self) -> Result<(), RemoteError> {
-        abort_with_timeout(self.inner.abort()).await
+        abort_with_timeout(self.io_timeout, self.inner.abort()).await
     }
 }
 
 /// Bound the whole cleanup attempt, including shared request admission and
 /// backend retries. Ordinary transfer cancellation does not interrupt cleanup.
 async fn abort_with_timeout(
+    timeout: std::time::Duration,
     abort: impl std::future::Future<Output = opendal::Result<()>>,
 ) -> Result<(), RemoteError> {
-    tokio::time::timeout(super::REMOTE_IO_TIMEOUT, abort)
+    tokio::time::timeout(timeout, abort)
         .await
         .map_err(|_| RemoteError::CleanupTimedOut)?
         .map_err(classify_opendal_error)
@@ -279,6 +281,7 @@ impl RemoteClient {
             .await
             .map_err(classify_opendal_error)?;
         Ok(AsyncRemoteWriter {
+            io_timeout: self.io_timeout,
             remaining: prepared.size,
             inner,
             conditional,
@@ -553,6 +556,9 @@ mod tests {
                 .endpoint(&format!("http://{}", self.address))
                 .skip_signature();
             RemoteClient {
+                io_timeout: gat_core::settings::NetworkOptions::default()
+                    .io_timeout
+                    .duration(),
                 operator: Arc::new(opendal::Operator::new(builder).unwrap()),
                 runtime: runtime.handle().clone(),
             }
@@ -797,11 +803,21 @@ mod tests {
                 attempted.store(true, Ordering::Release);
                 std::task::Poll::<opendal::Result<()>>::Pending
             });
-            let cleanup = abort_with_timeout(abort);
+            let cleanup = abort_with_timeout(
+                gat_core::settings::NetworkOptions::default()
+                    .io_timeout
+                    .duration(),
+                abort,
+            );
             tokio::pin!(cleanup);
             assert!(futures::poll!(&mut cleanup).is_pending());
             assert!(attempted.load(Ordering::Acquire));
-            tokio::time::advance(super::super::REMOTE_IO_TIMEOUT).await;
+            tokio::time::advance(
+                gat_core::settings::NetworkOptions::default()
+                    .io_timeout
+                    .duration(),
+            )
+            .await;
             assert!(matches!(cleanup.await, Err(RemoteError::CleanupTimedOut)));
         });
     }
@@ -810,14 +826,28 @@ mod tests {
     fn cleanup_preserves_success_and_provider_errors_before_the_deadline() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            assert!(abort_with_timeout(async { Ok(()) }).await.is_ok());
+            assert!(
+                abort_with_timeout(
+                    gat_core::settings::NetworkOptions::default()
+                        .io_timeout
+                        .duration(),
+                    async { Ok(()) }
+                )
+                .await
+                .is_ok()
+            );
             assert!(matches!(
-                abort_with_timeout(async {
-                    Err(opendal::Error::new(
-                        opendal::ErrorKind::PermissionDenied,
-                        "provider denied abort",
-                    ))
-                })
+                abort_with_timeout(
+                    gat_core::settings::NetworkOptions::default()
+                        .io_timeout
+                        .duration(),
+                    async {
+                        Err(opendal::Error::new(
+                            opendal::ErrorKind::PermissionDenied,
+                            "provider denied abort",
+                        ))
+                    }
+                )
                 .await,
                 Err(RemoteError::PermissionDenied { .. })
             ));

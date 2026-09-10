@@ -17,7 +17,8 @@
 //! ```
 //! fn accepts_atomic(_: &gat_io::AtomicError) {}
 //! fn accepts_journal(_: &gat_io::MountJournal) {}
-//! let _ = gat_io::home_dir;
+//! let inputs = gat_io::InvocationInputs::from_pairs([] as [(&str, &str); 0]).unwrap();
+//! assert!(inputs.home().is_none());
 //! ```
 //!
 //! ```compile_fail
@@ -25,7 +26,7 @@
 //! ```
 //!
 //! ```compile_fail
-//! use gat_io::env::home_dir;
+//! use gat_io::env::InvocationInputs;
 //! ```
 //!
 //! ```compile_fail
@@ -483,7 +484,9 @@ pub use config::{
     CONFIG_VERSION, ConfigError, ConfigStore, ConfigWriteError, ScopedConfigError,
     ScopedConfigWriteError,
 };
-pub use env::{cache_dir_override, home_dir, remote_connect_timeout};
+pub use env::{
+    EnvironmentName, InputValueReason, InvocationInputError, InvocationInputs, TemplateResolver,
+};
 pub use file_state::FileStateError;
 pub use git::{
     AddExclusion, AddExclusionReason, GatIgnore, GatIgnoreError, GitCloneError, GitCloneErrorKind,
@@ -498,8 +501,8 @@ pub use git::{
     prepare_bare_repository, prepare_worktree, read_info_exclude, resolve_commit,
 };
 pub use journal::mount::{
-    MOUNT_TXN_VERSION, MountJournal, MountJournalError, MountJournalValidationError, MountTxnOp,
-    MountTxnRecord, StagedRow, StagedWindows,
+    MOUNT_TXN_VERSION, MountJournal, MountJournalError, MountJournalValidationError,
+    MountTxnChange, MountTxnPhase, MountTxnRecord, StagedRow, StagedWindows,
 };
 pub use lock::{
     CandidateInvalidReason, CompletedLockReshape, InvalidOidReason, LiveLockInvalidReason,
@@ -509,13 +512,12 @@ pub use lock::{
     ReshapeTransactionKind, ReshapeTransactionState, TransactionMalformedReason,
 };
 pub use remote::{
-    AsyncRemoteWriter, DOWNLOAD_BUFFER_BYTES, FILE_GC_BATCH_SIZE, FileDeleteBatch,
-    FileDeleteOutcome, FileObjectScan, FileObjectWriter, FilePublication, FileReceiveError,
-    FileUploadError, FileWriteError, FileWritePhase, InterpolateError, OpenRemoteError,
-    PreparedFilePresence, PreparedFileRead, PreparedFileWrite, PreparedRemoteWrite,
-    RemoteBackendError, RemoteClient, RemoteError, RemoteObject, RemoteObjectLister, RemoteRead,
-    RemoteRequestBudget, STREAM_BUFFER_SIZE, TRANSFER_CHUNK_SIZE, initialize_backends,
-    with_stream_buffer,
+    AsyncRemoteWriter, DOWNLOAD_BUFFER_BYTES, FileDeleteBatch, FileDeleteOutcome, FileGc,
+    FileObjectScan, FileObjectWriter, FilePublication, FileReceiveError, FileUploadError,
+    FileWriteError, FileWritePhase, InterpolateError, OpenRemoteError, PreparedFilePresence,
+    PreparedFileRead, PreparedFileWrite, PreparedRemoteWrite, RemoteBackendError, RemoteClient,
+    RemoteError, RemoteObject, RemoteObjectLister, RemoteRead, RemoteRequestBudget,
+    STREAM_BUFFER_SIZE, TRANSFER_CHUNK_SIZE, initialize_backends, with_stream_buffer,
 };
 pub use repository_layout::{LayoutError, RepositoryLayout};
 
@@ -614,3 +616,5 @@ pub mod atomic_test_support {
     pub use crate::atomic::test_support::*;
     pub use crate::atomic::{RepoLock, write_atomic};
 }
+
+pub use config::ConfigRevision;

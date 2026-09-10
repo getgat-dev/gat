@@ -280,8 +280,7 @@ const fn remote_kind(source: &RemoteError) -> UploadRemoteFailureKind {
         RemoteError::Unavailable { .. }
         | RemoteError::ReadinessTimedOut { .. }
         | RemoteError::NotFound { .. } => UploadRemoteFailureKind::Unavailable,
-        RemoteError::InvalidConnectTimeout
-        | RemoteError::MalformedUrl { .. }
+        RemoteError::MalformedUrl { .. }
         | RemoteError::UnsupportedScheme { .. }
         | RemoteError::InvalidFileRemotePath { .. }
         | RemoteError::DisallowedScheme
@@ -702,8 +701,8 @@ mod tests {
         let (_remote, handles) =
             crate::remote_session::test_support::open_handles_on_current_runtime(&["origin"]);
         let cache_dir = tempfile::tempdir().unwrap();
-        let cache_root = gat_io::RepositoryLayout::at(cache_dir.path().to_owned())
-            .resolve_cache_root(None, None);
+        let cache_root =
+            gat_io::RepositoryLayout::at(cache_dir.path().to_owned()).resolve_cache_root(None);
         let cache = cache_root.open_client();
         let executor = RemoteExecutor::new(crate::limits::ExecutionLimits::default().remote);
         for size in [

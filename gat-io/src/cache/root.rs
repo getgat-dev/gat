@@ -243,7 +243,12 @@ mod tests {
         let local = temp.path().join(".gat");
         std::os::unix::fs::symlink(&local, &local).unwrap();
         let external = tempfile::tempdir().unwrap();
-        let cache = layout.resolve_cache_root(Some(external.path().as_os_str()), None);
+        let cache = layout.resolve_cache_root(Some(
+            &gat_core::cache_location::CacheLocation::try_from_path(std::path::PathBuf::from(
+                external.path().as_os_str(),
+            ))
+            .expect("nonempty fixture cache path"),
+        ));
         let error = cache.inner.prepare_directory().unwrap_err();
         assert_eq!(error.path, local);
         assert!(cache.inner.local_membership.get().is_none());
@@ -258,7 +263,12 @@ mod tests {
         let layout = crate::RepositoryLayout::at(temp.path().join("repository"));
         let external = temp.path().join("external");
         std::fs::write(&external, b"obstruction").unwrap();
-        let root = layout.resolve_cache_root(Some(external.as_os_str()), None);
+        let root = layout.resolve_cache_root(Some(
+            &gat_core::cache_location::CacheLocation::try_from_path(std::path::PathBuf::from(
+                external.as_os_str(),
+            ))
+            .expect("nonempty fixture cache path"),
+        ));
         let crate::CacheError::DirectoryUnavailable { path, .. } =
             root.writer().begin_ingest().err().unwrap()
         else {
@@ -275,7 +285,7 @@ mod tests {
 
         std::fs::create_dir_all(layout.cache_root_path()).unwrap();
         std::fs::write(layout.cache_root_path().join(".gitignore"), b"!keep\n").unwrap();
-        let root = layout.resolve_cache_root(None, None);
+        let root = layout.resolve_cache_root(None);
         let crate::CacheError::DirectoryUnavailable { path, source } =
             root.writer().begin_ingest().err().unwrap()
         else {
@@ -296,7 +306,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let layout = crate::RepositoryLayout::at(temp.path().to_path_buf());
         let objects = temp.path().join("intermediate/../.gat/objects");
-        let root = layout.resolve_cache_root(Some(objects.as_os_str()), None);
+        let root = layout.resolve_cache_root(Some(
+            &gat_core::cache_location::CacheLocation::try_from_path(std::path::PathBuf::from(
+                objects.as_os_str(),
+            ))
+            .expect("nonempty fixture cache path"),
+        ));
         let barrier = std::sync::Barrier::new(8);
         std::thread::scope(|scope| {
             for _ in 0..8 {
@@ -326,7 +341,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let layout = crate::RepositoryLayout::at(temp.path().to_path_buf());
         let objects = temp.path().join("intermediate/../.gat/objects");
-        let root = layout.resolve_cache_root(Some(objects.as_os_str()), None);
+        let root = layout.resolve_cache_root(Some(
+            &gat_core::cache_location::CacheLocation::try_from_path(std::path::PathBuf::from(
+                objects.as_os_str(),
+            ))
+            .expect("nonempty fixture cache path"),
+        ));
         assert!(!temp.path().join(".gat").exists());
         for _ in 0..32 {
             root.writer().ingest(&b"content"[..]).unwrap();
@@ -348,7 +368,7 @@ mod tests {
     fn absent_cache_gate_never_authorizes_a_later_writable_open() {
         let temp = tempfile::tempdir().unwrap();
         let layout = crate::RepositoryLayout::at(temp.path().to_path_buf());
-        let root = layout.resolve_cache_root(None, None);
+        let root = layout.resolve_cache_root(None);
         let ready = root.inner.prepare_existing_directory().unwrap();
         // Model a directory appearing after the probe without a self-ignore
         // file: the captured decision must still prevent a SQLite open.
@@ -367,7 +387,7 @@ mod tests {
         std::fs::create_dir_all(temp.path().join(".gat/objects")).unwrap();
         let ignore = temp.path().join(".gat/.gitignore");
         std::fs::write(&ignore, b"!unignore\n").unwrap();
-        let root = layout.resolve_cache_root(None, None);
+        let root = layout.resolve_cache_root(None);
         let _ = root.open_client();
         assert!(!root.display_path().join("cache.sqlite3").exists());
         assert!(root.writer().begin_ingest().is_err());

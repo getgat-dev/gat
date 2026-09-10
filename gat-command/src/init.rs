@@ -1,13 +1,7 @@
 //! Pure `gat init` orchestration.
 
-#[cfg(any(test, feature = "test-support"))]
-use std::ffi::OsStr;
-#[cfg(any(test, feature = "test-support"))]
-use std::path::PathBuf;
-
 use gat_engine::{
-    InitializationError, InitializationService, IntegrationStatus, ManagedHook, Repository,
-    ResolvedCacheLocation,
+    InitializationError, IntegrationStatus, ManagedHook, Repository, ResolvedCacheLocation,
 };
 
 static EXAMPLE_CONFIG: std::sync::LazyLock<gat_core::config::Config> =
@@ -29,9 +23,10 @@ static EXAMPLE_CONFIG: std::sync::LazyLock<gat_core::config::Config> =
                 .into(),
             },
             cache: CacheConfig {
-                location: Some(gat_core::cache_location::CacheLocation::from_path(
-                    "/var/cache/gat".into(),
-                )),
+                location: Some(
+                    gat_core::cache_location::CacheLocation::try_from_path("/var/cache/gat".into())
+                        .expect("nonempty cache location"),
+                ),
                 materialization_strategy: Some(
                     MaterializationStrategy::from_values(&["hardlink", "copy"])
                         .expect("valid example materialization strategy"),
@@ -114,35 +109,12 @@ pub struct InitOutcome {
 #[derive(Debug, thiserror::Error)]
 pub enum InitError {
     #[error(transparent)]
+    Repository(Box<gat_engine::RepositoryError>),
+    #[error(transparent)]
     Engine(#[from] InitializationError),
 }
 
-#[allow(
-    clippy::redundant_closure_for_method_calls,
-    reason = "The closure keeps the service lifetime general enough for init_inner"
-)]
 pub fn init(repo: &Repository, request: InitRequest) -> Result<InitOutcome, InitError> {
-    init_inner(repo, request, |service| service.initialize_cache())
-}
-
-#[cfg(any(test, feature = "test-support"))]
-#[doc(hidden)]
-pub fn init_with_cache_resolution(
-    repo: &Repository,
-    request: InitRequest,
-    cache_dir_override: Option<&OsStr>,
-    global_config_dir: Option<PathBuf>,
-) -> Result<InitOutcome, InitError> {
-    init_inner(repo, request, |service| {
-        service.initialize_cache_with(cache_dir_override, global_config_dir)
-    })
-}
-
-fn init_inner(
-    repo: &Repository,
-    request: InitRequest,
-    initialize_cache: impl FnOnce(&InitializationService<'_>) -> ResolvedCacheLocation,
-) -> Result<InitOutcome, InitError> {
     let service = repo.initialization()?;
     let (merge_driver, attributes) = if request.no_merge_driver {
         let attributes = removed_status(service.uninstall_merge_attributes()?);
@@ -179,7 +151,9 @@ fn init_inner(
     } else {
         None
     };
-    let cache_location = initialize_cache(&service);
+    let cache_location = service
+        .initialize_cache()
+        .map_err(|e| InitError::Repository(Box::new(e)))?;
     Ok(InitOutcome {
         cache_location,
         hooks,

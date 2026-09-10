@@ -57,10 +57,11 @@ impl std::error::Error for RemoteUrlValidationError {
 
 /// Validates an endpoint template before configuration persistence without
 /// exposing the I/O implementation to command orchestration.
-pub fn validate_remote_url(
+pub(crate) fn validate_remote_url(
     template: &RemoteUrlTemplate,
+    resolver: &gat_io::TemplateResolver,
 ) -> std::result::Result<(), RemoteUrlValidationError> {
-    gat_io::RemoteClient::validate(template.as_template_str()).map_err(|source| {
+    gat_io::RemoteClient::validate(template.as_template_str(), resolver).map_err(|source| {
         RemoteUrlValidationError {
             source: Box::new(crate::remote_open::RemoteOpenError::from_io(
                 template, source,
@@ -340,7 +341,13 @@ mod tests {
         let template = RemoteUrlTemplate::from_string(
             "unsupported://host/path?token=SYNTHETIC-SECRET".to_string(),
         );
-        let error = validate_remote_url(&template).unwrap_err();
+        let error = validate_remote_url(
+            &template,
+            &gat_io::InvocationInputs::from_pairs([] as [(&str, &str); 0])
+                .unwrap()
+                .templates(),
+        )
+        .unwrap_err();
         assert!(matches!(
             error.kind(),
             crate::remote_open::RemoteOpenFailureKind::DisallowedScheme

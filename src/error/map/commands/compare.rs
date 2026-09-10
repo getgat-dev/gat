@@ -7,6 +7,9 @@ use gat_engine::{CompareError, CompareErrorKind};
 impl From<CompareError> for Failure {
     fn from(err: CompareError) -> Self {
         match err.kind() {
+            CompareErrorKind::Acquisition(kind) => {
+                super::repo_snapshot::acquisition_failure(*kind, err)
+            }
             CompareErrorKind::Repository => Self::infrastructure(
                 Diagnostic::new(
                     ErrorCode::RepositoryUnavailable,

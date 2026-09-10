@@ -15,118 +15,125 @@ const fn config_scope_word(scope: gat_core::config::ConfigScope) -> &'static str
 
 impl From<RepoSnapshotError> for Failure {
     fn from(err: RepoSnapshotError) -> Self {
-        match err.kind() {
-            RepoSnapshotErrorKind::Repository => Self::infrastructure(
-                Diagnostic::new(
-                    ErrorCode::RepositoryUnavailable,
-                    "Could not prepare the repository",
-                ),
-                err,
+        acquisition_failure(err.kind(), err)
+    }
+}
+
+pub(super) fn acquisition_failure(
+    kind: RepoSnapshotErrorKind,
+    err: impl std::error::Error + Send + Sync + 'static,
+) -> Failure {
+    match kind {
+        RepoSnapshotErrorKind::Repository => Failure::infrastructure(
+            Diagnostic::new(
+                ErrorCode::RepositoryUnavailable,
+                "Could not prepare the repository",
             ),
-            RepoSnapshotErrorKind::RepositoryLocked => Self::expected_with_source(
-                Diagnostic::new(
-                    ErrorCode::RepositoryLocked,
-                    "Another gat process is modifying this repository",
-                )
-                .with_detail("It will release the lock automatically when it finishes or exits."),
-                err,
+            err,
+        ),
+        RepoSnapshotErrorKind::RepositoryLocked => Failure::expected_with_source(
+            Diagnostic::new(
+                ErrorCode::RepositoryLocked,
+                "Another gat process is modifying this repository",
+            )
+            .with_detail("It will release the lock automatically when it finishes or exits."),
+            err,
+        ),
+        RepoSnapshotErrorKind::RepositoryLock(kind) => Failure::infrastructure(
+            Diagnostic::new(
+                filesystem_code(kind),
+                "Could not acquire the repository lock",
             ),
-            RepoSnapshotErrorKind::RepositoryLock(kind) => Self::infrastructure(
-                Diagnostic::new(
-                    filesystem_code(kind),
-                    "Could not acquire the repository lock",
-                ),
-                err,
-            ),
-            RepoSnapshotErrorKind::MountRecovery(kind) => {
-                Self::infrastructure(super::super::mount::recovery_diagnostic(kind), err)
-            }
-            RepoSnapshotErrorKind::Configuration(scope, kind) => {
-                let summary = match scope {
-                    Some(scope) => crate::presentation::UserLine::compose([
-                        crate::presentation::UserLine::authored("Could not load the "),
-                        crate::presentation::UserLine::authored(config_scope_word(scope)),
-                        crate::presentation::UserLine::authored(" gat.yaml"),
-                    ]),
-                    None => crate::presentation::UserLine::authored(
-                        "Could not load the repository configuration",
-                    ),
-                };
-                Self::infrastructure(
-                    super::super::repository::configuration_diagnostic(kind, summary),
-                    err,
-                )
-            }
-            RepoSnapshotErrorKind::State(kind) => Self::infrastructure(
-                Diagnostic::new(state_code(kind), "Could not open Gat's local state"),
-                err,
-            ),
-            RepoSnapshotErrorKind::Lock(kind) => {
-                let diagnostic = Diagnostic::new(lock_code(kind), "Could not read gat.lock");
-                match kind {
-                    LockFailureKind::Corrupt
-                    | LockFailureKind::Incompatible
-                    | LockFailureKind::InvalidPath
-                    | LockFailureKind::UnsupportedFileType
-                    | LockFailureKind::RepositoryLocked
-                    | LockFailureKind::InvalidArgument => {
-                        Self::expected_with_source(diagnostic, err)
-                    }
-                    LockFailureKind::PermissionDenied
-                    | LockFailureKind::StorageExhausted
-                    | LockFailureKind::Unavailable
-                    | LockFailureKind::RepairRequired => Self::infrastructure(diagnostic, err),
-                }
-            }
-            RepoSnapshotErrorKind::Snapshot(kind) => {
-                let summary = match kind {
-                    SnapshotFailureKind::RemoteConfiguration => {
-                        "The effective remote configuration is invalid"
-                    }
-                    SnapshotFailureKind::PathPolicy => {
-                        "The effective path policy configuration is invalid"
-                    }
-                };
-                Self::expected_with_source(Diagnostic::new(ErrorCode::InvalidConfig, summary), err)
-            }
-            RepoSnapshotErrorKind::Filesystem(kind) => Self::infrastructure(
-                Diagnostic::new(
-                    filesystem_code(kind),
-                    "Could not access repository state files",
-                ),
-                err,
-            ),
-            RepoSnapshotErrorKind::Cache => Self::infrastructure(
-                Diagnostic::new(
-                    ErrorCode::CacheUnavailable,
-                    "Could not access the local object cache",
-                ),
-                err,
-            ),
-            RepoSnapshotErrorKind::InvalidPath => Self::expected_with_source(
-                Diagnostic::new(
-                    ErrorCode::InvalidPath,
-                    "Repository state contains an invalid path",
-                ),
-                err,
-            ),
-            RepoSnapshotErrorKind::InvalidArgument => Self::expected_with_source(
-                Diagnostic::new(
-                    ErrorCode::InvalidArgumentValue,
-                    "Could not resolve the repository selection",
-                ),
-                err,
-            ),
-            RepoSnapshotErrorKind::Conflict => Self::expected_with_source(
-                Diagnostic::new(
-                    ErrorCode::Conflict,
-                    "The desired state changed during snapshot acquisition",
-                )
-                .with_hint("Run the command again to observe the current state."),
-                err,
-            ),
-            RepoSnapshotErrorKind::Internal => Self::internal(err),
+            err,
+        ),
+        RepoSnapshotErrorKind::MountRecovery(kind) => {
+            Failure::infrastructure(super::super::mount::recovery_diagnostic(kind), err)
         }
+        RepoSnapshotErrorKind::Configuration(scope, kind) => {
+            let summary = match scope {
+                Some(scope) => crate::presentation::UserLine::compose([
+                    crate::presentation::UserLine::authored("Could not load the "),
+                    crate::presentation::UserLine::authored(config_scope_word(scope)),
+                    crate::presentation::UserLine::authored(" gat.yaml"),
+                ]),
+                None => crate::presentation::UserLine::authored(
+                    "Could not load the repository configuration",
+                ),
+            };
+            Failure::infrastructure(
+                super::super::repository::configuration_diagnostic(kind, summary),
+                err,
+            )
+        }
+        RepoSnapshotErrorKind::State(kind) => Failure::infrastructure(
+            Diagnostic::new(state_code(kind), "Could not open Gat's local state"),
+            err,
+        ),
+        RepoSnapshotErrorKind::Lock(kind) => {
+            let diagnostic = Diagnostic::new(lock_code(kind), "Could not read gat.lock");
+            match kind {
+                LockFailureKind::Corrupt
+                | LockFailureKind::Incompatible
+                | LockFailureKind::InvalidPath
+                | LockFailureKind::UnsupportedFileType
+                | LockFailureKind::RepositoryLocked
+                | LockFailureKind::InvalidArgument => {
+                    Failure::expected_with_source(diagnostic, err)
+                }
+                LockFailureKind::PermissionDenied
+                | LockFailureKind::StorageExhausted
+                | LockFailureKind::Unavailable
+                | LockFailureKind::RepairRequired => Failure::infrastructure(diagnostic, err),
+            }
+        }
+        RepoSnapshotErrorKind::Snapshot(kind) => {
+            let summary = match kind {
+                SnapshotFailureKind::RemoteConfiguration => {
+                    "The effective remote configuration is invalid"
+                }
+                SnapshotFailureKind::PathPolicy => {
+                    "The effective path policy configuration is invalid"
+                }
+            };
+            Failure::expected_with_source(Diagnostic::new(ErrorCode::InvalidConfig, summary), err)
+        }
+        RepoSnapshotErrorKind::Filesystem(kind) => Failure::infrastructure(
+            Diagnostic::new(
+                filesystem_code(kind),
+                "Could not access repository state files",
+            ),
+            err,
+        ),
+        RepoSnapshotErrorKind::Cache => Failure::infrastructure(
+            Diagnostic::new(
+                ErrorCode::CacheUnavailable,
+                "Could not access the local object cache",
+            ),
+            err,
+        ),
+        RepoSnapshotErrorKind::InvalidPath => Failure::expected_with_source(
+            Diagnostic::new(
+                ErrorCode::InvalidPath,
+                "Repository state contains an invalid path",
+            ),
+            err,
+        ),
+        RepoSnapshotErrorKind::InvalidArgument => Failure::expected_with_source(
+            Diagnostic::new(
+                ErrorCode::InvalidArgumentValue,
+                "Could not resolve the repository selection",
+            ),
+            err,
+        ),
+        RepoSnapshotErrorKind::Conflict => Failure::expected_with_source(
+            Diagnostic::new(
+                ErrorCode::Conflict,
+                "The desired state changed during snapshot acquisition",
+            )
+            .with_hint("Run the command again to observe the current state."),
+            err,
+        ),
+        RepoSnapshotErrorKind::Internal => Failure::internal(err),
     }
 }
 

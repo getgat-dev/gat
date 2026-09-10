@@ -141,11 +141,16 @@ const fn classify_repository_access(kind: RepositoryAccessFailureKind) -> RepoSn
 
 fn classify_repository(source: &RepositoryError) -> RepoSnapshotErrorKind {
     match source {
+        RepositoryError::SettingLock { source } => classify_atomic(source),
+        RepositoryError::PendingMountRecovery(source) => {
+            RepoSnapshotErrorKind::MountRecovery(source.recovery_failure_kind())
+        }
         RepositoryError::CurrentDirectory(source) => {
             RepoSnapshotErrorKind::Filesystem(classify_io(source))
         }
         RepositoryError::NotRepository => RepoSnapshotErrorKind::Repository,
-        RepositoryError::ConfigLoad { scope, .. }
+        RepositoryError::ConfigurationChanged { scope }
+        | RepositoryError::ConfigLoad { scope, .. }
         | RepositoryError::ConfigLoadScoped { scope, .. }
         | RepositoryError::ConfigDirectoryCreate { scope, .. }
         | RepositoryError::ConfigSerialize { scope, .. }
@@ -153,6 +158,7 @@ fn classify_repository(source: &RepositoryError) -> RepoSnapshotErrorKind {
             RepoSnapshotErrorKind::Configuration(Some(*scope), source.config_failure_kind())
         }
         RepositoryError::ConfigPathUnavailable
+        | RepositoryError::UndefinedResourceRemote { .. }
         | RepositoryError::InvalidEffectiveMounts(_)
         | RepositoryError::InvalidEffectiveSelections(_)
         | RepositoryError::InvalidEffectiveRoutes(_) => {
@@ -333,7 +339,7 @@ fn lock_and_load_config(
     repo: &Repo,
     progress: &dyn ProgressReporter,
 ) -> Result<(RepoLock, gat_core::config::Config)> {
-    let guard = RepoLock::acquire_repository(repo.layout())?;
+    let guard = repo.acquire_configuration_lock()?;
     repo.mounts().recover_pending_locked(&guard, progress)?;
     let config = repo.load_config()?;
     Ok((guard, config))
@@ -366,6 +372,22 @@ pub(crate) fn recover_and_open_coherent_snapshot(
     repo: &Repo,
     progress: &dyn ProgressReporter,
 ) -> Result<(Snapshot, DesiredSnapshot)> {
+    let (config, store, refreshed) = recover_and_pin_state(repo, progress)?;
+    let desired_revision =
+        crate::repository_state::DesiredRevision::from_identity(refreshed.desired_identity);
+    let snapshot = Snapshot::new(repo.snapshot_input(config, desired_revision))?;
+    Ok((snapshot, DesiredSnapshot::new(store)))
+}
+
+/// Capture local configuration and desired state without resolving remote services.
+pub(crate) fn recover_and_pin_state(
+    repo: &Repo,
+    progress: &dyn ProgressReporter,
+) -> Result<(
+    gat_core::config::Config,
+    StateStore,
+    crate::workspace::sync::desired_index::RefreshResult,
+)> {
     let (_guard, config) = lock_and_load_config(repo, progress)?;
     // A single `desired_index::refresh()` both materializes the mirror
     // *and* returns the exact `CanonicalDesiredIdentity` of the desired
@@ -392,10 +414,7 @@ pub(crate) fn recover_and_open_coherent_snapshot(
     // just a plain connection whose later reads could observe a newer
     // generation than the identity refresh already returned above.
     store.pin_snapshot()?;
-    let desired_revision =
-        crate::repository_state::DesiredRevision::from_identity(refreshed.desired_identity);
-    let snapshot = Snapshot::new(repo.snapshot_input(config, desired_revision))?;
-    Ok((snapshot, DesiredSnapshot::new(store)))
+    Ok((config, store, refreshed))
 }
 
 impl Repo {
@@ -512,7 +531,7 @@ pub fn acquire_operation_without_desired_state<'repo>(
     progress: &dyn ProgressReporter,
 ) -> Result<crate::operation::Operation<'repo>> {
     let snapshot = recover_and_load_config(repo, progress)?;
-    let session = crate::session::Session::new();
+    let session = crate::session::Session::new(repo, snapshot.config());
     Ok(crate::operation::Operation::new(repo, snapshot, session))
 }
 
@@ -525,11 +544,14 @@ mod tests {
 
     fn tracked_repo() -> (crate::test_harness::TestRepo, Repo) {
         let tmp = crate::test_harness::test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
         let mut lock = gat_io::LockStore::load_repository(repo.layout()).unwrap();
         let (ingested, _) = repo
             .resolved_cache_root()
+            .unwrap()
             .writer()
             .ingest(&b"payload"[..])
             .unwrap();

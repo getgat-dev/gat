@@ -1,12 +1,13 @@
 use gat_core::progress::NoopProgress;
 use gat_core::selection::Selection;
-use gat_engine::Repository;
 use std::path::PathBuf;
 
 #[test]
 fn repaired_state_forces_validation_before_trust_state_can_overwrite_local_edits() {
     let fixture = test_support::TestRepo::gat_repo();
-    let repo = Repository::at(fixture.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(fixture.path().to_path_buf());
     fixture.write("tracked.bin", b"original");
     test_support::add(&repo, &[PathBuf::from("tracked.bin")], &NoopProgress).unwrap();
     fixture.commit_all("add tracked.bin");

@@ -3,8 +3,8 @@ use gat_core::lexical_path::GatPath;
 use gat_core::lock::{Lock, LockShardLevels};
 use gat_core::name::MountName;
 use gat_io::{
-    ConfigError, ConfigStore, LockStore, MOUNT_TXN_VERSION, MountJournal, MountTxnOp,
-    MountTxnRecord, RepositoryLayout, ScopedConfigError, StateDatabaseHealth, count_stale_sidecars,
+    ConfigError, ConfigStore, LockStore, MountJournal, MountTxnChange, MountTxnRecord,
+    RepositoryLayout, ScopedConfigError, StateDatabaseHealth, count_stale_sidecars,
     inspect_database, rebuild_atomically, remove_stale_sidecars,
 };
 
@@ -19,9 +19,10 @@ fn repository_config_scopes_are_layout_bound_and_keep_paths_technical() {
     let layout = layout(repository.path());
 
     let mut project = Config::default();
-    project.cache.location = Some(gat_core::cache_location::CacheLocation::from_path(
-        "project-cache".into(),
-    ));
+    project.cache.location = Some(
+        gat_core::cache_location::CacheLocation::try_from_path("project-cache".into())
+            .expect("nonempty cache location"),
+    );
     ConfigStore::save_scope(&layout, ConfigScope::Project, None, &project).unwrap();
     assert_eq!(
         ConfigStore::load_scope(&layout, ConfigScope::Project, None)
@@ -113,24 +114,25 @@ fn mount_journal_is_repository_bound_and_preserves_typed_records() {
     let layout = layout(repository.path());
     let journal = MountJournal::open(&layout);
     let record = MountTxnRecord {
-        version: MOUNT_TXN_VERSION,
-        op: MountTxnOp::Add,
+        phase: gat_io::MountTxnPhase::Publish,
+        shard_levels: gat_core::lock::LockShardLevels::FLAT,
+        change: MountTxnChange::Add {
+            target: GatPath::parse_canonical("data").unwrap(),
+            row_windows: 0,
+        },
         scope: ConfigScope::Project,
         name: MountName::from_string("data".to_string()),
-        old_target: None,
-        new_target: Some(GatPath::parse_canonical("data").unwrap()),
         post_config: Config::default(),
         pre_config: Config::default(),
-        row_windows: 0,
     };
 
     journal.write(&record).unwrap();
     let restored = journal.read().unwrap().unwrap();
 
-    assert_eq!(restored.op, MountTxnOp::Add);
+    assert!(matches!(restored.change, MountTxnChange::Add { .. }));
     assert_eq!(restored.scope, ConfigScope::Project);
     assert_eq!(restored.name.as_str(), "data");
-    assert_eq!(restored.new_target.unwrap().as_str(), "data");
+    assert_eq!(restored.change.new_target().unwrap().as_str(), "data");
     journal.remove_journal().unwrap();
     assert!(journal.read().unwrap().is_none());
 }

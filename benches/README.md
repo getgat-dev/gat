@@ -11,7 +11,7 @@ The maintained helpers are:
   deterministic desired-state, cache, and worktree data builders. It is a
   harness-free Cargo bench target so all-target checks compile the helper API;
   it performs no measurements.
-- [tools/generate-benchmark.rs](../tools/generate-benchmark.rs) (`task benchmark:generate`): creates a
+- [tools/benchmark/src/main.rs](../tools/benchmark/src/main.rs) (`task benchmark:generate`): creates a
   realistic on-disk repository for manually timing the real `gat` CLI.
 
 Run commands below from the repository root. For configuration tradeoffs to

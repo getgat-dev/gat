@@ -22,7 +22,7 @@ use crate::history::HistoryError;
 use crate::limits::GcLimits;
 use crate::remote_catalog::RemoteCatalog;
 use crate::remote_session::RemoteSession;
-use crate::repository::{Repository, RepositoryError};
+use crate::repository::Repository;
 
 type BoxedSource = Box<dyn std::error::Error + Send + Sync + 'static>;
 type Result<T> = std::result::Result<T, GcError>;
@@ -254,15 +254,23 @@ fn inspect_in_bounded_batches<T, R>(
     candidates: &[T],
     batch_size: NonZeroUsize,
     inspect: impl Fn(&T) -> R + Sync,
-    mut consume: impl FnMut(R),
+    consume: impl FnMut(usize, R) + Send,
 ) where
     T: Sync,
     R: Send,
 {
-    for batch in candidates.chunks(batch_size.get()) {
-        for result in batch.par_iter().map(&inspect).collect::<Vec<_>>() {
-            consume(result);
-        }
+    // Completed keep sets are merged immediately rather than retained until
+    // the slowest inspection in the batch finishes. Only the consumer is
+    // serialized; repository scans continue independently.
+    let consume = std::sync::Mutex::new(consume);
+    for (batch_index, batch) in candidates.chunks(batch_size.get()).enumerate() {
+        batch.par_iter().enumerate().for_each(|(index, candidate)| {
+            let result = inspect(candidate);
+            consume.lock().expect("inspection consumer did not panic")(
+                batch_index * batch_size.get() + index,
+                result,
+            );
+        });
     }
 }
 
@@ -305,12 +313,13 @@ fn additional_repositories(
         &candidates,
         limits.repository_concurrency,
         |location| inspect_additional_repository(location, progress, selection),
-        |result| match result {
+        |index, result| match result {
             Ok(marked) => merge_keep_set(keep, marked),
-            Err(issue) => issues.push(issue),
+            Err(issue) => issues.push((index, issue)),
         },
     );
-    issues
+    issues.sort_unstable_by_key(|(index, _)| *index);
+    issues.into_iter().map(|(_, issue)| issue).collect()
 }
 
 fn compute_keep_set(
@@ -407,7 +416,8 @@ fn visit_remote_oids(
     record: &mut dyn FnMut(Oid),
 ) -> Result<()> {
     let runtime = tokio::runtime::Handle::current();
-    if let Some(mut scan) = remote.prepare_file_listing() {
+    if let Some(file_gc) = remote.file_gc() {
+        let mut scan = file_gc.listing();
         loop {
             let (returned, batch) = runtime
                 .block_on(executor.local_transfer(move || {
@@ -470,12 +480,16 @@ fn gc_remote_with_limits(
         ProgressUnit::Objects,
         None,
     ));
-    let remote = RemoteSession::with_request_budget(request_budget)
-        .open(&catalog, remote_id, Some(&listing.handle()))
-        .map_err(|source| GcError::RemoteOpen {
-            remote_name: catalog.remote_name(remote_id),
-            source,
-        })?;
+    let remote = RemoteSession::with_request_budget(
+        request_budget,
+        repo.inputs.templates(),
+        config.network.resolve(),
+    )
+    .open(&catalog, remote_id, Some(&listing.handle()))
+    .map_err(|source| GcError::RemoteOpen {
+        remote_name: catalog.remote_name(remote_id),
+        source,
+    })?;
     let executor = crate::remote_executor::RemoteExecutor::new(
         crate::limits::ExecutionLimits::default().remote,
     );
@@ -525,17 +539,14 @@ fn delete_remote_candidates(
     window_size: NonZeroUsize,
 ) -> Result<usize> {
     let runtime = tokio::runtime::Handle::current();
-    let file_gc = remote.prepare_file_listing().is_some();
+    let file_gc = remote.file_gc();
     let mut deleted = 0;
     let result = (|| {
         let mut window = Vec::with_capacity(window_size.get());
         let mut delete = |window: &[Oid]| {
             progress.set_activity(ProgressActivity::DeletingRemoteObjects);
-            if file_gc {
-                for batch in window.chunks(gat_io::FILE_GC_BATCH_SIZE) {
-                    let prepared = remote
-                        .prepare_file_delete(batch)
-                        .expect("file GC capability");
+            if let Some(file_gc) = &file_gc {
+                for prepared in file_gc.deletion_batches(window) {
                     let outcome = runtime
                         .block_on(executor.local_transfer(move || prepared.delete()))
                         .map_err(|source| failure(GcFailureKind::Remote, source))?;
@@ -581,9 +592,23 @@ impl Repository {
         options: &GcOptions<'_>,
         progress: &dyn ProgressReporter,
     ) -> Result<GcReport> {
-        self.garbage_collect_with_limits(options, progress, GcLimits::default())
+        let config = self
+            .load_config()
+            .map_err(|source| failure(GcFailureKind::Repository, source))?;
+        let limits = GcLimits {
+            remote: crate::limits::RemoteGcLimits {
+                physical_requests: config.network.resolve().request_concurrency.capacity(),
+            },
+            ..GcLimits::default()
+        };
+        if options.remote.is_some() {
+            gc_remote_with_limits(self, &config, options, progress, limits)
+        } else {
+            gc_local(self, &config, options, progress, limits)
+        }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn garbage_collect_with_limits(
         &self,
         options: &GcOptions<'_>,
@@ -592,7 +617,7 @@ impl Repository {
     ) -> Result<GcReport> {
         let config = self
             .load_config()
-            .map_err(|source: RepositoryError| failure(GcFailureKind::Repository, source))?;
+            .map_err(|source: crate::RepositoryError| failure(GcFailureKind::Repository, source))?;
         if options.remote.is_some() {
             gc_remote_with_limits(self, &config, options, progress, limits)
         } else {
@@ -751,7 +776,7 @@ mod tests {
             7,
             "three bounded deletion workers"
         );
-        let mut scan = remote.prepare_file_listing().unwrap();
+        let mut scan = remote.file_gc().unwrap().listing();
         while let Some(batch) = scan.next_batch().unwrap() {
             assert!(batch.is_empty());
         }
@@ -796,6 +821,39 @@ mod tests {
     }
 
     #[test]
+    fn completed_inspection_is_consumed_before_its_batch_peer_finishes() {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+        let ready = std::sync::Barrier::new(2);
+        let (consumed, receive) = std::sync::mpsc::sync_channel(1);
+        let receive = std::sync::Mutex::new(receive);
+        let mut results = Vec::new();
+        pool.install(|| {
+            inspect_in_bounded_batches(
+                &[0, 1],
+                NonZeroUsize::new(2).unwrap(),
+                |candidate| {
+                    ready.wait();
+                    if *candidate == 1 {
+                        receive.lock().unwrap().recv().unwrap();
+                    }
+                    *candidate
+                },
+                |index, result| {
+                    if index == 0 {
+                        consumed.send(()).unwrap();
+                    }
+                    results.push(result);
+                },
+            );
+        });
+        results.sort_unstable();
+        assert_eq!(results, [0, 1]);
+    }
+
+    #[test]
     fn remote_repository_batches_bound_concurrent_inspections() {
         let batch_size = NonZeroUsize::new(2).unwrap();
         let active = Arc::new(AtomicUsize::new(0));
@@ -807,19 +865,21 @@ mod tests {
             &candidates,
             batch_size,
             |candidate| {
-                assert_eq!(consumed.load(Ordering::Acquire), candidate / 2 * 2);
+                assert!(consumed.load(Ordering::Acquire) >= candidate / 2 * 2);
                 let current = active.fetch_add(1, Ordering::AcqRel) + 1;
                 peak.fetch_max(current, Ordering::AcqRel);
                 std::thread::yield_now();
                 active.fetch_sub(1, Ordering::AcqRel);
                 candidate * 2
             },
-            |result| {
-                results.push(result);
+            |index, result| {
+                results.push((index, result));
                 consumed.fetch_add(1, Ordering::Release);
             },
         );
 
+        results.sort_unstable_by_key(|(index, _)| *index);
+        let results: Vec<_> = results.into_iter().map(|(_, result)| result).collect();
         assert_eq!(results.len(), candidates.len());
         assert_eq!(
             results,
@@ -835,7 +895,9 @@ mod tests {
     #[test]
     fn local_gc_loads_config_and_resolves_cache_location_once() {
         let test = crate::test_harness::test_repo();
-        let repo = Repository::at(test.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(test.path().to_path_buf());
         let selection = HistorySelection::conservative_default();
         let config_before = crate::test_support::config_loads();
         let location_before = crate::test_support::cache_location_resolutions();
@@ -862,7 +924,9 @@ mod tests {
     #[test]
     fn remote_gc_loads_effective_config_once() {
         let test = crate::test_harness::test_repo();
-        let repo = Repository::at(test.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(test.path().to_path_buf());
         let remote_dir = tempfile::tempdir().unwrap();
         let remote_name = RemoteName::from_string("origin".to_string());
         let mut config = repo

@@ -143,7 +143,6 @@ pub(crate) fn visit_current_desired_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::Repository as Repo;
 
     /// [`DesiredView::visit_rows`] must
     /// observe the same rows a direct [`StateStore::with_desired_rows`]
@@ -153,7 +152,9 @@ mod tests {
         use gat_core::lock::Entry;
 
         let tmp = crate::test_harness::git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
         let mut store = StateStore::open(repo.layout()).expect("open store");
         store
             .upsert_desired_for_test(

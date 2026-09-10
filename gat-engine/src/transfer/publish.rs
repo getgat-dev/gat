@@ -77,14 +77,74 @@ pub enum PublishError {
     Upload(#[from] UploadError),
 }
 
-enum VerificationState {
-    Running { waiting: Vec<usize> },
-    Valid { source: CacheObject },
-    Invalid { status: PublishStatus },
+/// A verification always has at least one interested obligation. Most OIDs
+/// have only one, so keep that index inline without allocating a vector.
+struct WaitingObligations {
+    first: usize,
+    additional: Vec<usize>,
 }
 
-struct ReadyUpload {
-    upload: PreparedUpload,
+impl WaitingObligations {
+    const fn new(first: usize) -> Self {
+        Self {
+            first,
+            additional: Vec::new(),
+        }
+    }
+    fn push(&mut self, index: usize) {
+        self.additional.push(index);
+    }
+    fn iter(&self) -> impl Iterator<Item = &usize> {
+        std::iter::once(&self.first).chain(self.additional.iter())
+    }
+    fn minimum(&self) -> usize {
+        self.additional.iter().copied().fold(self.first, usize::min)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CacheRejection {
+    Missing,
+    Corrupt,
+}
+
+impl CacheRejection {
+    const fn status(self) -> PublishStatus {
+        match self {
+            Self::Missing => PublishStatus::CacheMissing,
+            Self::Corrupt => PublishStatus::CacheCorrupt,
+        }
+    }
+}
+
+enum VerificationState {
+    Running { waiting: WaitingObligations },
+    Valid { source: CacheObject },
+    Invalid { rejection: CacheRejection },
+}
+
+/// The next action after a remote reports an object missing.
+enum VerificationAction {
+    Wait,
+    Upload(CacheObject),
+    Reject(CacheRejection),
+}
+
+/// An admitted job owns both its queued payload and its lifetime-bound permit.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "One transient admitted job is consumed immediately; boxing would allocate per upload"
+)]
+enum AdmittedWork {
+    Presence {
+        remote: RemoteId,
+        index: usize,
+        lease: crate::remote_executor::PresenceLease,
+    },
+    Upload {
+        upload: PreparedUpload,
+        lease: crate::remote_executor::TransferLease,
+    },
 }
 
 enum RemoteCompletion {
@@ -103,7 +163,7 @@ enum RemoteCompletion {
 
 struct PipelineState {
     pending_presence: BTreeMap<RemoteId, VecDeque<usize>>,
-    ready_uploads: BTreeMap<RemoteId, VecDeque<ReadyUpload>>,
+    ready_uploads: BTreeMap<RemoteId, VecDeque<PreparedUpload>>,
     remote_order: Vec<RemoteId>,
     next_remote: usize,
     last_admitted_by_remote: BTreeMap<RemoteId, QueueKind>,
@@ -152,6 +212,26 @@ impl PipelineState {
         }
     }
 
+    fn register_verification(&mut self, oid: Oid, index: usize) -> VerificationAction {
+        match self.verification.entry(oid) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(VerificationState::Running {
+                    waiting: WaitingObligations::new(index),
+                });
+                self.pending_verification.push_back(oid);
+                VerificationAction::Wait
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => match entry.get_mut() {
+                VerificationState::Running { waiting } => {
+                    waiting.push(index);
+                    VerificationAction::Wait
+                }
+                VerificationState::Valid { source } => VerificationAction::Upload(source.clone()),
+                VerificationState::Invalid { rejection } => VerificationAction::Reject(*rejection),
+            },
+        }
+    }
+
     fn record_error(&mut self, index: usize, error: PublishError) {
         if self
             .error
@@ -159,6 +239,14 @@ impl PipelineState {
             .is_none_or(|(current_index, _)| index < *current_index)
         {
             self.error = Some((index, error));
+            // Only a newly earlier failure changes eligibility. Do not rescan
+            // the entire window on every successful admission.
+            for queue in self.pending_presence.values_mut() {
+                queue.retain(|pending| *pending < index);
+            }
+            for queue in self.ready_uploads.values_mut() {
+                queue.retain(|pending| pending.index() < index);
+            }
         }
     }
 
@@ -178,7 +266,7 @@ impl PipelineState {
     fn verification_error_index(&self, oids: &[Oid]) -> usize {
         oids.iter()
             .filter_map(|oid| match self.verification.get(oid) {
-                Some(VerificationState::Running { waiting }) => waiting.iter().min().copied(),
+                Some(VerificationState::Running { waiting }) => Some(waiting.minimum()),
                 _ => None,
             })
             .min()
@@ -195,19 +283,9 @@ impl PipelineState {
             }));
     }
 
-    fn next_admissible_work(
-        &mut self,
-        scheduler: &RemoteScheduler<'_>,
-    ) -> Option<(RemoteId, QueueKind, crate::remote_executor::RemoteLease)> {
+    fn next_admissible_work(&mut self, scheduler: &RemoteScheduler<'_>) -> Option<AdmittedWork> {
         if scheduler.executor.is_cancelled() {
             return None;
-        }
-        let frontier = self.error.as_ref().map_or(usize::MAX, |(index, _)| *index);
-        for queue in self.pending_presence.values_mut() {
-            queue.retain(|index| *index < frontier);
-        }
-        for queue in self.ready_uploads.values_mut() {
-            queue.retain(|ready| ready.upload.index() < frontier);
         }
         for offset in 0..self.remote_order.len() {
             let position = (self.next_remote + offset) % self.remote_order.len();
@@ -216,13 +294,16 @@ impl PipelineState {
                 .pending_presence
                 .get(&id)
                 .is_some_and(|queue| !queue.is_empty());
-            let upload = self.ready_uploads.get(&id).and_then(|queue| queue.front());
-            if upload.is_none() {
+            let upload = self
+                .ready_uploads
+                .get(&id)
+                .is_some_and(|queue| !queue.is_empty());
+            if !upload {
                 scheduler.executor.forget_transfer_waiter(id);
             }
             let preferred = select_queue_kind(
                 presence,
-                upload.is_some(),
+                upload,
                 self.last_admitted_by_remote.get(&id).copied(),
             );
             let order = match preferred {
@@ -230,19 +311,28 @@ impl PipelineState {
                 _ => [QueueKind::Presence, QueueKind::Upload],
             };
             for kind in order {
-                let lease = match kind {
-                    QueueKind::Presence if presence => scheduler.executor.try_presence(id),
-                    QueueKind::Upload => upload.and_then(|ready| {
-                        scheduler
-                            .executor
-                            .try_transfer(id, ready.upload.buffer_bytes())
+                let work = match kind {
+                    QueueKind::Presence => self.pending_presence.get_mut(&id).and_then(|queue| {
+                        let index = *queue.front()?;
+                        let lease = scheduler.executor.try_presence(id)?;
+                        queue.pop_front();
+                        Some(AdmittedWork::Presence {
+                            remote: id,
+                            index,
+                            lease,
+                        })
                     }),
-                    QueueKind::Presence => None,
+                    QueueKind::Upload => self.ready_uploads.get_mut(&id).and_then(|queue| {
+                        let bytes = queue.front()?.buffer_bytes();
+                        let lease = scheduler.executor.try_transfer(id, bytes)?;
+                        let upload = queue.pop_front()?;
+                        Some(AdmittedWork::Upload { upload, lease })
+                    }),
                 };
-                if let Some(lease) = lease {
+                if let Some(work) = work {
                     self.next_remote = (position + 1) % self.remote_order.len();
                     self.last_admitted_by_remote.insert(id, kind);
-                    return Some((id, kind, lease));
+                    return Some(work);
                 }
             }
         }
@@ -337,39 +427,18 @@ pub fn publish_window(
                         }
                         Ok(false) => {
                             let oid = objects[index].oid;
-                            match state.verification.remove(&oid) {
-                                None => {
-                                    state.verification.insert(
-                                        oid,
-                                        VerificationState::Running {
-                                            waiting: vec![index],
-                                        },
-                                    );
-                                    state.pending_verification.push_back(oid);
+                            match state.register_verification(oid, index) {
+                                VerificationAction::Wait => {}
+                                VerificationAction::Upload(source) => {
+                                    enqueue_upload(&mut state, &handles, &objects, index, source);
                                 }
-                                Some(VerificationState::Running { mut waiting }) => {
-                                    waiting.push(index);
-                                    state
-                                        .verification
-                                        .insert(oid, VerificationState::Running { waiting });
-                                }
-                                Some(VerificationState::Valid { source }) => {
-                                    enqueue_upload(
-                                        &mut state,
-                                        &handles,
-                                        &objects,
+                                VerificationAction::Reject(rejection) => {
+                                    complete_obligation(
+                                        &mut state.statuses,
                                         index,
-                                        source.clone(),
+                                        rejection.status(),
+                                        &task,
                                     );
-                                    state
-                                        .verification
-                                        .insert(oid, VerificationState::Valid { source });
-                                }
-                                Some(VerificationState::Invalid { status }) => {
-                                    complete_obligation(&mut state.statuses, index, status, &task);
-                                    state
-                                        .verification
-                                        .insert(oid, VerificationState::Invalid { status });
                                 }
                             }
                         }
@@ -431,7 +500,7 @@ pub fn publish_window(
                                             let source = services
                                                 .cache_session
                                                 .object_source(services.cache_root, &oid);
-                                            for &index in &waiting {
+                                            for &index in waiting.iter() {
                                                 enqueue_upload(
                                                     &mut state,
                                                     &handles,
@@ -446,23 +515,24 @@ pub fn publish_window(
                                         }
                                         ObjectVerification::Missing
                                         | ObjectVerification::Corrupt => {
-                                            let status =
+                                            let rejection =
                                                 if verification == ObjectVerification::Missing {
-                                                    PublishStatus::CacheMissing
+                                                    CacheRejection::Missing
                                                 } else {
-                                                    PublishStatus::CacheCorrupt
+                                                    CacheRejection::Corrupt
                                                 };
-                                            for &index in &waiting {
+                                            for &index in waiting.iter() {
                                                 complete_obligation(
                                                     &mut state.statuses,
                                                     index,
-                                                    status,
+                                                    rejection.status(),
                                                     &task,
                                                 );
                                             }
-                                            state
-                                                .verification
-                                                .insert(oid, VerificationState::Invalid { status });
+                                            state.verification.insert(
+                                                oid,
+                                                VerificationState::Invalid { rejection },
+                                            );
                                         }
                                     }
                                 }
@@ -529,58 +599,59 @@ fn refill_remote_work<'a>(
     completions: &mut SelectAll<BoxStream<'a, RemoteCompletion>>,
     scheduler: &'a RemoteScheduler<'a>,
 ) {
+    let presence_completions = |id, entries| {
+        super::presence::presence_stream(
+            scheduler.executor,
+            scheduler.handles[&id].client().clone(),
+            entries,
+        )
+        .map(|(index, result)| RemoteCompletion::Presence {
+            index,
+            result: result.map_err(|source| Box::new(source) as Box<dyn Error + Send + Sync>),
+        })
+        .boxed()
+    };
     let mut presence = BTreeMap::<RemoteId, Vec<_>>::new();
-    while let Some((remote_id, kind, lease)) = state.next_admissible_work(scheduler) {
-        match kind {
-            QueueKind::Upload => {
-                let ready = state
-                    .ready_uploads
-                    .get_mut(&remote_id)
-                    .expect("selected remote has an upload queue")
-                    .pop_front()
-                    .expect("selected remote has a ready upload");
+    while let Some(work) = state.next_admissible_work(scheduler) {
+        match work {
+            AdmittedWork::Upload { upload, lease } => {
                 let task = scheduler.task.clone();
                 completions.push(
                     async move {
                         let _lease = lease;
-                        let upload = execute_upload(scheduler.executor, ready.upload, task).await;
+                        let upload = execute_upload(scheduler.executor, upload, task).await;
                         RemoteCompletion::Upload { upload }
                     }
                     .into_stream()
                     .boxed(),
                 );
             }
-            QueueKind::Presence => {
-                let index = state
-                    .pending_presence
-                    .get_mut(&remote_id)
-                    .expect("selected remote has a presence queue")
-                    .pop_front()
-                    .expect("selected remote has pending presence work");
+            AdmittedWork::Presence {
+                remote: remote_id,
+                index,
+                lease,
+            } => {
                 let oid = scheduler.objects[index].oid;
-                presence
-                    .entry(remote_id)
-                    .or_default()
-                    .push((index, oid, lease));
-                if presence[&remote_id].len()
-                    == scheduler.handles[&remote_id]
-                        .client()
-                        .presence_batch_limit()
-                {
-                    let entries = presence.remove(&remote_id).unwrap();
-                    completions.push(
-                        super::presence::presence_stream(
-                            scheduler.executor,
-                            scheduler.handles[&remote_id].client().clone(),
-                            entries,
-                        )
-                        .map(|(index, result)| RemoteCompletion::Presence {
-                            index,
-                            result: result
-                                .map_err(|source| Box::new(source) as Box<dyn Error + Send + Sync>),
-                        })
-                        .boxed(),
-                    );
+                let limit = scheduler.handles[&remote_id]
+                    .client()
+                    .presence_batch_limit();
+                let complete = match presence.entry(remote_id) {
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        entry.get_mut().push((index, oid, lease));
+                        (entry.get().len() == limit).then(|| entry.remove())
+                    }
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        let entries = vec![(index, oid, lease)];
+                        if limit == 1 {
+                            Some(entries)
+                        } else {
+                            entry.insert(entries);
+                            None
+                        }
+                    }
+                };
+                if let Some(entries) = complete {
+                    completions.push(presence_completions(remote_id, entries));
                 }
             }
         }
@@ -588,18 +659,7 @@ fn refill_remote_work<'a>(
     // Partial batches start immediately; admission keeps its existing fair
     // remote/work-class order rather than filling one remote ahead of others.
     for (id, entries) in presence {
-        completions.push(
-            super::presence::presence_stream(
-                scheduler.executor,
-                scheduler.handles[&id].client().clone(),
-                entries,
-            )
-            .map(|(index, result)| RemoteCompletion::Presence {
-                index,
-                result: result.map_err(|source| Box::new(source) as Box<dyn Error + Send + Sync>),
-            })
-            .boxed(),
-        );
+        completions.push(presence_completions(id, entries));
     }
 }
 
@@ -610,23 +670,28 @@ fn enqueue_upload(
     index: usize,
     source: CacheObject,
 ) {
+    if state
+        .error
+        .as_ref()
+        .is_some_and(|(frontier, _)| index >= *frontier)
+    {
+        return;
+    }
     let object = &objects[index];
     state
         .ready_uploads
         .entry(object.remote.id())
         .or_default()
-        .push_back(ReadyUpload {
-            upload: PreparedUpload::new(
-                UploadObject::new(
-                    object.oid,
-                    object.representative_path.clone(),
-                    object.remote,
-                ),
-                handles[&object.remote.id()].clone(),
-                source,
-                index,
+        .push_back(PreparedUpload::new(
+            UploadObject::new(
+                object.oid,
+                object.representative_path.clone(),
+                object.remote,
             ),
-        });
+            handles[&object.remote.id()].clone(),
+            source,
+            index,
+        ));
 }
 
 fn cache_verification_error(path: GatPath, source: CacheVerificationError) -> UploadError {
@@ -825,6 +890,51 @@ mod tests {
     }
 
     #[test]
+    fn verification_registration_shares_pending_work_and_reuses_rejection() {
+        let mut state = PipelineState::new(&[]);
+        let oid = Oid::from_bytes([7; 32]);
+        assert!(matches!(
+            state.register_verification(oid, 3),
+            VerificationAction::Wait
+        ));
+        assert!(matches!(
+            state.register_verification(oid, 1),
+            VerificationAction::Wait
+        ));
+        assert_eq!(
+            state
+                .pending_verification
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [oid]
+        );
+        let Some(VerificationState::Running { waiting }) = state.verification.get(&oid) else {
+            panic!("both obligations must share running verification");
+        };
+        assert_eq!(waiting.iter().copied().collect::<Vec<_>>(), [3, 1]);
+        assert_eq!(waiting.minimum(), 1);
+        state.pending_verification.clear();
+        state.verification.insert(
+            oid,
+            VerificationState::Invalid {
+                rejection: CacheRejection::Corrupt,
+            },
+        );
+        assert!(matches!(
+            state.register_verification(oid, 0),
+            VerificationAction::Reject(CacheRejection::Corrupt)
+        ));
+        assert!(state.pending_verification.is_empty());
+        assert!(matches!(
+            state.verification.get(&oid),
+            Some(VerificationState::Invalid {
+                rejection: CacheRejection::Corrupt
+            })
+        ));
+    }
+
+    #[test]
     fn verification_batches_are_bounded_without_waiting_for_a_full_window() {
         let (_dir, handles) = crate::remote_session::test_support::open_handles(&["a"]);
         let remote_id = handles[0].id();
@@ -843,6 +953,61 @@ mod tests {
         );
         assert_eq!(state.take_verification_batch().len(), 3);
         assert!(state.take_verification_batch().is_empty());
+    }
+
+    #[test]
+    fn an_earlier_error_prunes_only_ineligible_queued_presence() {
+        let (_dir, handles) = crate::remote_session::test_support::open_handles(&["a", "b"]);
+        let objects = (0..6)
+            .map(|index| publish_object(handles[index % 2].id(), u8::try_from(index).unwrap()))
+            .collect::<Vec<_>>();
+        let mut state = PipelineState::new(&objects);
+        state.record_error(4, PublishError::Upload(UploadError::Cancelled));
+        let queued = |state: &PipelineState| {
+            let mut indices: Vec<_> = state.pending_presence.values().flatten().copied().collect();
+            indices.sort_unstable();
+            indices
+        };
+        assert_eq!(queued(&state), [0, 1, 2, 3]);
+        state.record_error(2, PublishError::Upload(UploadError::Cancelled));
+        assert_eq!(queued(&state), [0, 1]);
+        state.record_error(5, PublishError::Upload(UploadError::Cancelled));
+        assert_eq!(queued(&state), [0, 1]);
+    }
+
+    #[test]
+    fn late_verification_cannot_enqueue_uploads_beyond_the_error_frontier() {
+        let directory = crate::test_harness::test_repo();
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(directory.path().to_path_buf());
+        let cache_root = repo.resolved_cache_root().unwrap();
+        let cache = cache_root.open_client();
+        let (_remotes, handles) = crate::remote_session::test_support::open_handles(&["a"]);
+        let remote = handles[0].id();
+        let handles = BTreeMap::from([(remote, handles[0].clone())]);
+        let objects = (0..3)
+            .map(|tag| {
+                let (ingested, _) = cache_root
+                    .writer()
+                    .ingest(std::io::Cursor::new(vec![tag]))
+                    .unwrap();
+                cache.verify(&ingested.oid).unwrap();
+                let mut object = publish_object(remote, tag);
+                object.oid = ingested.oid;
+                object
+            })
+            .collect::<Vec<_>>();
+        let mut state = PipelineState::new(&objects);
+        state.record_error(1, PublishError::Upload(UploadError::Cancelled));
+        // Simulate verified completions arriving after the error was recorded.
+        for index in [2, 0, 1] {
+            let source = cache.object(&objects[index].oid);
+            enqueue_upload(&mut state, &handles, &objects, index, source);
+        }
+        let ready = &state.ready_uploads[&remote];
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].index(), 0);
     }
 
     #[test]
@@ -881,16 +1046,24 @@ mod tests {
             state.verification.insert(
                 objects[0].oid,
                 VerificationState::Running {
-                    waiting: vec![3, 0],
+                    waiting: {
+                        let mut waiting = WaitingObligations::new(3);
+                        waiting.push(0);
+                        waiting
+                    },
                 },
             );
             state.verification.insert(
                 objects[1].oid,
-                VerificationState::Running { waiting: vec![1] },
+                VerificationState::Running {
+                    waiting: WaitingObligations::new(1),
+                },
             );
             state.verification.insert(
                 objects[2].oid,
-                VerificationState::Running { waiting: vec![2] },
+                VerificationState::Running {
+                    waiting: WaitingObligations::new(2),
+                },
             );
             for index in order {
                 state.record_error(index, error());

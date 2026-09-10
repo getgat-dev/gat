@@ -6,7 +6,9 @@ use gat_engine::Repository;
 fn repository() -> (tempfile::TempDir, Repository) {
     let tmp = tempfile::tempdir().unwrap();
     test_support_git::run_git(tmp.path(), &["init", "-q"]);
-    let repo = Repository::at(tmp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
     (tmp, repo)
 }
 

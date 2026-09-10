@@ -8,6 +8,11 @@ impl From<gat_core::config::ConfigError> for Failure {
     fn from(err: gat_core::config::ConfigError) -> Self {
         use gat_core::config::ConfigError as DomainError;
         match &err {
+            DomainError::InvalidSettingValue { key, reason } => Self::expected(
+                Diagnostic::new(ErrorCode::InvalidArgumentValue, "Invalid setting value")
+                    .with_subject(UserLine::config_key(key.as_str()))
+                    .with_detail(setting_reason(*reason)),
+            ),
             DomainError::InvalidPath { input, .. } => Self::infrastructure(
                 Diagnostic::new(ErrorCode::InvalidPath, "Not a valid path")
                     .with_subject(UserLine::path_text(input)),
@@ -231,6 +236,36 @@ impl From<gat_core::config::ConfigError> for Failure {
                 .with_subject(UserLine::identifier(value)),
             ),
         }
+    }
+}
+
+const fn setting_reason(reason: gat_core::settings::SettingValueError) -> &'static str {
+    use gat_core::settings::SettingValueError;
+    match reason {
+        SettingValueError::ScalarRequired => "Supply exactly one value.",
+        SettingValueError::InvalidValue => "Supply a supported value for this setting.",
+        SettingValueError::OutOfRange => {
+            "Supply a whole number within this setting's documented bounds."
+        }
+        SettingValueError::InvalidBoolean => "Supply true or false.",
+        SettingValueError::EmptyPath => "Supply a nonempty path, or unset the setting to inherit.",
+    }
+}
+
+impl From<gat_engine::InvocationInputError> for Failure {
+    fn from(error: gat_engine::InvocationInputError) -> Self {
+        use gat_engine::{InputValueReason, InvocationInputError};
+        Self::expected(match error {
+            InvocationInputError::Setting { key, reason } => Diagnostic::new(ErrorCode::InvalidArgumentValue, "Invalid environment setting")
+                .with_subject(UserLine::identifier(&key.environment_name()))
+                .with_detail(match reason {
+                    InputValueReason::NonUnicode => "This setting requires Unicode text.",
+                    InputValueReason::InvalidJsonList => "Supply a JSON array of strings.",
+                    InputValueReason::InvalidValue => "Supply a valid value for this configuration key, or unset the variable to inherit.",
+                }),
+            InvocationInputError::DuplicateName { name } => Diagnostic::new(ErrorCode::InvalidArgumentValue, "Duplicate environment name")
+                .with_subject(UserLine::identifier(name.as_str())),
+        })
     }
 }
 

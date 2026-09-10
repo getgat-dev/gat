@@ -11,7 +11,9 @@ use gat_engine::Repository;
 fn repository() -> (tempfile::TempDir, Repository) {
     let temp = tempfile::tempdir().unwrap();
     test_support_git::run_git(temp.path(), &["init", "-q", "-b", "main"]);
-    let repo = Repository::at(temp.path().to_path_buf());
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(temp.path().to_path_buf());
     (temp, repo)
 }
 

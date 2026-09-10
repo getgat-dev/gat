@@ -122,7 +122,7 @@ fn release_artifact_init_configure_remote_add_push_pull_round_trip() {
 /// here relies on) -- not any ambient host state -- controls cache/
 /// global-config resolution, including for `init_repo_spawned()`'s own
 /// packaged `gat init`. First proves the packaged binary *does* honor a
-/// deliberately conflicting `GAT_CACHE_DIR` override when a test
+/// deliberately conflicting `GAT_CACHE_LOCATION` override when a test
 /// explicitly supplies one via `extra_env`, then proves an entirely
 /// ordinary packaged `gat init`/`gat add` -- run with no `extra_env`
 /// override -- resolves to the deterministic repo-local default
@@ -145,7 +145,7 @@ fn release_artifact_ordinary_commands_ignore_a_conflicting_global_config_and_cac
     let conflicting_cache_dir = tempfile::tempdir().unwrap();
 
     // Sanity: the packaged binary must actually honor an explicit
-    // conflicting `GAT_CACHE_DIR` override, so the isolation proven
+    // conflicting `GAT_CACHE_LOCATION` override, so the isolation proven
     // below is meaningful, not vacuous.
     let honoring_repo = init_repo_spawned();
     std::fs::write(honoring_repo.path().join("big.bin"), b"payload").unwrap();
@@ -153,7 +153,7 @@ fn release_artifact_ordinary_commands_ignore_a_conflicting_global_config_and_cac
         honoring_repo.path(),
         &["add", "big.bin"],
         &[(
-            "GAT_CACHE_DIR",
+            "GAT_CACHE_LOCATION",
             Some(conflicting_cache_dir.path().to_str().unwrap()),
         )],
     );
@@ -163,7 +163,7 @@ fn release_artifact_ordinary_commands_ignore_a_conflicting_global_config_and_cac
     );
     assert!(
         walk_has_any_file(conflicting_cache_dir.path()),
-        "expected the explicit conflicting GAT_CACHE_DIR override to actually be honored by the \
+        "expected the explicit conflicting GAT_CACHE_LOCATION override to actually be honored by the \
          packaged binary"
     );
     let conflicting_cache_dir_count_before = count_files(conflicting_cache_dir.path());
@@ -193,7 +193,7 @@ fn release_artifact_ordinary_commands_ignore_a_conflicting_global_config_and_cac
     assert_eq!(
         count_files(conflicting_cache_dir.path()),
         conflicting_cache_dir_count_before,
-        "ordinary packaged command must not have reused the earlier explicit GAT_CACHE_DIR \
+        "ordinary packaged command must not have reused the earlier explicit GAT_CACHE_LOCATION \
          override"
     );
 }

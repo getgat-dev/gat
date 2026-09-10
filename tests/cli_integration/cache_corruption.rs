@@ -28,7 +28,7 @@ fn checkout_reports_error_when_cached_object_content_is_corrupted() {
         .unwrap()
         .entries[0]
         .oid;
-    let cache_root = RepositoryLayout::at(dir.to_path_buf()).resolve_cache_root(None, None);
+    let cache_root = RepositoryLayout::at(dir.to_path_buf()).resolve_cache_root(None);
     let obj_path = cache_root.object_path_for_test(&oid);
     assert!(
         obj_path.is_file(),

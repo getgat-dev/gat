@@ -14,10 +14,11 @@ pub enum ConfigSection {
     Mounts,
     Routes,
     GitIntegration,
+    Network,
 }
 
 impl ConfigSection {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Remotes,
         Self::Cache,
         Self::Sync,
@@ -26,6 +27,7 @@ impl ConfigSection {
         Self::Mounts,
         Self::Routes,
         Self::GitIntegration,
+        Self::Network,
     ];
 
     #[must_use]
@@ -39,94 +41,37 @@ impl ConfigSection {
             Self::Mounts => "Mounts",
             Self::Routes => "Routes",
             Self::GitIntegration => "Git integration",
+            Self::Network => "Network",
         }
     }
 }
 
+/// A supported configuration path. Named fields and defaults cannot contain
+/// arbitrary namespaces, missing fields, or unsupported field combinations.
+///
+/// ```compile_fail
+/// use gat_core::config_keys::{ConfigPath, ResourceField};
+/// let invalid = ConfigPath::ResourceField(ResourceField::RemotePath);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigPath {
-    Static(&'static str),
-    Named {
-        section: &'static str,
-        field: Option<&'static str>,
-    },
+    Setting(SettingKey),
+    ResourceDefault(ResourceDefault),
+    ResourceField(ResourceField),
 }
 
 impl ConfigPath {
     #[must_use]
     pub fn display(self) -> String {
-        match self {
-            Self::Static(path) => path.to_string(),
-            Self::Named {
-                section,
-                field: Some(field),
-            } => format!("{section}.<name>.{field}"),
-            Self::Named {
-                section,
-                field: None,
-            } => format!("{section}.<name>"),
-        }
+        self.canonical().to_owned()
     }
 
-    /// # Panics
-    /// Panics for a named path that is not part of the supported configuration schema.
     #[must_use]
-    pub fn canonical(self) -> &'static str {
+    pub const fn canonical(self) -> &'static str {
         match self {
-            Self::Static(path) => path,
-            Self::Named {
-                section: "remotes",
-                field: Some("url"),
-            } => "remotes.<name>.url",
-            Self::Named {
-                section: "mounts",
-                field: Some("url"),
-            } => "mounts.<name>.url",
-            Self::Named {
-                section: "mounts",
-                field: Some("target"),
-            } => "mounts.<name>.target",
-            Self::Named {
-                section: "mounts",
-                field: Some("path"),
-            } => "mounts.<name>.path",
-            Self::Named {
-                section: "mounts",
-                field: Some("rev"),
-            } => "mounts.<name>.rev",
-            Self::Named {
-                section: "mounts",
-                field: Some("rev_lock"),
-            } => "mounts.<name>.rev_lock",
-            Self::Named {
-                section: "mounts",
-                field: Some("include"),
-            } => "mounts.<name>.include",
-            Self::Named {
-                section: "mounts",
-                field: Some("exclude"),
-            } => "mounts.<name>.exclude",
-            Self::Named {
-                section: "routes",
-                field: Some("path"),
-            } => "routes.<name>.path",
-            Self::Named {
-                section: "routes",
-                field: Some("remote"),
-            } => "routes.<name>.remote",
-            Self::Named {
-                section: "selections",
-                field: Some("path"),
-            } => "selections.<name>.path",
-            Self::Named {
-                section: "selections",
-                field: Some("include"),
-            } => "selections.<name>.include",
-            Self::Named {
-                section: "selections",
-                field: Some("exclude"),
-            } => "selections.<name>.exclude",
-            Self::Named { .. } => panic!("unsupported named configuration path"),
+            Self::Setting(key) => key.as_str(),
+            Self::ResourceDefault(default) => default.canonical(),
+            Self::ResourceField(field) => field.canonical(),
         }
     }
 }
@@ -137,7 +82,7 @@ pub enum ValueCardinality {
     List,
 }
 
-/// A named-resource namespace managed through its own command family.
+/// A namespace owned by its resource command family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigResource {
     Remote,
@@ -146,114 +91,75 @@ pub enum ConfigResource {
     Selection,
 }
 
-impl ConfigResource {
-    /// Recognizes resource namespaces, including unknown fields within them,
-    /// so callers can direct users to the owning command's help.
-    #[must_use]
-    pub fn from_key(key: &str) -> Option<Self> {
-        let namespace = key.split('.').next()?;
-        CONFIG_KEYS.iter().find_map(|spec| {
-            let ConfigPath::Named { section, .. } = spec.path else {
-                return None;
-            };
-            if section != namespace {
-                return None;
+macro_rules! resource_fields {
+    ($( $resource:ident, $namespace:literal => { $( $field:ident: $name:literal ),+ $(,)? } ),+ $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum ResourceField {
+            $( $( $field, )+ )+
+        }
+
+        impl ResourceField {
+            #[must_use]
+            pub const fn canonical(self) -> &'static str {
+                match self { $( $( Self::$field => concat!($namespace, ".<name>.", $name), )+ )+ }
             }
-            match spec.write_surface {
-                ConfigWriteSurface::Remote => Some(Self::Remote),
-                ConfigWriteSurface::Route => Some(Self::Route),
-                ConfigWriteSurface::Mount => Some(Self::Mount),
-                ConfigWriteSurface::Selection => Some(Self::Selection),
-                ConfigWriteSurface::Config | ConfigWriteSurface::Automatic => None,
+
+            #[must_use]
+            pub const fn name(self) -> &'static str {
+                match self { $( $( Self::$field => $name, )+ )+ }
             }
-        })
-    }
+
+            #[must_use]
+            pub const fn resource(self) -> ConfigResource {
+                match self { $( $( Self::$field => ConfigResource::$resource, )+ )+ }
+            }
+        }
+
+        impl ConfigResource {
+            /// Recognize namespaces, including unknown fields, without depending
+            /// on the documentation registry.
+            #[must_use]
+            pub fn from_key(key: &str) -> Option<Self> {
+                match key.split('.').next()? {
+                    $( $namespace => Some(Self::$resource), )+
+                    _ => None,
+                }
+            }
+        }
+    };
 }
 
-/// A configuration key supported by `gat config`.
-///
-/// The deprecated [`Self::GitExcludePatterns`] spelling remains accepted,
-/// but [`Self::canonical`] always returns the persisted canonical key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ConfigKey {
-    CacheLocation,
-    CacheMaterializationStrategy,
-    CacheIngestStrategy,
-    SyncTrustState,
-    SyncAutoFetch,
-    SyncAutoRepair,
-    LockShardLevels,
-    GitIgnorePatterns,
-    GitExcludePatterns,
+resource_fields! {
+    Remote, "remotes" => { RemoteUrl: "url" },
+    Route, "routes" => { RoutePath: "path", RouteRemote: "remote" },
+    Mount, "mounts" => {
+        MountUrl: "url", MountTarget: "target", MountPath: "path",
+        MountRevision: "rev", MountRevisionLock: "rev_lock",
+        MountInclude: "include", MountExclude: "exclude",
+    },
+    Selection, "selections" => {
+        SelectionPath: "path", SelectionInclude: "include", SelectionExclude: "exclude",
+    },
 }
 
-impl ConfigKey {
-    pub const CANONICAL: [Self; 8] = [
-        Self::CacheLocation,
-        Self::CacheMaterializationStrategy,
-        Self::CacheIngestStrategy,
-        Self::SyncTrustState,
-        Self::SyncAutoFetch,
-        Self::SyncAutoRepair,
-        Self::LockShardLevels,
-        Self::GitIgnorePatterns,
-    ];
+/// Only remotes and selections have a named-resource default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceDefault {
+    Remote,
+    Selection,
+}
 
+impl ResourceDefault {
     #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
-        Some(match value {
-            "cache.location" => Self::CacheLocation,
-            "cache.materialization_strategy" => Self::CacheMaterializationStrategy,
-            "cache.ingest_strategy" => Self::CacheIngestStrategy,
-            "sync.trust_state" => Self::SyncTrustState,
-            "sync.auto_fetch" => Self::SyncAutoFetch,
-            "sync.auto_repair" => Self::SyncAutoRepair,
-            "lock.shard_levels" => Self::LockShardLevels,
-            "git.ignore_patterns" => Self::GitIgnorePatterns,
-            "git.exclude_patterns" => Self::GitExcludePatterns,
-            _ => return None,
-        })
-    }
-
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
+    pub const fn canonical(self) -> &'static str {
         match self {
-            Self::CacheLocation => "cache.location",
-            Self::CacheMaterializationStrategy => "cache.materialization_strategy",
-            Self::CacheIngestStrategy => "cache.ingest_strategy",
-            Self::SyncTrustState => "sync.trust_state",
-            Self::SyncAutoFetch => "sync.auto_fetch",
-            Self::SyncAutoRepair => "sync.auto_repair",
-            Self::LockShardLevels => "lock.shard_levels",
-            Self::GitIgnorePatterns => "git.ignore_patterns",
-            Self::GitExcludePatterns => "git.exclude_patterns",
+            Self::Remote => "remotes.default",
+            Self::Selection => "selections.default",
         }
     }
-
-    #[must_use]
-    pub const fn canonical(self) -> Self {
-        match self {
-            Self::GitExcludePatterns => Self::GitIgnorePatterns,
-            key => key,
-        }
-    }
-
-    #[must_use]
-    #[allow(
-        clippy::missing_panics_doc,
-        reason = "Every canonical key has schema metadata; callers cannot violate this invariant"
-    )]
-    pub fn cardinality(self) -> ValueCardinality {
-        cardinality_of(self.canonical().as_str())
-            .expect("every canonical config command key has schema metadata")
-    }
 }
 
-impl std::fmt::Display for ConfigKey {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
+pub use crate::settings::SettingKey;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmptyListPolicy {
@@ -318,6 +224,7 @@ pub enum PersistedDefault {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EffectiveDefault {
+    Setting(SettingKey),
     SameAsPersisted,
     Value(ConfigDocValue),
     Derived(&'static str),
@@ -350,7 +257,7 @@ pub enum ConfigSetter {
     Automatic { description: &'static str },
 }
 
-pub struct ConfigKeySpec {
+pub struct ConfigFieldSpec {
     pub path: ConfigPath,
     pub section: ConfigSection,
     pub value: ConfigValueSpec,
@@ -358,14 +265,10 @@ pub struct ConfigKeySpec {
     pub description: &'static str,
     pub write_surface: ConfigWriteSurface,
     pub setter: ConfigSetter,
-    pub environment_override: Option<&'static str>,
+
     pub examples: &'static [ConfigDocValue],
 }
 
-const BOOL_FALSE: ConfigDefault = ConfigDefault {
-    persisted: PersistedDefault::Unset,
-    effective: EffectiveDefault::Value(ConfigDocValue::Boolean(false)),
-};
 const EMPTY_LIST: ConfigDefault = ConfigDefault {
     persisted: PersistedDefault::Unset,
     effective: EffectiveDefault::Value(ConfigDocValue::List(&[])),
@@ -378,9 +281,73 @@ const CONFIG_SETTER: ConfigSetter = ConfigSetter::Command { path: "config" };
 #[cfg(test)]
 const MATERIALIZATION_MODES: &[&str] = &["reflink", "hardlink", "symlink", "copy"];
 
-pub const CONFIG_KEYS: &[ConfigKeySpec] = &[
-    ConfigKeySpec {
-        path: ConfigPath::Static("remotes.default"),
+pub const CONFIG_KEYS: &[ConfigFieldSpec] = &[
+    ConfigFieldSpec {
+        path: ConfigPath::Setting(SettingKey::NetworkReadinessTimeout),
+        section: ConfigSection::Network,
+        value: ConfigValueSpec::Unsigned {
+            min: Some(1),
+            max: Some(crate::settings::TimeoutSeconds::MAX as u64),
+        },
+        default: ConfigDefault {
+            persisted: PersistedDefault::Unset,
+            effective: EffectiveDefault::Setting(SettingKey::NetworkReadinessTimeout),
+        },
+        description: "Total budget in seconds for establishing remote readiness.",
+        write_surface: ConfigWriteSurface::Config,
+        setter: CONFIG_SETTER,
+        examples: &[ConfigDocValue::Unsigned(5)],
+    },
+    ConfigFieldSpec {
+        path: ConfigPath::Setting(SettingKey::NetworkOperationTimeout),
+        section: ConfigSection::Network,
+        value: ConfigValueSpec::Unsigned {
+            min: Some(1),
+            max: Some(crate::settings::TimeoutSeconds::MAX as u64),
+        },
+        default: ConfigDefault {
+            persisted: PersistedDefault::Unset,
+            effective: EffectiveDefault::Setting(SettingKey::NetworkOperationTimeout),
+        },
+        description: "Timeout in seconds for one backend operation attempt, not an entire transfer.",
+        write_surface: ConfigWriteSurface::Config,
+        setter: CONFIG_SETTER,
+        examples: &[ConfigDocValue::Unsigned(60)],
+    },
+    ConfigFieldSpec {
+        path: ConfigPath::Setting(SettingKey::NetworkIoTimeout),
+        section: ConfigSection::Network,
+        value: ConfigValueSpec::Unsigned {
+            min: Some(1),
+            max: Some(crate::settings::TimeoutSeconds::MAX as u64),
+        },
+        default: ConfigDefault {
+            persisted: PersistedDefault::Unset,
+            effective: EffectiveDefault::Setting(SettingKey::NetworkIoTimeout),
+        },
+        description: "Timeout in seconds for one read, write, or body operation.",
+        write_surface: ConfigWriteSurface::Config,
+        setter: CONFIG_SETTER,
+        examples: &[ConfigDocValue::Unsigned(60)],
+    },
+    ConfigFieldSpec {
+        path: ConfigPath::Setting(SettingKey::NetworkRequestConcurrency),
+        section: ConfigSection::Network,
+        value: ConfigValueSpec::Unsigned {
+            min: Some(1),
+            max: Some(crate::settings::ConcurrencyLimit::MAX as u64),
+        },
+        default: ConfigDefault {
+            persisted: PersistedDefault::Unset,
+            effective: EffectiveDefault::Setting(SettingKey::NetworkRequestConcurrency),
+        },
+        description: "Maximum simultaneous physical network requests per operation; logical scheduling is derived internally.",
+        write_surface: ConfigWriteSurface::Config,
+        setter: CONFIG_SETTER,
+        examples: &[ConfigDocValue::Unsigned(256)],
+    },
+    ConfigFieldSpec {
+        path: ConfigPath::ResourceDefault(ResourceDefault::Remote),
         section: ConfigSection::Remotes,
         value: ConfigValueSpec::String,
         default: UNSET,
@@ -389,39 +356,33 @@ pub const CONFIG_KEYS: &[ConfigKeySpec] = &[
         setter: ConfigSetter::Command {
             path: "remote default",
         },
-        environment_override: None,
         examples: &[ConfigDocValue::String("origin")],
     },
-    ConfigKeySpec {
-        path: ConfigPath::Named {
-            section: "remotes",
-            field: Some("url"),
-        },
+    ConfigFieldSpec {
+        path: ConfigPath::ResourceField(ResourceField::RemoteUrl),
         section: ConfigSection::Remotes,
         value: ConfigValueSpec::RemoteUrl,
         default: UNSET,
         description: "Object-storage URL for one named remote.",
         write_surface: ConfigWriteSurface::Remote,
         setter: ConfigSetter::Command { path: "remote add" },
-        environment_override: None,
         examples: &[ConfigDocValue::String("s3://example-bucket/project")],
     },
-    ConfigKeySpec {
-        path: ConfigPath::Static("cache.location"),
+    ConfigFieldSpec {
+        path: ConfigPath::Setting(SettingKey::CacheLocation),
         section: ConfigSection::Cache,
         value: ConfigValueSpec::Path,
         default: ConfigDefault {
             persisted: PersistedDefault::Unset,
-            effective: EffectiveDefault::Derived("<repo>/.gat/objects"),
+            effective: EffectiveDefault::Setting(SettingKey::CacheLocation),
         },
         description: "Absolute cache path or a path relative to the repository root.",
         write_surface: ConfigWriteSurface::Config,
         setter: CONFIG_SETTER,
-        environment_override: Some("GAT_CACHE_DIR"),
         examples: &[ConfigDocValue::String("/mnt/gat-cache")],
     },
-    ConfigKeySpec {
-        path: ConfigPath::Static("cache.materialization_strategy"),
+    ConfigFieldSpec {
+        path: ConfigPath::Setting(SettingKey::CacheMaterializationStrategy),
         section: ConfigSection::Cache,
         value: ConfigValueSpec::List {
             element: ConfigElementSpec::MaterializationMode,
@@ -431,54 +392,56 @@ pub const CONFIG_KEYS: &[ConfigKeySpec] = &[
         },
         default: ConfigDefault {
             persisted: PersistedDefault::Unset,
-            effective: EffectiveDefault::Value(ConfigDocValue::List(&["copy"])),
+            effective: EffectiveDefault::Setting(SettingKey::CacheMaterializationStrategy),
         },
         description: "Ordered fallback modes used to materialize cached objects into the working tree.",
         write_surface: ConfigWriteSurface::Config,
         setter: CONFIG_SETTER,
-        environment_override: None,
         examples: &[ConfigDocValue::List(&["reflink", "copy"])],
     },
-    ConfigKeySpec {
-        path: ConfigPath::Static("cache.ingest_strategy"),
+    ConfigFieldSpec {
+        path: ConfigPath::Setting(SettingKey::CacheIngestStrategy),
         section: ConfigSection::Cache,
         value: ConfigValueSpec::Enum {
             values: crate::config::INGEST_STRATEGIES,
         },
         default: ConfigDefault {
             persisted: PersistedDefault::Unset,
-            effective: EffectiveDefault::Value(ConfigDocValue::String("safe")),
+            effective: EffectiveDefault::Setting(SettingKey::CacheIngestStrategy),
         },
         description: "Copy-and-hash strategy used when publishing local files into the content-addressed cache.",
         write_surface: ConfigWriteSurface::Config,
         setter: CONFIG_SETTER,
-        environment_override: None,
         examples: &[ConfigDocValue::String("safe")],
     },
-    ConfigKeySpec {
-        path: ConfigPath::Static("sync.trust_state"),
+    ConfigFieldSpec {
+        path: ConfigPath::Setting(SettingKey::SyncTrustState),
         section: ConfigSection::Sync,
         value: ConfigValueSpec::Boolean,
-        default: BOOL_FALSE,
+        default: ConfigDefault {
+            persisted: PersistedDefault::Unset,
+            effective: EffectiveDefault::Setting(SettingKey::SyncTrustState),
+        },
         description: "Trust recorded materialized state without inspecting the working tree.",
         write_surface: ConfigWriteSurface::Config,
         setter: CONFIG_SETTER,
-        environment_override: None,
         examples: &[ConfigDocValue::Boolean(true)],
     },
-    ConfigKeySpec {
-        path: ConfigPath::Static("sync.auto_fetch"),
+    ConfigFieldSpec {
+        path: ConfigPath::Setting(SettingKey::SyncAutoFetch),
         section: ConfigSection::Sync,
         value: ConfigValueSpec::Boolean,
-        default: BOOL_FALSE,
+        default: ConfigDefault {
+            persisted: PersistedDefault::Unset,
+            effective: EffectiveDefault::Setting(SettingKey::SyncAutoFetch),
+        },
         description: "Fetch missing objects before normal sync reconciliation.",
         write_surface: ConfigWriteSurface::Config,
         setter: CONFIG_SETTER,
-        environment_override: None,
         examples: &[ConfigDocValue::Boolean(true)],
     },
-    ConfigKeySpec {
-        path: ConfigPath::Static("selections.default"),
+    ConfigFieldSpec {
+        path: ConfigPath::ResourceDefault(ResourceDefault::Selection),
         section: ConfigSection::Selection,
         value: ConfigValueSpec::String,
         default: UNSET,
@@ -487,14 +450,10 @@ pub const CONFIG_KEYS: &[ConfigKeySpec] = &[
         setter: ConfigSetter::Command {
             path: "selection default",
         },
-        environment_override: None,
         examples: &[ConfigDocValue::String("runtime")],
     },
-    ConfigKeySpec {
-        path: ConfigPath::Named {
-            section: "selections",
-            field: Some("path"),
-        },
+    ConfigFieldSpec {
+        path: ConfigPath::ResourceField(ResourceField::SelectionPath),
         section: ConfigSection::Selection,
         value: ConfigValueSpec::Path,
         default: ConfigDefault {
@@ -506,14 +465,10 @@ pub const CONFIG_KEYS: &[ConfigKeySpec] = &[
         setter: ConfigSetter::Command {
             path: "selection add",
         },
-        environment_override: None,
         examples: &[ConfigDocValue::String("models")],
     },
-    ConfigKeySpec {
-        path: ConfigPath::Named {
-            section: "selections",
-            field: Some("include"),
-        },
+    ConfigFieldSpec {
+        path: ConfigPath::ResourceField(ResourceField::SelectionInclude),
         section: ConfigSection::Selection,
         value: ConfigValueSpec::List {
             element: ConfigElementSpec::Glob,
@@ -527,14 +482,10 @@ pub const CONFIG_KEYS: &[ConfigKeySpec] = &[
         setter: ConfigSetter::Command {
             path: "selection add",
         },
-        environment_override: None,
         examples: &[ConfigDocValue::List(&["data/**", "models/**"])],
     },
-    ConfigKeySpec {
-        path: ConfigPath::Named {
-            section: "selections",
-            field: Some("exclude"),
-        },
+    ConfigFieldSpec {
+        path: ConfigPath::ResourceField(ResourceField::SelectionExclude),
         section: ConfigSection::Selection,
         value: ConfigValueSpec::List {
             element: ConfigElementSpec::Glob,
@@ -548,22 +499,23 @@ pub const CONFIG_KEYS: &[ConfigKeySpec] = &[
         setter: ConfigSetter::Command {
             path: "selection add",
         },
-        environment_override: None,
         examples: &[ConfigDocValue::List(&["tmp/**"])],
     },
-    ConfigKeySpec {
-        path: ConfigPath::Static("sync.auto_repair"),
+    ConfigFieldSpec {
+        path: ConfigPath::Setting(SettingKey::SyncAutoRepair),
         section: ConfigSection::Sync,
         value: ConfigValueSpec::Boolean,
-        default: BOOL_FALSE,
+        default: ConfigDefault {
+            persisted: PersistedDefault::Unset,
+            effective: EffectiveDefault::Setting(SettingKey::SyncAutoRepair),
+        },
         description: "Re-fetch and rematerialize cache objects found corrupted during sync.",
         write_surface: ConfigWriteSurface::Config,
         setter: CONFIG_SETTER,
-        environment_override: None,
         examples: &[ConfigDocValue::Boolean(true)],
     },
-    ConfigKeySpec {
-        path: ConfigPath::Static("lock.shard_levels"),
+    ConfigFieldSpec {
+        path: ConfigPath::Setting(SettingKey::LockShardLevels),
         section: ConfigSection::Lock,
         value: ConfigValueSpec::Unsigned {
             min: Some(0),
@@ -571,33 +523,25 @@ pub const CONFIG_KEYS: &[ConfigKeySpec] = &[
         },
         default: ConfigDefault {
             persisted: PersistedDefault::Unset,
-            effective: EffectiveDefault::Value(ConfigDocValue::Unsigned(0)),
+            effective: EffectiveDefault::Setting(SettingKey::LockShardLevels),
         },
         description: "Number of hash fan-out directory levels used by the persisted lock.",
         write_surface: ConfigWriteSurface::Config,
         setter: CONFIG_SETTER,
-        environment_override: None,
         examples: &[ConfigDocValue::Unsigned(2)],
     },
-    ConfigKeySpec {
-        path: ConfigPath::Named {
-            section: "mounts",
-            field: Some("url"),
-        },
+    ConfigFieldSpec {
+        path: ConfigPath::ResourceField(ResourceField::MountUrl),
         section: ConfigSection::Mounts,
         value: ConfigValueSpec::GitLocation,
         default: UNSET,
         description: "Git repository from which this mount imports tracked rows.",
         write_surface: ConfigWriteSurface::Mount,
         setter: ConfigSetter::Command { path: "mount add" },
-        environment_override: None,
         examples: &[ConfigDocValue::String("../models")],
     },
-    ConfigKeySpec {
-        path: ConfigPath::Named {
-            section: "mounts",
-            field: Some("target"),
-        },
+    ConfigFieldSpec {
+        path: ConfigPath::ResourceField(ResourceField::MountTarget),
         section: ConfigSection::Mounts,
         value: ConfigValueSpec::Path,
         default: ConfigDefault {
@@ -607,14 +551,10 @@ pub const CONFIG_KEYS: &[ConfigKeySpec] = &[
         description: "Destination subtree owned by the mount.",
         write_surface: ConfigWriteSurface::Mount,
         setter: ConfigSetter::Command { path: "mount add" },
-        environment_override: None,
         examples: &[ConfigDocValue::String("releases/resnet")],
     },
-    ConfigKeySpec {
-        path: ConfigPath::Named {
-            section: "mounts",
-            field: Some("path"),
-        },
+    ConfigFieldSpec {
+        path: ConfigPath::ResourceField(ResourceField::MountPath),
         section: ConfigSection::Mounts,
         value: ConfigValueSpec::Path,
         default: ConfigDefault {
@@ -624,14 +564,10 @@ pub const CONFIG_KEYS: &[ConfigKeySpec] = &[
         description: "Subtree inside the source repository from which rows are selected.",
         write_surface: ConfigWriteSurface::Mount,
         setter: ConfigSetter::Command { path: "mount add" },
-        environment_override: None,
         examples: &[ConfigDocValue::String("exports")],
     },
-    ConfigKeySpec {
-        path: ConfigPath::Named {
-            section: "mounts",
-            field: Some("rev"),
-        },
+    ConfigFieldSpec {
+        path: ConfigPath::ResourceField(ResourceField::MountRevision),
         section: ConfigSection::Mounts,
         value: ConfigValueSpec::String,
         default: ConfigDefault {
@@ -641,14 +577,10 @@ pub const CONFIG_KEYS: &[ConfigKeySpec] = &[
         description: "Git revision the mount tracks.",
         write_surface: ConfigWriteSurface::Mount,
         setter: ConfigSetter::Command { path: "mount add" },
-        environment_override: None,
         examples: &[ConfigDocValue::String("main")],
     },
-    ConfigKeySpec {
-        path: ConfigPath::Named {
-            section: "mounts",
-            field: Some("rev_lock"),
-        },
+    ConfigFieldSpec {
+        path: ConfigPath::ResourceField(ResourceField::MountRevisionLock),
         section: ConfigSection::Mounts,
         value: ConfigValueSpec::String,
         default: UNSET,
@@ -657,14 +589,10 @@ pub const CONFIG_KEYS: &[ConfigKeySpec] = &[
         setter: ConfigSetter::Automatic {
             description: "resolved automatically by {{command:mount add}} and {{command:mount update}}",
         },
-        environment_override: None,
         examples: &[],
     },
-    ConfigKeySpec {
-        path: ConfigPath::Named {
-            section: "mounts",
-            field: Some("include"),
-        },
+    ConfigFieldSpec {
+        path: ConfigPath::ResourceField(ResourceField::MountInclude),
         section: ConfigSection::Mounts,
         value: ConfigValueSpec::List {
             element: ConfigElementSpec::Glob,
@@ -676,14 +604,10 @@ pub const CONFIG_KEYS: &[ConfigKeySpec] = &[
         description: "Glob patterns selecting source rows relative to the mount path.",
         write_surface: ConfigWriteSurface::Mount,
         setter: ConfigSetter::Command { path: "mount add" },
-        environment_override: None,
         examples: &[ConfigDocValue::List(&["**/*.onnx"])],
     },
-    ConfigKeySpec {
-        path: ConfigPath::Named {
-            section: "mounts",
-            field: Some("exclude"),
-        },
+    ConfigFieldSpec {
+        path: ConfigPath::ResourceField(ResourceField::MountExclude),
         section: ConfigSection::Mounts,
         value: ConfigValueSpec::List {
             element: ConfigElementSpec::Glob,
@@ -695,39 +619,30 @@ pub const CONFIG_KEYS: &[ConfigKeySpec] = &[
         description: "Glob patterns excluded from the mount selection.",
         write_surface: ConfigWriteSurface::Mount,
         setter: ConfigSetter::Command { path: "mount add" },
-        environment_override: None,
         examples: &[ConfigDocValue::List(&["tests/**"])],
     },
-    ConfigKeySpec {
-        path: ConfigPath::Named {
-            section: "routes",
-            field: Some("path"),
-        },
+    ConfigFieldSpec {
+        path: ConfigPath::ResourceField(ResourceField::RoutePath),
         section: ConfigSection::Routes,
         value: ConfigValueSpec::Path,
         default: UNSET,
         description: "Root-relative tracked-path prefix served by the route.",
         write_surface: ConfigWriteSurface::Route,
         setter: ConfigSetter::Command { path: "route add" },
-        environment_override: None,
         examples: &[ConfigDocValue::String("data/datasets")],
     },
-    ConfigKeySpec {
-        path: ConfigPath::Named {
-            section: "routes",
-            field: Some("remote"),
-        },
+    ConfigFieldSpec {
+        path: ConfigPath::ResourceField(ResourceField::RouteRemote),
         section: ConfigSection::Routes,
         value: ConfigValueSpec::String,
         default: UNSET,
         description: "Named remote that serves the route's path.",
         write_surface: ConfigWriteSurface::Route,
         setter: ConfigSetter::Command { path: "route add" },
-        environment_override: None,
         examples: &[ConfigDocValue::String("backup")],
     },
-    ConfigKeySpec {
-        path: ConfigPath::Static("git.ignore_patterns"),
+    ConfigFieldSpec {
+        path: ConfigPath::Setting(SettingKey::GitIgnorePatterns),
         section: ConfigSection::GitIntegration,
         value: ConfigValueSpec::List {
             element: ConfigElementSpec::GitIgnorePattern,
@@ -735,11 +650,13 @@ pub const CONFIG_KEYS: &[ConfigKeySpec] = &[
             ordered: true,
             unique: false,
         },
-        default: EMPTY_LIST,
+        default: ConfigDefault {
+            persisted: PersistedDefault::Unset,
+            effective: EffectiveDefault::Setting(SettingKey::GitIgnorePatterns),
+        },
         description: "Single-line, non-negated Git-ignore patterns used to derive Gat's managed `.git/info/exclude` block.",
         write_surface: ConfigWriteSurface::Config,
         setter: CONFIG_SETTER,
-        environment_override: None,
         examples: &[ConfigDocValue::List(&[
             "*.safetensors",
             "/artifacts/**/*.bin",
@@ -768,9 +685,34 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
+    fn resource_namespaces_recognize_unknown_fields_but_not_similar_prefixes() {
+        for (namespace, resource) in [
+            ("remotes", ConfigResource::Remote),
+            ("routes", ConfigResource::Route),
+            ("mounts", ConfigResource::Mount),
+            ("selections", ConfigResource::Selection),
+        ] {
+            assert_eq!(ConfigResource::from_key(namespace), Some(resource));
+            assert_eq!(
+                ConfigResource::from_key(&format!("{namespace}.unknown.field")),
+                Some(resource)
+            );
+            assert_eq!(
+                ConfigResource::from_key(&format!("{namespace}_other.field")),
+                None
+            );
+        }
+        assert_eq!(
+            ConfigResource::from_key("network.request_concurrency"),
+            None
+        );
+        assert_eq!(ConfigResource::from_key(""), None);
+    }
+
+    #[test]
     fn removed_sync_filters_are_not_config_keys() {
-        assert_eq!(ConfigKey::parse("sync.include"), None);
-        assert_eq!(ConfigKey::parse("sync.exclude"), None);
+        assert_eq!(SettingKey::parse("sync.include"), None);
+        assert_eq!(SettingKey::parse("sync.exclude"), None);
     }
 
     #[test]
@@ -845,15 +787,44 @@ mod tests {
     #[test]
     fn config_command_keys_match_the_schema_and_alias_canonicalizes() {
         assert_eq!(
-            ConfigKey::CANONICAL
+            SettingKey::CANONICAL
                 .into_iter()
-                .map(ConfigKey::as_str)
+                .map(SettingKey::as_str)
                 .collect::<HashSet<_>>(),
             settable_via_config_keys().collect::<HashSet<_>>()
         );
-        assert_eq!(
-            ConfigKey::GitExcludePatterns.canonical(),
-            ConfigKey::GitIgnorePatterns
-        );
+        assert_eq!(SettingKey::parse("git.exclude_patterns"), None);
+    }
+}
+
+impl ConfigFieldSpec {
+    #[must_use]
+    pub fn environment_override(&self) -> Option<String> {
+        match self.path {
+            ConfigPath::Setting(key) if key.supports_environment() => Some(key.environment_name()),
+            _ => None,
+        }
+    }
+}
+
+/// Wire-schema ownership is independent of command presentation metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigEntryKind {
+    Setting(SettingKey),
+    ResourceField,
+    ResourceDefault,
+    Generated,
+}
+impl ConfigFieldSpec {
+    #[must_use]
+    pub const fn kind(&self) -> ConfigEntryKind {
+        match self.path {
+            ConfigPath::Setting(key) => ConfigEntryKind::Setting(key),
+            ConfigPath::ResourceDefault(_) => ConfigEntryKind::ResourceDefault,
+            ConfigPath::ResourceField(ResourceField::MountRevisionLock) => {
+                ConfigEntryKind::Generated
+            }
+            ConfigPath::ResourceField(_) => ConfigEntryKind::ResourceField,
+        }
     }
 }

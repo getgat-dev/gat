@@ -97,3 +97,4 @@ pub mod oid;
 pub mod path_scope;
 pub mod progress;
 pub mod selection;
+pub mod settings;
