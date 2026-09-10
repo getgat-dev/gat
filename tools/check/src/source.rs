@@ -232,6 +232,9 @@ impl Checker<'_> {
             resolved.as_str(),
             "std::env::set_var" | "std::env::remove_var"
         );
+        if (self.architecture || self.hygiene) && resolved == "std::env::set_current_dir" {
+            self.report(span, "environment/cwd", "pass explicit paths or set a child process working directory instead of changing the process working directory");
+        }
         if (self.architecture || self.hygiene) && mutation {
             self.report(
                 span,
@@ -266,7 +269,22 @@ impl Checker<'_> {
             );
         }
         if self.architecture && !self.test {
-            if self.name.starts_with("gat-command/") && resolved.starts_with("std::fs::") {
+            if (self.name.starts_with("gat-engine/") || self.name.starts_with("gat-command/"))
+                && (resolved == "std::process::Command"
+                    || resolved.starts_with("std::process::Command::")
+                    || resolved == "tokio::process::Command"
+                    || resolved.starts_with("tokio::process::Command::"))
+            {
+                self.report(
+                    span,
+                    "ownership/process",
+                    "spawn processes through repository-bound IO capabilities",
+                );
+            }
+
+            if self.name.starts_with("gat-command/")
+                && (resolved.starts_with("std::fs::") || resolved.starts_with("tokio::fs::"))
+            {
                 self.report(
                     span,
                     "ownership/filesystem",
@@ -281,6 +299,7 @@ impl Checker<'_> {
                         | "std::io::BufWriter"
                         | "std::fs::File"
                 ) || resolved.starts_with("std::fs::")
+                    || resolved.starts_with("tokio::fs::")
                     || resolved.starts_with("std::io::BufReader::")
                     || resolved.starts_with("std::io::BufWriter::")
                 {
@@ -380,8 +399,23 @@ impl<'ast> Visit<'ast> for Checker<'_> {
 
     fn visit_macro(&mut self, invocation: &'ast syn::Macro) {
         if self.architecture
+            && !self.test
+            && (self.name.starts_with("src/") || self.name.starts_with("gat-"))
+            && matches!(self.resolve(&invocation.path).as_str(), "dbg" | "std::dbg")
+        {
+            self.report(
+                invocation.span(),
+                "errors/debug",
+                "remove debug output from production code; use typed output",
+            );
+        }
+
+        if self.architecture
             && self.name.starts_with("src/")
-            && invocation.path.is_ident("eprintln")
+            && matches!(
+                self.resolve(&invocation.path).as_str(),
+                "eprintln" | "std::eprintln"
+            )
             && self.name != "src/output/error.rs"
         {
             self.report(
@@ -410,6 +444,7 @@ impl<'ast> Visit<'ast> for Checker<'_> {
         {
             let path = self.resolve(&function.path);
             let boundary = path.starts_with("std::fs::")
+                || path.starts_with("tokio::fs::")
                 || path.ends_with("::bind")
                 || path.contains("RemoteClient::open");
             if boundary && !self.justified(call.span().start().line, "hygiene-ok:") {
@@ -420,15 +455,10 @@ impl<'ast> Visit<'ast> for Checker<'_> {
                     }) = argument
                     {
                         let value = value.value();
-                        if value.starts_with("/tmp/")
-                            || value.starts_with("/var/tmp/")
+                        if shared_path(&value)
                             || value.starts_with("http://")
                             || value.starts_with("https://")
-                            || ((value.starts_with("127.0.0.1:")
-                                || value.starts_with("localhost:"))
-                                && !value.ends_with(":0"))
-                            || (value.as_bytes().get(1) == Some(&b':')
-                                && value.as_bytes().get(2) == Some(&b'\\'))
+                            || (path.ends_with("::bind") && !isolated_bind(&value))
                         {
                             self.report(call.span(), "tests/isolation", "use fixture-owned paths/endpoints; justify deliberate boundary tests with hygiene-ok:");
                         }
@@ -438,6 +468,26 @@ impl<'ast> Visit<'ast> for Checker<'_> {
         }
         visit::visit_expr_call(self, call);
     }
+}
+
+fn shared_path(value: &str) -> bool {
+    value == "/tmp"
+        || value.starts_with("/tmp/")
+        || value == "/var/tmp"
+        || value.starts_with("/var/tmp/")
+        || (value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphabetic)
+            && value.as_bytes().get(1) == Some(&b':')
+            && matches!(value.as_bytes().get(2), Some(b'/' | b'\\')))
+}
+
+fn isolated_bind(value: &str) -> bool {
+    value == "localhost:0"
+        || value
+            .parse::<std::net::SocketAddr>()
+            .is_ok_and(|address| address.ip().is_loopback() && address.port() == 0)
 }
 
 #[cfg(test)]
@@ -459,6 +509,97 @@ mod tests {
         checker.imports(&syntax.items);
         checker.visit_file(&syntax);
         findings.into_iter().map(|finding| finding.rule).collect()
+    }
+
+    #[test]
+    fn working_directory_mutation_is_global_but_child_configuration_is_local() {
+        assert_eq!(
+            rules(
+                "tests/x.rs",
+                r#"use std::env::set_current_dir as cd; fn f(){ cd("x"); }"#
+            ),
+            ["environment/cwd"]
+        );
+        assert!(
+            rules(
+                "tests/x.rs",
+                r#"fn f(){ std::process::Command::new("git").current_dir("x"); }"#
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn async_io_and_processes_obey_the_same_ownership_as_sync_io() {
+        for owner in ["gat-engine/src/x.rs", "gat-command/src/x.rs"] {
+            for text in [
+                r#"use tokio::fs as disk; async fn f(){ disk::read("x").await; }"#,
+                r#"use tokio::process::Command as Child; fn f(){ Child::new("git"); }"#,
+                r#"fn f(){ std::process::Command::new("git"); }"#,
+            ] {
+                assert!(!rules(owner, text).is_empty());
+                assert!(rules(owner, &format!("#[cfg(test)] mod tests {{ {text} }}")).is_empty());
+                assert!(rules("gat-io/src/x.rs", text).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn debug_output_is_for_tests_not_production() {
+        for text in [
+            "fn f(){ dbg!(1); }",
+            "use std::dbg as trace; fn f(){ trace!(1); }",
+        ] {
+            assert_eq!(rules("src/x.rs", text), ["errors/debug"]);
+            assert!(rules("tests/x.rs", text).is_empty());
+            assert!(rules("tools/docs/src/main.rs", text).is_empty());
+        }
+        assert!(rules("src/x.rs", "fn f(){ custom::dbg!(1); }").is_empty());
+    }
+
+    #[test]
+    fn bind_isolation_covers_ipv6_wildcards_and_public_addresses() {
+        for address in [
+            "[::1]:1234",
+            "[::]:0",
+            "0.0.0.0:0",
+            "192.0.2.1:0",
+            "example.test:0",
+        ] {
+            assert_eq!(
+                rules(
+                    "tests/x.rs",
+                    &format!("fn f(){{ tokio::net::TcpListener::bind({address:?}); }}")
+                ),
+                ["tests/isolation"]
+            );
+        }
+        for address in ["[::1]:0", "127.0.0.2:0", "localhost:0"] {
+            assert!(
+                rules(
+                    "tests/x.rs",
+                    &format!("fn f(){{ std::net::TcpListener::bind({address:?}); }}")
+                )
+                .is_empty()
+            );
+        }
+        assert!(
+            rules(
+                "tests/x.rs",
+                "// hygiene-ok: exercise invalid endpoint validation
+fn f(){ std::net::TcpListener::bind(\"invalid\"); }"
+            )
+            .is_empty()
+        );
+        for path in ["/tmp", "/var/tmp", "C:/shared", r"C:\shared"] {
+            assert_eq!(
+                rules(
+                    "tests/x.rs",
+                    &format!("fn f(){{ tokio::fs::read({path:?}); }}")
+                ),
+                ["tests/isolation"]
+            );
+        }
     }
 
     #[test]
@@ -549,6 +690,18 @@ mod tests {
     fn test_context_ends_at_the_module_boundary() {
         let text = "#[cfg(test)] mod tests { fn f(){ std::thread::sleep(todo!()); } } fn f(){ std::thread::sleep(todo!()); }";
         assert_eq!(rules("gat-core/src/x.rs", text), ["tests/sleep"]);
+    }
+
+    #[test]
+    fn qualified_and_aliased_error_macros_use_the_same_render_boundary() {
+        for text in [
+            r#"fn f(){ std::eprintln!("failure"); }"#,
+            r#"use std::eprintln as report; fn f(){ report!("failure"); }"#,
+        ] {
+            assert_eq!(rules("src/x.rs", text), ["errors/render"]);
+            assert!(rules("src/output/error.rs", text).is_empty());
+        }
+        assert!(rules("src/x.rs", r#"fn f(){ custom::eprintln!("data"); }"#).is_empty());
     }
 
     #[test]

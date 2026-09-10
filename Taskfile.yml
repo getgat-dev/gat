@@ -159,4 +159,4 @@ tasks:
       directory when --path is omitted. Forwards extra flags, e.g.:
       task benchmark:generate -- --small-files 20000 --large-files 10
     cmds:
-      - cargo run --quiet --locked -p gat-benchmark --bin generate-benchmark -- {{.CLI_ARGS}}
+      - cargo run --quiet --locked -p gat-bench --bin gat-bench -- {{.CLI_ARGS}}

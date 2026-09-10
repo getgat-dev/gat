@@ -1,11 +1,11 @@
 [package]
-name = "gat-benchmark"
+name = "gat-bench"
 edition = "2024"
 rust-version = "1.91"
 publish = false
 
 [[bin]]
-name = "generate-benchmark"
+name = "gat-bench"
 path = "src/main.rs"
 
 [dependencies]

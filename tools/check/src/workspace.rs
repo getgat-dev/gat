@@ -26,6 +26,10 @@ fn inspect(metadata: &Value, findings: &mut Vec<Finding>) -> Result<()> {
     let defaults = metadata["workspace_default_members"]
         .as_array()
         .ok_or("cargo metadata has no default members")?;
+    let root_msrv = packages
+        .iter()
+        .find(|package| package["name"] == "gat")
+        .and_then(|package| package["rust_version"].as_str());
     for package in packages {
         let name = package["name"].as_str().ok_or("package has no name")?;
         let allowed: Option<&[&str]> = match name {
@@ -34,13 +38,13 @@ fn inspect(metadata: &Value, findings: &mut Vec<Finding>) -> Result<()> {
             "gat-engine" => Some(&["gat-core", "gat-io"]),
             "gat-command" => Some(&["gat-core", "gat-engine"]),
             "gat" => Some(&["gat-core", "gat-engine", "gat-command"]),
-            "gat-check" | "gat-benchmark" => Some(&[]),
+            "gat-check" | "gat-bench" => Some(&[]),
             _ => None,
         };
         let path = match name {
             "gat" => "Cargo.toml".to_owned(),
             "gat-docs" => "tools/docs/Cargo.toml".to_owned(),
-            "gat-benchmark" => "tools/benchmark/Cargo.toml".to_owned(),
+            "gat-bench" => "tools/benchmark/Cargo.toml".to_owned(),
             "gat-check" => "tools/check/Cargo.toml".to_owned(),
             _ => format!("{name}/Cargo.toml"),
         };
@@ -52,12 +56,20 @@ fn inspect(metadata: &Value, findings: &mut Vec<Finding>) -> Result<()> {
                 message,
             });
         };
-        if matches!(name, "gat-check" | "gat-docs" | "gat-benchmark")
+        if matches!(name, "gat-check" | "gat-docs" | "gat-bench")
             && defaults.contains(&package["id"])
         {
             report(
                 "workspace/defaults",
                 "developer tools must not be default workspace members".into(),
+            );
+        }
+        if let Some(msrv) = root_msrv
+            && package["rust_version"].as_str() != Some(msrv)
+        {
+            report(
+                "workspace/msrv",
+                format!("declare rust-version = {msrv:?} to match the application MSRV"),
             );
         }
         for dependency in package["dependencies"]
@@ -92,6 +104,28 @@ fn inspect(metadata: &Value, findings: &mut Vec<Finding>) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn workspace_packages_share_the_declared_application_msrv() {
+        for rust_version in [json!("1.91"), json!("1.90"), Value::Null] {
+            let metadata = json!({
+                "workspace_default_members": [],
+                "packages": [
+                    {"name":"gat", "id":"app", "rust_version":"1.91", "dependencies":[]},
+                    {"name":"gat-check", "id":"check", "rust_version":rust_version, "dependencies":[]}
+                ]
+            });
+            let mut findings = Vec::new();
+            inspect(&metadata, &mut findings).unwrap();
+            if rust_version == "1.91" {
+                assert!(findings.is_empty());
+            } else {
+                assert_eq!(findings.len(), 1);
+                assert_eq!(findings[0].rule, "workspace/msrv");
+                assert_eq!(findings[0].path, "tools/check/Cargo.toml");
+            }
+        }
+    }
 
     #[test]
     fn default_members_and_optional_root_dependencies_are_independent_rules() {

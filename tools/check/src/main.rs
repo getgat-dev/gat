@@ -3,6 +3,7 @@ mod release;
 mod source;
 mod workspace;
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -55,19 +56,12 @@ fn run() -> Result<bool> {
         return Ok(true);
     }
     if command == "installers" && arguments.len() <= 2 {
-        let (shell, script) = if cfg!(windows) {
-            ("pwsh", "tools/check/test-installers.ps1")
+        let platform = if cfg!(windows) {
+            InstallerPlatform::Windows
         } else {
-            ("bash", "tools/check/test-installers.sh")
+            InstallerPlatform::Unix
         };
-        let mut process = Command::new(shell);
-        if cfg!(windows) {
-            process.arg("-File");
-        }
-        process.arg(root.join(script)).current_dir(&root);
-        if let Some(shell) = arguments.get(1) {
-            process.arg(shell);
-        }
+        let mut process = installer_command(&root, platform, arguments.get(1).map(AsRef::as_ref));
         return Ok(process.status()?.success());
     }
     if arguments.len() != 1 || !matches!(command, "all" | "architecture" | "test-hygiene") {
@@ -93,4 +87,67 @@ fn run() -> Result<bool> {
     }
     println!("{command}: {} finding(s)", findings.len());
     Ok(findings.is_empty())
+}
+
+#[derive(Clone, Copy)]
+enum InstallerPlatform {
+    Unix,
+    Windows,
+}
+
+fn installer_command(root: &Path, platform: InstallerPlatform, shell: Option<&OsStr>) -> Command {
+    let mut process = match platform {
+        InstallerPlatform::Windows => {
+            let mut process = Command::new(shell.unwrap_or_else(|| OsStr::new("pwsh")));
+            process.args(["-NoProfile", "-NonInteractive", "-File"]);
+            process.arg(root.join("tools/check/test-installers.ps1"));
+            process
+        }
+        InstallerPlatform::Unix => {
+            let mut process = Command::new("bash");
+            process.arg(root.join("tools/check/test-installers.sh"));
+            if let Some(shell) = shell {
+                process.arg(shell);
+            }
+            process
+        }
+    };
+    process.current_dir(root);
+    process
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_fixtures_run_in_the_selected_powershell_edition() {
+        let root = Path::new("checkout with spaces");
+        for shell in ["powershell", "pwsh"] {
+            let command =
+                installer_command(root, InstallerPlatform::Windows, Some(OsStr::new(shell)));
+            assert_eq!(command.get_program(), shell);
+            assert_eq!(command.get_current_dir(), Some(root));
+            let arguments = command.get_args().collect::<Vec<_>>();
+            assert_eq!(&arguments[..3], ["-NoProfile", "-NonInteractive", "-File"]);
+            assert_eq!(arguments[3], root.join("tools/check/test-installers.ps1"));
+            assert_eq!(arguments.len(), 4);
+        }
+    }
+
+    #[test]
+    fn unix_fixture_driver_preserves_the_selected_installer_shell() {
+        let root = Path::new("checkout with spaces");
+        let command =
+            installer_command(root, InstallerPlatform::Unix, Some(OsStr::new("/bin/dash")));
+        assert_eq!(command.get_program(), "bash");
+        assert_eq!(command.get_current_dir(), Some(root));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [
+                root.join("tools/check/test-installers.sh").as_os_str(),
+                OsStr::new("/bin/dash")
+            ]
+        );
+    }
 }

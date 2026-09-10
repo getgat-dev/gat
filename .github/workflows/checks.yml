@@ -126,8 +126,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: stable
+      - name: Checker tests
+        run: cargo test --locked -p gat-check
       - name: PowerShell installer fixtures
-        run: cargo run --quiet --locked -p gat-check -- installers
+        env:
+          INSTALLER_SHELL: ${{ matrix.shell }}
+        run: cargo run --quiet --locked -p gat-check -- installers "$env:INSTALLER_SHELL"
       # Enable once the v0.1.0 release and its assets are publicly downloadable.
       # - name: Install v0.1.0 over HTTPS and smoke-test the binary
       #   env:
@@ -196,7 +200,7 @@ jobs:
       - run: cargo check -p gat-io --lib --no-default-features --locked
       - run: cargo check -p gat-engine --lib --no-default-features --locked
       - run: cargo check -p gat-command --lib --no-default-features --locked
-      - run: cargo check -p gat-docs -p gat-benchmark -p gat-check --all-targets --all-features --locked
+      - run: cargo check -p gat-docs -p gat-bench -p gat-check --all-targets --all-features --locked
 
   msrv:
     name: msrv
