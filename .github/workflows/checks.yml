@@ -69,13 +69,8 @@ jobs:
       - name: Lint Unix installers
         if: runner.os == 'Linux'
         run: shellcheck docs/install.sh tools/check/test-installers.sh tools/check/test-linux-release.sh
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
-        with:
-          toolchain: stable
-      - name: Checker tests
-        run: cargo test --locked -p gat-check
       - name: Unix installer fixtures
-        run: cargo run --quiet --locked -p gat-check -- installers "$INSTALLER_SHELL"
+        run: bash tools/check/test-installers.sh "$INSTALLER_SHELL"
       # Enable once the v0.1.0 release and its assets are publicly downloadable.
       # - name: Install v0.1.0 over HTTPS and smoke-test the binary
       #   env:
@@ -123,15 +118,8 @@ jobs:
             $diagnostics | Format-Table -Wrap
             throw 'Installer static analysis failed'
           }
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
-        with:
-          toolchain: stable
-      - name: Checker tests
-        run: cargo test --locked -p gat-check
       - name: PowerShell installer fixtures
-        env:
-          INSTALLER_SHELL: ${{ matrix.shell }}
-        run: cargo run --quiet --locked -p gat-check -- installers "$env:INSTALLER_SHELL"
+        run: ./tools/check/test-installers.ps1
       # Enable once the v0.1.0 release and its assets are publicly downloadable.
       # - name: Install v0.1.0 over HTTPS and smoke-test the binary
       #   env:

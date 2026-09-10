@@ -7,7 +7,7 @@ Follow `CONTRIBUTING.md`.
   * `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
   * `cargo test --locked -p gat-check`
   * `cargo run --quiet --locked -p gat-check -- all`
-  * `cargo run --quiet --locked -p gat-check -- installers`
+  * `bash tools/check/test-installers.sh` on Unix; `pwsh -NoProfile -File tools/check/test-installers.ps1` on Windows
   * `cargo nextest run --all-features --locked` if `cargo-nextest` is available; otherwise `cargo test --all-features --locked`
   * `cargo test --doc --all-features --locked` when using nextest (the `cargo test` fallback already includes doctests)
 * Run `task docs:generate` after CLI/config changes if `task` is available; otherwise run:

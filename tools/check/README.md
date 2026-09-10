@@ -19,10 +19,9 @@ cargo test --locked -p gat-check
 | `test-hygiene` | Environment/working-directory mutation, unexplained sync/async sleeps, direct IO calls with shared paths or fixed/public endpoints |
 | `all` | Both groups, parsing each source file once |
 | `release BINARY TARGET MAX_GLIBC` | Linux ELF architecture/format, GNU glibc symbol ceiling, or musl static linkage |
-| `installers [SHELL]` | Execute native Unix or PowerShell installer fixtures |
 
 Findings have stable rule IDs and file/line locations. Output is sorted and
-deduplicated. Exit codes are 0 for success, 1 for policy/fixture failure, and 2
+deduplicated. Exit codes are 0 for success, 1 for policy failure, and 2
 when the checker cannot run (arguments, parsing, Cargo, missing utilities, or IO).
 Manifest findings point to line 1 of the relevant manifest.
 
@@ -64,12 +63,17 @@ Release inspection uses the host's `readelf` with a fixed locale. Rust fixtures
 cover policy decisions; release CI validates the exact packaged executable.
 Docker baseline-runtime acceptance remains in `tools/check/test-linux-release.sh`.
 
-Installer fixtures remain native shell programs because they test shell behavior
-and recovery. The Rust entry point executes them and propagates failure. Unix
-requires Bash and the fixture utilities; Windows requires PowerShell. The optional
-`SHELL` chooses the Unix installer shell (the fixture driver remains Bash), or
-the Windows fixture host (`powershell` for 5.1, `pwsh` for 7; default `pwsh`).
-The Windows CI matrix passes its shell explicitly so both editions are exercised.
+Installer fixtures run directly in their native shells through Task and CI:
+
+```sh
+bash tools/check/test-installers.sh /bin/dash
+```
+
+On Windows, run `./tools/check/test-installers.ps1` in PowerShell. The CI matrix
+runs it in both Windows PowerShell 5.1 and PowerShell 7. `task test:install`
+selects Bash on Unix and PowerShell 7 on Windows. Rust does not launch the scripts;
+installer jobs need no Rust toolchain. The Unix fixture requires Bash and its
+fixture utilities; its optional argument selects the shell running the installer.
 
 ## Adding a rule
 

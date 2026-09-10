@@ -59,7 +59,10 @@ tasks:
   test:install:
     desc: Test native installer checksums and failure recovery with local release fixtures
     cmds:
-      - cargo run --quiet --locked -p gat-check -- installers
+      - cmd: bash tools/check/test-installers.sh
+        platforms: [linux, darwin, freebsd, openbsd, netbsd]
+      - cmd: pwsh -NoProfile -File tools/check/test-installers.ps1
+        platforms: [windows]
 
   test:doc:
     desc: |
