@@ -1,79 +1,14 @@
-//! Pure repository path layout and discovery: the physical `.gat` layout
+//! Repository path layout, discovery, and local-storage capability: the physical `.gat` layout
 //! facts (repo root, config/state/lock paths) and the walk-up-to-`.git`
 //! discovery algorithm, with no knowledge of config/lock domain types.
 //! The type centralizes repository paths owned by the I/O layer.
 
+use crate::CacheRoot;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gat_core::{cache_location::CacheLocation, config::ConfigScope};
-
-/// A resolved local object-cache capability.
-///
-/// The physical cache layout stays inside `gat-io`; higher layers retain
-/// this cheap-to-clone handle and ask it for the specific cache capability
-/// they need.
-#[derive(Clone, Debug)]
-pub struct CacheRoot {
-    inner: Arc<CacheRootInner>,
-}
-
-#[derive(Debug)]
-pub(crate) struct CacheRootInner {
-    pub(crate) objects_dir: PathBuf,
-}
-
-impl CacheRoot {
-    #[must_use]
-    pub fn open_client(&self) -> crate::CacheClient {
-        crate::CacheClient::open_shared(Arc::clone(&self.inner))
-    }
-
-    #[must_use]
-    pub fn writer(&self) -> crate::CacheWriter {
-        crate::CacheWriter::new(Arc::clone(&self.inner))
-    }
-
-    #[must_use]
-    pub fn presence(&self) -> crate::CachePresence {
-        crate::CachePresence::new(Arc::clone(&self.inner))
-    }
-
-    #[must_use]
-    pub fn maintenance(&self) -> crate::CacheMaintenance<'_> {
-        crate::CacheMaintenance::new(&self.inner.objects_dir)
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    #[must_use]
-    pub fn object_path_for_test(&self, oid: &gat_core::oid::Oid) -> PathBuf {
-        crate::cache::object::cache_path_oid(&self.inner.objects_dir, oid)
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn make_object_writable_for_test(
-        &self,
-        oid: &gat_core::oid::Oid,
-    ) -> crate::CacheResult<()> {
-        crate::cache::object::unprotect(&self.object_path_for_test(oid))
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    pub fn break_database_for_test(&self) {
-        let client = crate::cache::object::CacheClient::open(self.inner.objects_dir.clone());
-        client.break_database_for_test();
-    }
-
-    /// The resolved host path for user-facing presentation only.
-    #[must_use]
-    pub fn display_path(&self) -> &Path {
-        &self.inner.objects_dir
-    }
-}
 
 /// Typed failures from repository discovery and layout-path resolution.
 #[derive(Debug, thiserror::Error)]
@@ -116,13 +51,13 @@ fn is_git_marker(path: &Path) -> bool {
 /// The physical layout of a `gat` repository: its root directory and the
 /// derived paths for `.gat`-owned state (config, materialized state
 /// database, sync lock). Owns discovery (walking up to find `.git`) and
-/// pure path derivation only -- no config/lock domain policy and no
+/// lazy local-storage initialization capability -- no config/lock domain policy and no
 /// object maintenance. Cache-location derivation consumes already-resolved
 /// config/environment inputs without reading either source itself.
 #[derive(Debug, Clone)]
 pub struct RepositoryLayout {
     root: PathBuf,
-    cache_root: PathBuf,
+    local_directory: Arc<crate::local_directory::LocalDirectory>,
 }
 
 impl RepositoryLayout {
@@ -159,7 +94,10 @@ impl RepositoryLayout {
     #[must_use]
     pub fn at(root: PathBuf) -> Self {
         let cache_root = root.join(".gat");
-        Self { root, cache_root }
+        Self {
+            root,
+            local_directory: Arc::new(crate::local_directory::LocalDirectory::new(cache_root)),
+        }
     }
 
     pub(crate) fn root_path(&self) -> &Path {
@@ -174,7 +112,11 @@ impl RepositoryLayout {
     }
 
     pub(crate) fn cache_root_path(&self) -> &Path {
-        &self.cache_root
+        self.local_directory.path()
+    }
+
+    pub(crate) const fn local_directory(&self) -> &Arc<crate::local_directory::LocalDirectory> {
+        &self.local_directory
     }
 
     /// `<repo_root>/gat.yaml` (the project-scope config location).
@@ -186,16 +128,19 @@ impl RepositoryLayout {
     /// same as `cache_root`, but named for its use here so callers reading
     /// `local_config_path` don't need to know that detail.
     pub(crate) fn local_config_dir(&self) -> &Path {
-        &self.cache_root
+        self.local_directory.path()
     }
 
     /// The repo-local `SQLite` database backing materialized state.
     pub(crate) fn materialized_db_path(&self) -> PathBuf {
-        self.cache_root.join("state").join("state.sqlite3")
+        self.local_directory
+            .path()
+            .join("state")
+            .join("state.sqlite3")
     }
 
     pub(crate) fn sync_lock_path(&self) -> PathBuf {
-        self.cache_root.join("state").join("sync.lock")
+        self.local_directory.path().join("state").join("sync.lock")
     }
 
     /// Resolve the repository's object-cache directory from already-read
@@ -218,12 +163,10 @@ impl RepositoryLayout {
                     location.as_path().to_path_buf()
                 }
                 Some(location) => self.root.join(location.as_path()),
-                None => self.cache_root.join("objects"),
+                None => self.local_directory.path().join("objects"),
             }
         };
-        CacheRoot {
-            inner: Arc::new(CacheRootInner { objects_dir }),
-        }
+        CacheRoot::new(objects_dir, Arc::clone(&self.local_directory))
     }
 
     /// Pure resolver: the global config directory from an explicit,
@@ -259,6 +202,48 @@ impl RepositoryLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_writers_share_initialization_without_per_object_filesystem_inspections() {
+        let temp = tempfile::tempdir().unwrap();
+        let layout = RepositoryLayout::at(temp.path().to_path_buf());
+        let clone = layout.clone();
+        let cache = clone.resolve_cache_root(None, None);
+        let writer = cache.writer();
+        crate::StateStore::open(&layout).unwrap();
+        cache.maintenance().rebuild_database().unwrap();
+        for _ in 0..32 {
+            writer.ingest(&b"content"[..]).unwrap();
+            assert!(crate::StateStore::open_if_exists(&clone).unwrap().is_some());
+            assert!(matches!(
+                crate::inspect_database(&clone).unwrap(),
+                crate::StateDatabaseHealth::Healthy
+            ));
+            assert!(matches!(
+                cache.maintenance().inspect_database().unwrap(),
+                crate::CacheDatabaseHealth::Healthy
+            ));
+        }
+        crate::MountJournal::open(&clone)
+            .reset_staged_rows()
+            .unwrap();
+        crate::RepoLock::acquire_repository(&clone).unwrap();
+        assert_eq!(layout.local_directory().inspection_count(), 1);
+    }
+
+    #[test]
+    fn a_fresh_layout_repairs_a_missing_ignore_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let layout = RepositoryLayout::at(temp.path().to_path_buf());
+        crate::StateStore::open(&layout).unwrap();
+        std::fs::remove_file(temp.path().join(".gat/.gitignore")).unwrap();
+        let fresh = RepositoryLayout::at(temp.path().to_path_buf());
+        crate::StateStore::open(&fresh).unwrap();
+        assert_eq!(
+            std::fs::read(temp.path().join(".gat/.gitignore")).unwrap(),
+            b"*\n"
+        );
+    }
 
     #[test]
     fn at_derives_cache_root_under_dot_gat() {

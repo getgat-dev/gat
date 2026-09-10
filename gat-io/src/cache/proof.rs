@@ -39,7 +39,7 @@
 //!   equivalent to "no proof yet" -- the caller just has to hash;
 //! - a malformed/unrecognised database (not a `SQLite` file, corrupt
 //!   pages, a `PRAGMA user_version` newer than this build understands,
-//!   WAL unsupported on this filesystem, ...) makes [`CacheState::open`]
+//!   WAL unsupported on this filesystem, ...) makes [`CacheState::open_prepared`]
 //!   return a *disabled* [`CacheState`] -- every method on it then
 //!   becomes a harmless no-op -- rather than ever downgrading, deleting,
 //!   or rewriting a database this build doesn't fully understand, and
@@ -85,7 +85,7 @@ type Result<T> = std::result::Result<T, CacheStateError>;
 ///
 /// Almost every one of these is caught and
 /// degraded to a disabled, always-successful no-op cache by
-/// [`CacheState::open`]/[`crate::CacheClient::verify`] rather than ever
+/// [`CacheState::open_prepared`]/[`crate::CacheClient::verify`] rather than ever
 /// reaching a caller -- this type exists so that degrade-gracefully
 /// decision, and the few paths that *do* propagate (`open_strict`, an
 /// explicit [`CacheState::apply_many`] flush), have a real typed
@@ -317,7 +317,7 @@ impl CachePublication {
 }
 
 /// A short-lived connection to the shared `cache.sqlite3` proof
-/// database, opened once per invocation via [`CacheState::open`]. May be
+/// database, opened once per invocation via [`CacheState::open_prepared`]. May be
 /// *disabled* (holding no connection at all) when the database couldn't
 /// be safely opened or understood, in which case
 /// every method below is a harmless, always-successful no-op, and every
@@ -366,7 +366,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
 
 /// Open (creating the file, and its schema, if it doesn't exist yet) a
 /// connection to `db_path`, failing closed with an `Err` for anything
-/// [`CacheState::open`] should treat as "disable the accelerator for
+/// [`CacheState::open_prepared`] should treat as "disable the accelerator for
 /// this invocation" -- a corrupt/foreign file, a schema newer than
 /// [`SCHEMA_VERSION`], or any other unexpected `SQLite` error.
 fn try_open(db_path: &Path) -> Result<Connection> {
@@ -405,27 +405,31 @@ fn try_open(db_path: &Path) -> Result<Connection> {
 }
 
 impl CacheState {
-    /// Open the shared proof cache next to `objects_dir`. Never fails
-    /// the caller's invocation over the *database's* condition: any
-    /// problem opening or recognising it (missing directory aside --
-    /// see below -- corruption, a foreign file, an unrecognised schema
-    /// version, WAL being unavailable, ...) yields a *disabled*
-    /// [`CacheState`] instead of an `Err`, preserving the failure
-    /// contract. `objects_dir` itself is expected to already exist by
-    /// the time anything needs to verify a cached object in it; if it
-    /// doesn't, this still returns a disabled (rather than erroring)
-    /// state, since there is nothing in it to accelerate either way.
+    pub(crate) const fn disabled() -> Self {
+        Self {
+            conn: RefCell::new(None),
+        }
+    }
+
+    /// Open the shared proof cache using evidence of prepared storage.
+    /// Database errors disable the accelerator without failing the operation.
+    /// If the object directory is absent, no database can be opened and the
+    /// accelerator is likewise disabled.
     ///
-    /// Low-level constructor: an operation
-    /// driven by an engine operation must reach the shared proof index
-    /// through [`crate::CacheClient`]/the engine cache session
-    /// rather than opening a `CacheState` directly, so a whole operation
-    /// opens at most one connection. Remaining direct callers (`gat add`,
-    /// `gat gc`, `gat system cache`, and this module's own
-    /// `finalize_tmp`/`publish_tmp`) are single-object or
-    /// standalone-command paths outside that operation architecture, not
-    /// exceptions to it.
-    pub fn open(objects_dir: &Path) -> Self {
+    /// Operation clients retain this connection for reuse; preparation evidence
+    /// prevents callers from opening a writable database before protecting its
+    /// repository-owned storage.
+    pub(crate) fn open_prepared(directory: &super::root::PreparedCacheDirectory<'_>) -> Self {
+        Self::open_at(directory.path())
+    }
+
+    /// Raw-path constructor for isolated proof-store fixtures.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_for_test(objects_dir: &Path) -> Self {
+        Self::open_at(objects_dir)
+    }
+
+    fn open_at(objects_dir: &Path) -> Self {
         #[cfg(any(test, feature = "test-support"))]
         test_support::record_cache_db_open();
         let db_path = objects_dir.join(CACHE_DB_FILENAME);
@@ -448,8 +452,9 @@ impl CacheState {
     /// a false success -- never for the ordinary ingest/lookup path,
     /// which must keep degrading gracefully via [`open`].
     ///
-    /// [`open`]: CacheState::open
-    pub fn open_strict(objects_dir: &Path) -> Result<Self> {
+    /// [`open`]: CacheState::open_prepared
+    pub(crate) fn open_strict(directory: &super::root::PreparedCacheDirectory<'_>) -> Result<Self> {
+        let objects_dir = directory.path();
         let db_path = objects_dir.join(CACHE_DB_FILENAME);
         let conn = try_open(&db_path)?;
         let result: String = conn
@@ -605,7 +610,7 @@ impl CacheState {
     /// them.
     /// Test-only fault injection: makes every subsequent read/write on
     /// this already-successfully-opened connection fail with a genuine
-    /// `SQLite` error (as opposed to `CacheState::open` itself never having
+    /// `SQLite` error (as opposed to `CacheState::open_prepared` itself never having
     /// succeeded), so tests can verify degrade-gracefully behavior for a
     /// DB that opens fine but then fails mid-operation.
     #[cfg(any(test, feature = "test-support"))]
@@ -1036,7 +1041,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let objects_dir = tmp.path().join("objects");
         fs::create_dir_all(&objects_dir).unwrap();
-        let _state = CacheState::open(&objects_dir);
+        let _state = CacheState::open_for_test(&objects_dir);
         // WAL mode legitimately adds `-wal`/`-shm` sidecar files
         // alongside the main database file; the requirement is that
         // exactly one *database* is created, not that no sidecars ever
@@ -1055,7 +1060,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let objects_dir = tmp.path().join("objects");
         fs::create_dir_all(&objects_dir).unwrap();
-        let _state = CacheState::open(&objects_dir);
+        let _state = CacheState::open_for_test(&objects_dir);
         let conn = Connection::open(objects_dir.join("cache.sqlite3")).unwrap();
         let sql: String = conn
             .query_row(
@@ -1074,7 +1079,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let objects_dir = tmp.path().join("objects");
         fs::create_dir_all(&objects_dir).unwrap();
-        let state = CacheState::open(&objects_dir);
+        let state = CacheState::open_for_test(&objects_dir);
         let oid = Oid::from_hex(&"ab".repeat(32)).unwrap();
         assert_eq!(state.lookup(&oid).unwrap(), None);
 
@@ -1095,7 +1100,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let objects_dir = tmp.path().join("objects");
         fs::create_dir_all(&objects_dir).unwrap();
-        let state = CacheState::open(&objects_dir);
+        let state = CacheState::open_for_test(&objects_dir);
         let oid_a = Oid::from_hex(&"aa".repeat(32)).unwrap();
         let oid_b = Oid::from_hex(&"bb".repeat(32)).unwrap();
         let proof = StatProof {
@@ -1128,7 +1133,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let objects_dir = tmp.path().join("objects");
         let oid = write_object(&objects_dir, b"hello world");
-        let state = CacheState::open(&objects_dir);
+        let state = CacheState::open_for_test(&objects_dir);
 
         assert_eq!(state.lookup(&oid).unwrap(), None);
         let status = verify_through_client(&objects_dir, &oid);
@@ -1154,7 +1159,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let objects_dir = tmp.path().join("objects");
         let oid = write_object(&objects_dir, b"hello world");
-        let state = CacheState::open(&objects_dir);
+        let state = CacheState::open_for_test(&objects_dir);
 
         assert_eq!(
             verify_through_client(&objects_dir, &oid),
@@ -1174,7 +1179,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let objects_dir = tmp.path().join("objects");
         let oid = write_object(&objects_dir, b"stable content");
-        let state = CacheState::open(&objects_dir);
+        let state = CacheState::open_for_test(&objects_dir);
 
         // Prime a proof, then simulate stat drift (as if another process
         // touched the file's mtime without changing its bytes) by
@@ -1196,7 +1201,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let objects_dir = tmp.path().join("objects");
         let oid = write_object(&objects_dir, b"original!!!!");
-        let state = CacheState::open(&objects_dir);
+        let state = CacheState::open_for_test(&objects_dir);
         // Establish a proof.
         assert_eq!(
             verify_through_client(&objects_dir, &oid),
@@ -1266,7 +1271,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let objects_dir = tmp.path().join("objects");
         let oid = write_object(&objects_dir, b"payload");
-        let state = CacheState::open(&objects_dir);
+        let state = CacheState::open_for_test(&objects_dir);
 
         // Write a malformed (garbage) proof BLOB directly, bypassing the
         // encoder.
@@ -1291,7 +1296,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let objects_dir = tmp.path().join("objects");
         let oid = write_object(&objects_dir, b"content");
-        let state = CacheState::open(&objects_dir);
+        let state = CacheState::open_for_test(&objects_dir);
         assert_eq!(
             verify_through_client(&objects_dir, &oid),
             ObjectVerification::Valid
@@ -1324,7 +1329,7 @@ mod tests {
             .unwrap();
         }
 
-        let state = CacheState::open(&objects_dir);
+        let state = CacheState::open_for_test(&objects_dir);
         // Disabled: never returns the row a newer build wrote.
         let oid = Oid::from_bytes([0u8; 32]);
         assert_eq!(state.lookup(&oid).unwrap(), None);
@@ -1346,7 +1351,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let objects_dir = tmp.path().join("objects");
         let oid = write_object(&objects_dir, b"real bytes");
-        let state = CacheState::open(&objects_dir);
+        let state = CacheState::open_for_test(&objects_dir);
         assert_eq!(
             verify_through_client(&objects_dir, &oid),
             ObjectVerification::Valid
@@ -1387,7 +1392,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let objects_dir = tmp.path().join("objects");
         let oid = write_object(&objects_dir, b"fifo bytes");
-        let state = CacheState::open(&objects_dir);
+        let state = CacheState::open_for_test(&objects_dir);
         assert_eq!(
             verify_through_client(&objects_dir, &oid),
             ObjectVerification::Valid
@@ -1412,7 +1417,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let objects_dir = tmp.path().join("objects");
         fs::create_dir_all(&objects_dir).unwrap();
-        let state = std::sync::Arc::new(std::sync::Mutex::new(CacheState::open(&objects_dir)));
+        let state = std::sync::Arc::new(std::sync::Mutex::new(CacheState::open_for_test(
+            &objects_dir,
+        )));
         let oid = Oid::from_hex(&"11".repeat(32)).unwrap();
 
         #[allow(
@@ -1444,7 +1451,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let objects_dir = tmp.path().join("objects");
         fs::create_dir_all(&objects_dir).unwrap();
-        let state = std::sync::Arc::new(std::sync::Mutex::new(CacheState::open(&objects_dir)));
+        let state = std::sync::Arc::new(std::sync::Mutex::new(CacheState::open_for_test(
+            &objects_dir,
+        )));
 
         #[allow(
             clippy::needless_collect,
@@ -1484,7 +1493,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let objects_dir = tmp.path().join("objects");
         fs::create_dir_all(&objects_dir).unwrap();
-        let state = CacheState::open(&objects_dir);
+        let state = CacheState::open_for_test(&objects_dir);
 
         let proof = StatProof {
             size: 1,
@@ -1525,7 +1534,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let objects_dir = tmp.path().join("objects");
         fs::create_dir_all(&objects_dir).unwrap();
-        let state = CacheState::open(&objects_dir);
+        let state = CacheState::open_for_test(&objects_dir);
 
         let proof = StatProof {
             size: 7,
@@ -1560,7 +1569,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let objects_dir = tmp.path().join("objects");
         fs::create_dir_all(&objects_dir).unwrap();
-        let state = CacheState::open(&objects_dir);
+        let state = CacheState::open_for_test(&objects_dir);
 
         let proof = StatProof {
             size: 9,
@@ -1596,7 +1605,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let objects_dir = tmp.path().join("objects");
         fs::create_dir_all(&objects_dir).unwrap();
-        let state = CacheState::open(&objects_dir);
+        let state = CacheState::open_for_test(&objects_dir);
 
         let proof = StatProof {
             size: 7,
@@ -1650,7 +1659,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let objects_dir = tmp.path().join("objects");
         fs::create_dir_all(&objects_dir).unwrap();
-        let state = CacheState::open(&objects_dir);
+        let state = CacheState::open_for_test(&objects_dir);
 
         let proof = StatProof {
             size: 3,
@@ -1695,7 +1704,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let objects_dir = tmp.path().join("objects");
         fs::create_dir_all(&objects_dir).unwrap();
-        let state = CacheState::open(&objects_dir);
+        let state = CacheState::open_for_test(&objects_dir);
         state.break_for_test();
 
         let oids: Vec<Oid> = (0..4).map(oid_from_index).collect();
@@ -1707,7 +1716,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let objects_dir = tmp.path().join("objects");
         fs::create_dir_all(&objects_dir).unwrap();
-        let state = CacheState::open(&objects_dir);
+        let state = CacheState::open_for_test(&objects_dir);
         state.break_for_test();
 
         let proof = StatProof {

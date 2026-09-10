@@ -132,17 +132,6 @@ type ShardBuckets = (
     std::collections::HashSet<std::path::PathBuf>,
 );
 
-/// Resolve the repository's shared advisory lock (`.gat/state/sync.lock`)
-/// from its root. Sparse touched-shard publication
-/// ([`save_sparse_shards`], [`publish_flat_shard`]) and the full reshape
-/// transaction ([`reshape::reshape_transactional`]) both acquire this same
-/// lock, so a `lock.shard_levels` reshape and an ordinary same-shape
-/// `add`/`rm`/`mv`/`sync` publish can never interleave: whichever gets the
-/// lock first runs to completion (release) before the other starts.
-fn sync_lock_path(root: &Path) -> std::path::PathBuf {
-    root.join(".gat").join("state").join("sync.lock")
-}
-
 /// A reshape proven necessary by an unlocked shape observation and confirmed
 /// while holding the repository-wide lock. Applying it retains that lock in
 /// the returned capability so a caller can coherently observe the newly
@@ -180,15 +169,16 @@ impl PendingLockReshape {
 /// lock and rechecks the shape before returning a capability,
 /// so a concurrent reshape cannot cause an unnecessary full load.
 pub(crate) fn begin_reshape(
-    root: &Path,
+    layout: &crate::RepositoryLayout,
     target: LockShardLevels,
 ) -> Result<Option<PendingLockReshape>> {
+    let root = layout.root_path();
     match on_disk_shape(root)? {
         Some(shape) if shape.shard_levels() != target => {}
         Some(_) | None => return Ok(None),
     }
 
-    let lock = crate::atomic::RepoLock::acquire(&sync_lock_path(root))?;
+    let lock = crate::atomic::RepoLock::acquire_repository(layout)?;
     match on_disk_shape(root)? {
         Some(shape) if shape.shard_levels() != target => Ok(Some(PendingLockReshape {
             root: root.to_path_buf(),
@@ -201,8 +191,13 @@ pub(crate) fn begin_reshape(
 
 /// Publish the complete logical lock at `target`, transactionally reshaping
 /// an existing mismatched representation before writing the final bytes.
-pub(crate) fn publish_complete(root: &Path, lock: &Lock, target: LockShardLevels) -> Result<()> {
-    let _guard = crate::atomic::RepoLock::acquire(&sync_lock_path(root))?;
+pub(crate) fn publish_complete(
+    layout: &crate::RepositoryLayout,
+    lock: &Lock,
+    target: LockShardLevels,
+) -> Result<()> {
+    let root = layout.root_path();
+    let _guard = crate::atomic::RepoLock::acquire_repository(layout)?;
     match on_disk_shape(root)? {
         Some(shape) if shape.shard_levels() != target => {
             reshape_transactional(root, lock, target)?;
@@ -215,11 +210,12 @@ pub(crate) fn publish_complete(root: &Path, lock: &Lock, target: LockShardLevels
 
 /// Evidence-returning sibling of [`publish_complete`].
 pub(crate) fn publish_complete_with_evidence(
-    root: &Path,
+    layout: &crate::RepositoryLayout,
     lock: &Lock,
     target: LockShardLevels,
 ) -> Result<FullLockEvidence> {
-    let _guard = crate::atomic::RepoLock::acquire(&sync_lock_path(root))?;
+    let root = layout.root_path();
+    let _guard = crate::atomic::RepoLock::acquire_repository(layout)?;
     match on_disk_shape(root)? {
         Some(shape) if shape.shard_levels() != target => {
             reshape_transactional(root, lock, target)?;
@@ -1383,16 +1379,16 @@ fn current_matching_lock_shape(
 /// caller that goes on to publish through the sparse, touched-shard
 /// pipeline can keep holding that very same guard across the whole "read
 /// shape, choose which shard(s) changed, publish" window instead of only
-/// serializing each primitive's own already-locked write. `RepoLock::acquire`
+/// serializing each primitive's own already-locked write. `RepoLock::acquire_repository`
 /// is reentrant on the same thread, so the nested acquisitions
 /// `save_sparse_shards`/`publish_flat_shard`/reshape make while this guard
 /// is held are a cheap no-op, not a second OS-level lock cycle.
 fn current_matching_lock_shape_locked(
-    root: &Path,
-    sync_lock_path: &Path,
+    layout: &crate::RepositoryLayout,
     target: LockShardLevels,
 ) -> Result<(crate::atomic::RepoLock, Option<OnDiskShape>)> {
-    let guard = crate::atomic::RepoLock::acquire(sync_lock_path)?;
+    let root = layout.root_path();
+    let guard = crate::atomic::RepoLock::acquire_repository(layout)?;
     let shape = current_matching_lock_shape(root, target)?;
     Ok((guard, shape))
 }
@@ -1409,11 +1405,11 @@ fn current_matching_lock_shape_locked(
 /// transaction (still surfaced as an error by [`on_disk_shape`], exactly
 /// as in the non-fresh case).
 fn current_or_target_lock_shape_locked(
-    root: &Path,
-    sync_lock_path: &Path,
+    layout: &crate::RepositoryLayout,
     target: LockShardLevels,
 ) -> Result<(crate::atomic::RepoLock, Option<OnDiskShape>)> {
-    let guard = crate::atomic::RepoLock::acquire(sync_lock_path)?;
+    let root = layout.root_path();
+    let guard = crate::atomic::RepoLock::acquire_repository(layout)?;
     let shape = match on_disk_shape(root)? {
         Some(shape) if shape.shard_levels() == target => Some(shape),
         Some(_) => None,
@@ -1468,11 +1464,10 @@ impl LockWriteGuard {
 /// capabilities. The public entry point is
 /// [`super::LockStore::acquire_matching_shape`].
 pub(crate) fn acquire_matching_shape(
-    root: &Path,
-    sync_lock_path: &Path,
+    layout: &crate::RepositoryLayout,
     target: LockShardLevels,
 ) -> Result<LockWriteGuard> {
-    let (guard, shape) = current_matching_lock_shape_locked(root, sync_lock_path, target)?;
+    let (guard, shape) = current_matching_lock_shape_locked(layout, target)?;
     Ok(LockWriteGuard {
         _guard: guard,
         shape,
@@ -1484,11 +1479,10 @@ pub(crate) fn acquire_matching_shape(
 /// capabilities. The public entry point is
 /// [`super::LockStore::acquire_current_or_target_shape`].
 pub(crate) fn acquire_current_or_target_shape(
-    root: &Path,
-    sync_lock_path: &Path,
+    layout: &crate::RepositoryLayout,
     target: LockShardLevels,
 ) -> Result<LockWriteGuard> {
-    let (guard, shape) = current_or_target_lock_shape_locked(root, sync_lock_path, target)?;
+    let (guard, shape) = current_or_target_lock_shape_locked(layout, target)?;
     Ok(LockWriteGuard {
         _guard: guard,
         shape,
@@ -2102,12 +2096,13 @@ pub const fn shard_levels_from_id(shard_id: &LockShardId) -> LockShardLevels {
 /// intermediate directories pruned. Untouched shard files are neither read
 /// nor written.
 pub fn save_sparse_shards(
-    root: &Path,
+    layout: &crate::RepositoryLayout,
     touched_shard_ids: &BTreeSet<LockShardId>,
     rows_by_shard: &BTreeMap<LockShardId, Vec<Entry>>,
     priors: &BTreeMap<LockShardId, (super::ShardContentIdentity, crate::file_state::StatProof)>,
 ) -> Result<SparseShardPublish> {
-    let _guard = crate::atomic::RepoLock::acquire(&sync_lock_path(root))?;
+    let root = layout.root_path();
+    let _guard = crate::atomic::RepoLock::acquire_repository(layout)?;
     let base = root.join("gat.lock");
     std::fs::create_dir_all(&base).map_err(|source| LockError::io("creating", &base, source))?;
     let mut removed = Vec::new();
@@ -2173,11 +2168,12 @@ pub fn save_sparse_shards(
 /// for the flat `"gat.lock"` shard, accelerates [`publish_rendered_shard`]'s
 /// tier 1 the same way [`save_sparse_shards`]'s `priors` map does.
 pub fn publish_flat_shard(
-    root: &Path,
+    layout: &crate::RepositoryLayout,
     entries: &[Entry],
     prior: Option<(super::ShardContentIdentity, crate::file_state::StatProof)>,
 ) -> Result<Option<ShardEvidence>> {
-    let _guard = crate::atomic::RepoLock::acquire(&sync_lock_path(root))?;
+    let root = layout.root_path();
+    let _guard = crate::atomic::RepoLock::acquire_repository(layout)?;
     let path = root.join("gat.lock");
     if entries.is_empty() {
         if path.exists() {
@@ -2233,12 +2229,13 @@ pub fn publish_flat_shard(
 /// here the way it is for `publish_flat_shard`'s other callers
 /// (`add`/`rm`/`mv`).
 pub fn publish_flat_shard_streaming(
-    root: &Path,
+    layout: &crate::RepositoryLayout,
     mut next_row: impl FnMut() -> Result<Option<Entry>>,
 ) -> Result<Option<ShardEvidence>> {
     use std::io::{BufWriter, Write};
 
-    let _guard = crate::atomic::RepoLock::acquire(&sync_lock_path(root))?;
+    let root = layout.root_path();
+    let _guard = crate::atomic::RepoLock::acquire_repository(layout)?;
     let path = root.join("gat.lock");
     let Some(first) = next_row()? else {
         if path.exists() {
@@ -3818,6 +3815,9 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests {
+    fn layout(root: &std::path::Path) -> crate::RepositoryLayout {
+        crate::RepositoryLayout::at(root.to_path_buf())
+    }
     use super::*;
 
     fn gp(s: &str) -> gat_core::lexical_path::GatPath {
@@ -3872,7 +3872,12 @@ mod tests {
             .build()
             .unwrap()
             .install(|| {
-                save_sparse_shards(root, touched_shard_ids, rows_by_shard, &BTreeMap::new())
+                save_sparse_shards(
+                    &layout(root),
+                    touched_shard_ids,
+                    rows_by_shard,
+                    &BTreeMap::new(),
+                )
             })
     }
 
@@ -3900,7 +3905,7 @@ mod tests {
             ),
         ];
         let mut rows = entries.into_iter();
-        let published = publish_flat_shard_streaming(tmp.path(), || Ok(rows.next()))
+        let published = publish_flat_shard_streaming(&layout(tmp.path()), || Ok(rows.next()))
             .unwrap()
             .unwrap();
 
@@ -4271,18 +4276,22 @@ mod tests {
         // `shards` and `log2(shards)` are clearly distinguishable.
         let tmp = tempfile::tempdir().unwrap();
         let mut lock = Lock::default();
-        let rows = 2_000;
+        // Hundreds of shards already separate heap and linear-scan costs.
+        let rows = 256;
         for i in 0..rows {
             insert(&mut lock, &format!("data/f{i:05}.bin"), format!("{i:064x}"));
         }
         save(
             &lock,
             tmp.path(),
-            crate::lock::LockShardLevels::new(3).unwrap(),
+            crate::lock::LockShardLevels::new(1).unwrap(),
         )
         .unwrap();
         let shard_count = list_shard_files(tmp.path()).unwrap().len();
-        assert!(shard_count > 1, "fixture must actually be sharded");
+        assert!(
+            shard_count >= 128,
+            "fixture must distinguish heap and scan costs"
+        );
 
         let before = crate::lock::test_support::merge_head_comparisons();
         let mut kept = 0;
@@ -4990,8 +4999,13 @@ mod tests {
             })
             .collect();
 
-        let (_published, removed) =
-            save_sparse_shards(tmp.path(), &touched, &touched_rows, &BTreeMap::new()).unwrap();
+        let (_published, removed) = save_sparse_shards(
+            &layout(tmp.path()),
+            &touched,
+            &touched_rows,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         assert_eq!(removed, vec![removed_shard]);
 
         let loaded = load(tmp.path()).unwrap();
@@ -5081,8 +5095,13 @@ mod tests {
             })
             .collect();
 
-        let (published, removed) =
-            save_sparse_shards(tmp.path(), &touched, &rows_by_shard, &BTreeMap::new()).unwrap();
+        let (published, removed) = save_sparse_shards(
+            &layout(tmp.path()),
+            &touched,
+            &rows_by_shard,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let src_still_has_rows = rows_by_shard
             .get(&src_shard)
             .is_some_and(|rows| !rows.is_empty());
@@ -5156,7 +5175,7 @@ mod tests {
         rows_by_shard.insert(shard_id, shard_entries.clone());
 
         let (published, removed) = save_sparse_shards(
-            tmp.path(),
+            &layout(tmp.path()),
             &BTreeSet::from([shard_id]),
             &rows_by_shard,
             &BTreeMap::new(),
@@ -5207,8 +5226,13 @@ mod tests {
 
         let file_path = tmp.path().join(shard_id.to_canonical_string());
         let inode_before = std::fs::metadata(&file_path).unwrap().ino();
-        let (published, removed) =
-            save_sparse_shards(tmp.path(), &touched, &rows_by_shard, &BTreeMap::new()).unwrap();
+        let (published, removed) = save_sparse_shards(
+            &layout(tmp.path()),
+            &touched,
+            &rows_by_shard,
+            &BTreeMap::new(),
+        )
+        .unwrap();
 
         assert!(removed.is_empty());
         assert_eq!(published.len(), 1);
@@ -5246,7 +5270,7 @@ mod tests {
             .to_path_buf();
 
         let (published, removed) = save_sparse_shards(
-            tmp.path(),
+            &layout(tmp.path()),
             &BTreeSet::from([shard_id]),
             &BTreeMap::new(),
             &BTreeMap::new(),
@@ -5317,8 +5341,13 @@ mod tests {
         );
         let touched = BTreeSet::from([src_shard, dst_shard, removed_only]);
 
-        let (default_published, default_removed) =
-            save_sparse_shards(tmp.path(), &touched, &rows_by_shard, &BTreeMap::new()).unwrap();
+        let (default_published, default_removed) = save_sparse_shards(
+            &layout(tmp.path()),
+            &touched,
+            &rows_by_shard,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let default_summary: Vec<_> = default_published
             .iter()
             .map(|shard| {
@@ -5488,7 +5517,7 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )];
 
-        let published = publish_flat_shard(tmp.path(), &entries, None)
+        let published = publish_flat_shard(&layout(tmp.path()), &entries, None)
             .unwrap()
             .unwrap();
 
@@ -5516,7 +5545,7 @@ mod tests {
         .unwrap();
         assert!(tmp.path().join("gat.lock").is_file());
 
-        let published = publish_flat_shard(tmp.path(), &[], None).unwrap();
+        let published = publish_flat_shard(&layout(tmp.path()), &[], None).unwrap();
 
         assert!(published.is_none());
         assert!(!tmp.path().join("gat.lock").exists());
@@ -5539,7 +5568,7 @@ mod tests {
         let path = tmp.path().join("gat.lock");
         let inode_before = std::fs::metadata(&path).unwrap().ino();
 
-        let _published = publish_flat_shard(tmp.path(), &lock.entries, None)
+        let _published = publish_flat_shard(&layout(tmp.path()), &lock.entries, None)
             .unwrap()
             .unwrap();
 
@@ -5578,9 +5607,10 @@ mod tests {
             }
         });
 
-        let published = publish_flat_shard(tmp.path(), &lock.entries, Some((identity, proof)))
-            .unwrap()
-            .unwrap();
+        let published =
+            publish_flat_shard(&layout(tmp.path()), &lock.entries, Some((identity, proof)))
+                .unwrap()
+                .unwrap();
 
         assert_eq!(read_count.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode_before);
@@ -5621,7 +5651,7 @@ mod tests {
         });
 
         let published = publish_flat_shard(
-            tmp.path(),
+            &layout(tmp.path()),
             &lock.entries,
             Some((stale_identity, stale_proof)),
         )
@@ -5669,7 +5699,7 @@ mod tests {
         });
 
         // No prior at all: a proof miss.
-        let published = publish_flat_shard(tmp.path(), &lock.entries, None)
+        let published = publish_flat_shard(&layout(tmp.path()), &lock.entries, None)
             .unwrap()
             .unwrap();
 
@@ -5709,7 +5739,7 @@ mod tests {
             }
         });
 
-        publish_flat_shard(tmp.path(), &lock.entries, None)
+        publish_flat_shard(&layout(tmp.path()), &lock.entries, None)
             .unwrap()
             .unwrap();
 
@@ -5736,7 +5766,7 @@ mod tests {
             }
         });
 
-        publish_flat_shard(tmp.path(), &lock.entries, None)
+        publish_flat_shard(&layout(tmp.path()), &lock.entries, None)
             .unwrap()
             .unwrap();
 
@@ -5934,9 +5964,10 @@ mod tests {
         // Write side: publish_rendered_shard (via publish_flat_shard) must
         // agree -- the same prior is a tier-1 hit reusing the exact same
         // proof, with no content read and no rewrite.
-        let published = publish_flat_shard(tmp.path(), &lock.entries, Some((identity, proof)))
-            .unwrap()
-            .unwrap();
+        let published =
+            publish_flat_shard(&layout(tmp.path()), &lock.entries, Some((identity, proof)))
+                .unwrap()
+                .unwrap();
         assert_eq!(published.identity, identity);
         assert_eq!(published.proof, proof);
     }
@@ -6083,7 +6114,7 @@ mod tests {
         .unwrap();
         assert!(tmp.path().join("gat.lock").is_dir());
 
-        publish_flat_shard(tmp.path(), &lock.entries, None).unwrap();
+        publish_flat_shard(&layout(tmp.path()), &lock.entries, None).unwrap();
 
         assert!(tmp.path().join("gat.lock").is_file());
         assert_eq!(load(tmp.path()).unwrap().entries, lock.entries);

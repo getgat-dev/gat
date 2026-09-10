@@ -461,6 +461,7 @@ mod env;
 mod file_state;
 mod git;
 mod journal;
+mod local_directory;
 mod lock;
 mod remote;
 mod repository_layout;
@@ -468,6 +469,7 @@ mod state;
 mod worktree;
 
 pub use atomic::{AtomicError, RepoLock, write_atomic, write_atomic_if_absent};
+pub use cache::CacheRoot;
 pub use cache::{
     CacheClient, CacheDatabaseHealth, CacheDatabaseUnreadable, CacheEnumerationError, CacheError,
     CacheIngest, CacheMaintenance, CacheMaintenanceError, CacheObject, CacheObjectOpenError,
@@ -515,7 +517,7 @@ pub use remote::{
     RemoteRequestBudget, STREAM_BUFFER_SIZE, TRANSFER_CHUNK_SIZE, initialize_backends,
     with_stream_buffer,
 };
-pub use repository_layout::{CacheRoot, LayoutError, RepositoryLayout};
+pub use repository_layout::{LayoutError, RepositoryLayout};
 
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]

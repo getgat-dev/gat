@@ -26,7 +26,7 @@ impl DesiredStateWrite<'_> {
 
     fn upsert_and_publish<E>(
         &self,
-        root: &std::path::Path,
+        layout: &crate::RepositoryLayout,
         shape_lock: &LockWriteGuard,
         entries: &[Entry],
     ) -> std::result::Result<(), E>
@@ -45,12 +45,12 @@ impl DesiredStateWrite<'_> {
             .desired_shard_ids_for_paths(entries.iter().map(|entry| &entry.path))
             .map_err(E::from)?;
         touched.extend(old_touched);
-        self.publish_touched(root, shape_lock, &touched)
+        self.publish_touched(layout, shape_lock, &touched)
     }
 
     fn remove_and_publish<E>(
         &self,
-        root: &std::path::Path,
+        layout: &crate::RepositoryLayout,
         shape_lock: &LockWriteGuard,
         affected_paths: &[GatPath],
         removals: &[DesiredRemoval<'_>],
@@ -74,12 +74,12 @@ impl DesiredStateWrite<'_> {
         if touched.is_empty() {
             return Ok(());
         }
-        self.publish_touched(root, shape_lock, &touched)
+        self.publish_touched(layout, shape_lock, &touched)
     }
 
     fn move_and_publish<E>(
         &self,
-        root: &std::path::Path,
+        layout: &crate::RepositoryLayout,
         shape_lock: &LockWriteGuard,
         src: &GatPath,
         dst: &GatPath,
@@ -116,7 +116,7 @@ impl DesiredStateWrite<'_> {
             self.desired_shard_ids_for_paths(moved.iter().map(|entry| &entry.path))
                 .map_err(E::from)?,
         );
-        self.publish_touched(root, shape_lock, &touched)
+        self.publish_touched(layout, shape_lock, &touched)
     }
 
     /// Publish the post-mutation contents of exactly `touched_shard_ids` and
@@ -125,7 +125,7 @@ impl DesiredStateWrite<'_> {
     /// receipt interpretation remain entirely inside `gat-io`.
     pub(crate) fn publish_touched<E>(
         &self,
-        root: &std::path::Path,
+        layout: &crate::RepositoryLayout,
         shape_lock: &LockWriteGuard,
         touched_shard_ids: &std::collections::BTreeSet<LockShardId>,
     ) -> std::result::Result<(), E>
@@ -136,7 +136,7 @@ impl DesiredStateWrite<'_> {
             return Ok(());
         }
         if shape_lock.is_flat() {
-            return self.publish_flat_streaming(root);
+            return self.publish_flat_streaming(layout);
         }
         let rows_by_shard = self
             .desired_rows_by_shard_ids(touched_shard_ids)
@@ -144,7 +144,7 @@ impl DesiredStateWrite<'_> {
         let priors = self.shard_identities(touched_shard_ids).map_err(E::from)?;
         let publish_priors = Self::sparse_publish_priors(&priors);
         let (published, removed) = LockStore::publish_touched(
-            root,
+            layout,
             shape_lock,
             touched_shard_ids,
             &rows_by_shard,
@@ -160,7 +160,7 @@ impl DesiredStateWrite<'_> {
     /// Used by bounded batched replay so destination memory stays constant.
     pub(crate) fn publish_flat_streaming<E>(
         &self,
-        root: &std::path::Path,
+        layout: &crate::RepositoryLayout,
     ) -> std::result::Result<(), E>
     where
         E: From<StateStoreError> + From<LockError>,
@@ -168,7 +168,7 @@ impl DesiredStateWrite<'_> {
         let touched = std::collections::BTreeSet::from([LockShardId::flat()]);
         let priors = self.shard_identities(&touched).map_err(E::from)?;
         let (published, removed) = self.with_desired_rows(DesiredQuery::all(), |mut rows| {
-            LockStore::publish_flat_streaming(root, || match rows.next() {
+            LockStore::publish_flat_streaming(layout, || match rows.next() {
                 Ok(Some(row)) => Ok(Some(row.into_entry())),
                 Ok(None) => Ok(None),
                 Err(source) => Err(LockError::RowSource(Box::new(source))),
@@ -696,9 +696,8 @@ impl StateStore {
         E: From<StateStoreError> + From<LockError> + From<crate::atomic::AtomicError>,
     {
         let _guard = crate::atomic::RepoLock::acquire_repository(layout).map_err(E::from)?;
-        let evidence =
-            LockStore::publish_complete_with_evidence(layout.root_path(), lock, shard_levels)
-                .map_err(E::from)?;
+        let evidence = LockStore::publish_complete_with_evidence(layout, lock, shard_levels)
+            .map_err(E::from)?;
         self.apply_full_lock_evidence(evidence).map_err(E::from)
     }
 
@@ -720,21 +719,21 @@ impl StateStore {
     /// shards affected by their paths in one `SQLite` transaction.
     pub fn publish_desired_upsert<E>(
         &mut self,
-        root: &std::path::Path,
+        layout: &crate::RepositoryLayout,
         shape_lock: &LockWriteGuard,
         entries: &[Entry],
     ) -> std::result::Result<(), E>
     where
         E: From<StateStoreError> + From<LockError>,
     {
-        self.desired_write(|desired| desired.upsert_and_publish(root, shape_lock, entries))
+        self.desired_write(|desired| desired.upsert_and_publish(layout, shape_lock, entries))
     }
 
     /// Apply prepared add windows in one transaction, then publish each touched
     /// shard once. The caller retains proofs until publication has succeeded.
     pub(crate) fn publish_prepared_add<E>(
         &mut self,
-        root: &std::path::Path,
+        layout: &crate::RepositoryLayout,
         shape_lock: &LockWriteGuard,
         entries: &[super::repository::PreparedMaterialization],
     ) -> std::result::Result<(), E>
@@ -788,7 +787,7 @@ impl StateStore {
                         .map_err(E::from)?,
                 );
             }
-            desired.publish_touched(root, shape_lock, &touched)
+            desired.publish_touched(layout, shape_lock, &touched)
         })
     }
 
@@ -797,7 +796,7 @@ impl StateStore {
     /// once from the transaction's post-mutation view.
     pub fn publish_desired_removals<E>(
         &mut self,
-        root: &std::path::Path,
+        layout: &crate::RepositoryLayout,
         shape_lock: &LockWriteGuard,
         affected_paths: &[GatPath],
         removals: &[DesiredRemoval<'_>],
@@ -806,7 +805,7 @@ impl StateStore {
         E: From<StateStoreError> + From<LockError>,
     {
         self.desired_write(|desired| {
-            desired.remove_and_publish(root, shape_lock, affected_paths, removals)
+            desired.remove_and_publish(layout, shape_lock, affected_paths, removals)
         })
     }
 
@@ -814,7 +813,7 @@ impl StateStore {
     /// overwritten destination, and resulting destination shards.
     pub fn publish_desired_move<E>(
         &mut self,
-        root: &std::path::Path,
+        layout: &crate::RepositoryLayout,
         shape_lock: &LockWriteGuard,
         src: &GatPath,
         dst: &GatPath,
@@ -822,7 +821,7 @@ impl StateStore {
     where
         E: From<StateStoreError> + From<LockError>,
     {
-        self.desired_write(|desired| desired.move_and_publish(root, shape_lock, src, dst))
+        self.desired_write(|desired| desired.move_and_publish(layout, shape_lock, src, dst))
     }
 
     /// Replay bounded desired-entry windows using the publication strategy
@@ -832,7 +831,7 @@ impl StateStore {
     #[allow(clippy::too_many_arguments)]
     pub fn publish_desired_upsert_windows<E>(
         &mut self,
-        root: &std::path::Path,
+        layout: &crate::RepositoryLayout,
         shape_lock: &LockWriteGuard,
         mut next_window: impl FnMut() -> std::result::Result<Option<Vec<Entry>>, E>,
         imported: &mut usize,
@@ -862,7 +861,7 @@ impl StateStore {
                     return Ok::<usize, E>(0);
                 }
                 *maybe_published = true;
-                desired.publish_flat_streaming::<E>(root)?;
+                desired.publish_flat_streaming::<E>(layout)?;
                 after_flat_publish()?;
                 Ok::<usize, E>(count)
             })?;
@@ -879,7 +878,7 @@ impl StateStore {
             }
             let count = batch.len();
             *maybe_published = true;
-            self.publish_desired_upsert::<E>(root, shape_lock, &batch)?;
+            self.publish_desired_upsert::<E>(layout, shape_lock, &batch)?;
             *imported += count;
             after_window()?;
         }

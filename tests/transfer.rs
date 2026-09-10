@@ -2889,32 +2889,48 @@ fn push_progress_is_invariant_across_transfer_window_sizes() {
 
     let object_count = 7usize;
     let mut final_positions = Vec::new();
-    for window in [1usize, 2, 4096] {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let _guard = rt.enter();
-        opendal::init_default_registry();
-        let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
-        let remote_dir = tempfile::tempdir().unwrap();
-        remote_add_with_default(
-            &repo,
-            "origin",
-            gat_io::remote_file_url_for_test(remote_dir.path()),
-        )
-        .unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    opendal::init_default_registry();
+    let tmp = test_repo();
+    let repo = Repo::at(tmp.path().to_path_buf());
+    let remote_dir = tempfile::tempdir().unwrap();
+    remote_add_with_default(
+        &repo,
+        "origin",
+        gat_io::remote_file_url_for_test(remote_dir.path()),
+    )
+    .unwrap();
 
-        let mut paths = Vec::new();
-        for i in 0..object_count {
-            let path = format!("obj-{i}.bin");
-            std::fs::write(tmp.path().join(&path), format!("payload-{i}").as_bytes()).unwrap();
-            paths.push(PathBuf::from(path));
-        }
-        add(&repo, &paths, &NoopProgress).unwrap();
+    let mut paths = Vec::new();
+    for i in 0..object_count {
+        let path = format!("obj-{i}.bin");
+        std::fs::write(tmp.path().join(&path), format!("payload-{i}").as_bytes()).unwrap();
+        paths.push(PathBuf::from(path));
+    }
+    add(&repo, &paths, &NoopProgress).unwrap();
+
+    for window in [1usize, 2, 4096] {
+        // A fresh remote inventory forces every case to upload all objects,
+        // while the repository and local immutable cache remain reusable.
+        std::fs::remove_dir_all(remote_dir.path()).unwrap();
+        std::fs::create_dir(remote_dir.path()).unwrap();
 
         let limits = ExecutionLimits::for_test(window, 10_000, 4096, 8, 4);
         let progress = RecordingProgress::new();
         let ctx = DesiredOperation::acquire_with_limits(&repo, &NoopProgress, limits).unwrap();
-        push_selected(ctx, None, &progress).unwrap();
+        let outcome = push_selected(ctx, None, &progress).unwrap();
+        assert_eq!(outcome.total, object_count);
+        assert!(outcome.skipped.is_empty());
+        for i in 0..object_count {
+            let content = format!("payload-{i}");
+            let oid = gat_core::oid::Oid::from_bytes(*blake3::hash(content.as_bytes()).as_bytes());
+            assert_eq!(
+                std::fs::read(remote_dir.path().join(gat_io::object_key_oid(&oid))).unwrap(),
+                content.as_bytes(),
+                "window size {window} must upload every object into the cleared remote"
+            );
+        }
 
         assert_eq!(
             progress.count_of(ProgressOperation::Pushing),
@@ -2936,6 +2952,27 @@ fn push_progress_is_invariant_across_transfer_window_sizes() {
         "final logical position must be identical regardless of window size: {final_positions:?}"
     );
     assert_eq!(final_positions[0], object_count as u64);
+}
+
+// These progress tests need desired rows and real object bytes, but no
+// worktree or materialized-state history. Seed a cold object namespace
+// directly so their setup does not run the add/push workflows under test elsewhere.
+fn seed_progress_objects(repo: &Repo, object_root: &Path, count: usize) {
+    let entries = (0..count)
+        .map(|i| {
+            let content = format!("payload-{i}");
+            let oid = gat_core::oid::Oid::from_bytes(*blake3::hash(content.as_bytes()).as_bytes());
+            let object = object_root.join(gat_io::object_key_oid(&oid));
+            std::fs::create_dir_all(object.parent().unwrap()).unwrap();
+            std::fs::write(object, content).unwrap();
+            gat_core::lock::Entry {
+                path: gat_core::lexical_path::GatPath::parse_canonical(&format!("obj-{i:04}.bin"))
+                    .unwrap(),
+                oid,
+            }
+        })
+        .collect();
+    repo.save_lock(&gat_core::lock::Lock { entries }).unwrap();
 }
 
 /// Pushing many objects concurrently
@@ -2961,17 +2998,35 @@ fn push_high_concurrency_never_creates_more_than_one_pushing_task() {
 
     let limits = ExecutionLimits::for_test(4, 10_000, 4096, 8, 4);
     let count = limits.transfer.window.get() * 20;
-    let mut paths = Vec::new();
-    for i in 0..count {
-        let path = format!("obj-{i:04}.bin");
-        std::fs::write(tmp.path().join(&path), format!("payload-{i}").as_bytes()).unwrap();
-        paths.push(PathBuf::from(path));
-    }
-    add(&repo, &paths, &NoopProgress).unwrap();
+    seed_progress_objects(&repo, &cache_path(&repo), count);
+    let oids: Vec<_> = gat_io::LockStore::load_repository(&layout(tmp.path()))
+        .unwrap()
+        .entries
+        .into_iter()
+        .map(|entry| entry.oid)
+        .collect();
+    // Match an add-populated cache: establish all proofs in one batch so
+    // tiny transfer windows do not each pay a cold-proof database commit.
+    let statuses = cache_root(&repo).open_client().verify_many(&oids).unwrap();
+    assert!(
+        statuses
+            .iter()
+            .all(|status| *status == gat_io::ObjectVerification::Valid)
+    );
 
     let progress = RecordingProgress::new();
     let ctx = DesiredOperation::acquire_with_limits(&repo, &NoopProgress, limits).unwrap();
-    push_selected(ctx, None, &progress).unwrap();
+    let outcome = push_selected(ctx, None, &progress).unwrap();
+    assert_eq!(outcome.total, count);
+    assert!(outcome.skipped.is_empty());
+    for oid in &oids {
+        assert!(
+            remote_dir
+                .path()
+                .join(gat_io::object_key_oid(oid))
+                .is_file()
+        );
+    }
 
     assert_eq!(progress.count_of(ProgressOperation::Pushing), 1);
     let task = progress.only(ProgressOperation::Pushing);
@@ -2990,35 +3045,38 @@ fn fetch_progress_is_invariant_across_transfer_window_sizes() {
 
     let object_count = 7usize;
     let mut final_positions = Vec::new();
-    for window in [1usize, 2, 4096] {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let _guard = rt.enter();
-        opendal::init_default_registry();
-        let tmp = test_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
-        let remote_dir = tempfile::tempdir().unwrap();
-        remote_add_with_default(
-            &repo,
-            "origin",
-            gat_io::remote_file_url_for_test(remote_dir.path()),
-        )
-        .unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    opendal::init_default_registry();
+    let tmp = test_repo();
+    let repo = Repo::at(tmp.path().to_path_buf());
+    let remote_dir = tempfile::tempdir().unwrap();
+    remote_add_with_default(
+        &repo,
+        "origin",
+        gat_io::remote_file_url_for_test(remote_dir.path()),
+    )
+    .unwrap();
 
-        let mut paths = Vec::new();
-        for i in 0..object_count {
-            let path = format!("obj-{i}.bin");
-            std::fs::write(tmp.path().join(&path), format!("payload-{i}").as_bytes()).unwrap();
-            paths.push(PathBuf::from(path));
-        }
-        add(&repo, &paths, &NoopProgress).unwrap();
-        push(&repo, None, None, &NoopProgress).unwrap();
+    let mut paths = Vec::new();
+    for i in 0..object_count {
+        let path = format!("obj-{i}.bin");
+        std::fs::write(tmp.path().join(&path), format!("payload-{i}").as_bytes()).unwrap();
+        paths.push(PathBuf::from(path));
+    }
+    add(&repo, &paths, &NoopProgress).unwrap();
+    push(&repo, None, None, &NoopProgress).unwrap();
+    for window in [1usize, 2, 4096] {
+        // Drop both objects and verification proofs before each case. The
+        // operation from the previous iteration has already been dropped.
         std::fs::remove_dir_all(cache_path(&repo)).unwrap();
 
         let limits = ExecutionLimits::for_test(window, 10_000, 4096, 8, 4);
         let progress = RecordingProgress::new();
         let mut desired_op =
             DesiredOperation::acquire_with_limits(&repo, &NoopProgress, limits).unwrap();
-        fetch_selected(&mut desired_op, &Selection::root(), None, &progress).unwrap();
+        let outcome = fetch_selected(&mut desired_op, &Selection::root(), None, &progress).unwrap();
+        assert_eq!(outcome.fetched, object_count, "window size {window}");
 
         assert_eq!(
             progress.count_of(ProgressOperation::Fetching),
@@ -3060,20 +3118,13 @@ fn fetch_high_concurrency_never_creates_more_than_one_fetching_task() {
 
     let limits = ExecutionLimits::for_test(4, 10_000, 4096, 8, 4);
     let count = limits.transfer.window.get() * 20;
-    let mut paths = Vec::new();
-    for i in 0..count {
-        let path = format!("obj-{i:04}.bin");
-        std::fs::write(tmp.path().join(&path), format!("payload-{i}").as_bytes()).unwrap();
-        paths.push(PathBuf::from(path));
-    }
-    add(&repo, &paths, &NoopProgress).unwrap();
-    push(&repo, None, None, &NoopProgress).unwrap();
-    std::fs::remove_dir_all(cache_path(&repo)).unwrap();
+    seed_progress_objects(&repo, remote_dir.path(), count);
 
     let progress = RecordingProgress::new();
     let mut desired_op =
         DesiredOperation::acquire_with_limits(&repo, &NoopProgress, limits).unwrap();
-    fetch_selected(&mut desired_op, &Selection::root(), None, &progress).unwrap();
+    let outcome = fetch_selected(&mut desired_op, &Selection::root(), None, &progress).unwrap();
+    assert_eq!(outcome.fetched, count);
 
     assert_eq!(progress.count_of(ProgressOperation::Fetching), 1);
     let task = progress.only(ProgressOperation::Fetching);

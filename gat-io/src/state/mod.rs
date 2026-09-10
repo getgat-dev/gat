@@ -612,6 +612,12 @@ impl StateStore {
     /// start of an operation and let it drop at the end, rather than
     /// holding a connection across a whole process's lifetime.
     pub fn open(repo: &RepositoryLayout) -> Result<Self> {
+        repo.local_directory()
+            .ensure()
+            .map_err(|error| StateStoreError::DirectoryUnavailable {
+                path: error.path,
+                source: error.source,
+            })?;
         Self::open_at(&repo.materialized_db_path())
     }
 
@@ -707,12 +713,22 @@ impl StateStore {
     /// schema newer than this build understands still fails closed, the
     /// same as [`Self::open`]. Opens the connection read-only, so even a
     /// bug that tried to write through it would fail loudly instead of
-    /// silently mutating disk state from a read path.
+    /// silently mutating database contents from a read path. Existing storage
+    /// is first protected by its self-ignore file because even read-only
+    /// connections can create WAL coordination files.
     pub fn open_if_exists(repo: &RepositoryLayout) -> Result<Option<Self>> {
         let db_path = repo.materialized_db_path();
         if !db_path.is_file() {
             return Ok(None);
         }
+        // Read-only SQLite connections can create WAL coordination files.
+        // Protect existing storage before opening, while leaving absent state absent.
+        repo.local_directory()
+            .ensure()
+            .map_err(|error| StateStoreError::DirectoryUnavailable {
+                path: error.path,
+                source: error.source,
+            })?;
         let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|source| StateStoreError::OpenFailed {
                 path: db_path.clone(),
@@ -892,8 +908,7 @@ mod tests {
         let mut lock = Lock::default();
         lock.upsert_many(entries);
         let evidence =
-            crate::lock::LockStore::publish_complete_with_evidence(repo.root_path(), &lock, levels)
-                .unwrap();
+            crate::lock::LockStore::publish_complete_with_evidence(repo, &lock, levels).unwrap();
         store.apply_full_lock_evidence(evidence).unwrap();
     }
 
@@ -1652,7 +1667,7 @@ mod tests {
 
         store
             .publish_desired_upsert::<DesiredPublishTestError>(
-                repo.root_path(),
+                &repo,
                 &shape_lock,
                 &[entry("a.bin", 2, 2), entry("b.bin", 3, 3)],
             )
@@ -1690,7 +1705,7 @@ mod tests {
             crate::lock::flat_publish_test_support::reset_flat_shard_publish_counters();
             store
                 .publish_desired_removals::<DesiredPublishTestError>(
-                    repo.root_path(),
+                    &repo,
                     &shape_lock,
                     &[gp("exact.bin"), gp("tree/a.bin"), gp("tree/b.bin")],
                     &[
@@ -1742,7 +1757,7 @@ mod tests {
             crate::lock::flat_publish_test_support::reset_flat_shard_publish_counters();
             store
                 .publish_desired_move::<DesiredPublishTestError>(
-                    repo.root_path(),
+                    &repo,
                     &shape_lock,
                     &gp("source"),
                     &gp("target"),
@@ -1836,7 +1851,7 @@ mod tests {
                 let shape = crate::lock::LockStore::acquire_matching_shape(&repo, levels).unwrap();
                 store
                     .publish_desired_move::<DesiredPublishTestError>(
-                        repo.root_path(),
+                        &repo,
                         &shape,
                         &gp(src),
                         &gp(dst),
@@ -1873,9 +1888,10 @@ mod tests {
         let tmp = git_repo();
         let repo = Repo::at(tmp.path().to_path_buf());
         let mut store = StateStore::open(&repo).unwrap();
-        let rows = (0..sql_chunk_size(1) * 2 + 3)
-            .map(|i| entry(&format!("data/{i:05}.bin"), 1, 0))
-            .collect::<Vec<_>>();
+        // Query batching depends on input count, not distinct stored rows.
+        // Keep the full SQL bind boundary without seeding tens of thousands
+        // of unrelated rows; the final batch contributes a different shard.
+        let rows = vec![entry("data/a.bin", 1, 0)];
         seed_desired_shard(&mut store, sid("gat.lock/aa.tsv"), 1, rows.clone());
         seed_desired_shard(
             &mut store,
@@ -1884,8 +1900,13 @@ mod tests {
             vec![entry("z.bin", 2, 0)],
         );
         let z = gp("z.bin");
+        let missing = gp("missing.bin");
         let ids = store
-            .desired_shard_ids_for_paths(rows.iter().map(|entry| &entry.path).chain([&z]))
+            .desired_shard_ids_for_paths(
+                std::iter::once(&rows[0].path)
+                    .chain(std::iter::repeat_n(&missing, sql_chunk_size(1) * 2 + 3))
+                    .chain([&z]),
+            )
             .unwrap();
         assert_eq!(
             ids,

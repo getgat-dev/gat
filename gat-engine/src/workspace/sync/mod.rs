@@ -997,13 +997,13 @@ mod tests {
         // rebuild.
         let record = store.exclude_record().unwrap();
         assert_eq!(record.fingerprint(), Some(expected));
-        assert_eq!(record.count(), 2);
+        assert_eq!(record.count(), 1);
         let outcome = crate::excludes::sync_from_store_fast_path(&repo, &mut store, &cfg).unwrap();
         assert!(
             !outcome.changed,
             "expected a fast-path match, not a rebuild"
         );
-        assert_eq!(outcome.count, 2);
+        assert_eq!(outcome.count, 1);
     }
 
     /// A warmed clean sync's exclude fast path must not read the
