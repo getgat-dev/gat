@@ -43,29 +43,37 @@ pub const OBJECT_HASH_NAMESPACE: &str = "blake3";
 /// Builds the canonical
 /// `blake3/xx/yy/oid` storage key directly from an already-validated
 /// [`Oid`], in exactly one destination allocation (a single
-/// pre-sized `String`, hex-encoded in place) -- no intermediate
+/// pre-sized `String`, copied from a stack encoding) -- no intermediate
 /// `to_string()`/`format!` chain. An `Oid`'s 64-hex-character width is a
 /// type-level guarantee, so storage-key construction never reparses text.
 #[must_use]
 pub fn object_key_oid(oid: &Oid) -> String {
-    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
-    // "blake3/" + "xx/" + "yy/" + 64 hex chars.
-    let mut out = String::with_capacity(OBJECT_HASH_NAMESPACE.len() + 1 + 3 + 3 + 64);
-    out.push_str(OBJECT_HASH_NAMESPACE);
-    out.push('/');
-    let bytes = oid.as_bytes();
-    fn push_hex_byte(out: &mut String, b: u8) {
-        out.push(HEX_DIGITS[(b >> 4) as usize] as char);
-        out.push(HEX_DIGITS[(b & 0x0f) as usize] as char);
+    ObjectKey::new(oid).as_str().to_owned()
+}
+
+/// Stack-owned canonical encoding shared by remote strings and local paths.
+/// The bytes are private and the constructor only emits ASCII.
+pub(super) struct ObjectKey([u8; OBJECT_HASH_NAMESPACE.len() + 7 + 64]);
+
+impl ObjectKey {
+    pub(super) fn new(oid: &Oid) -> Self {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let namespace = OBJECT_HASH_NAMESPACE.len();
+        let start = namespace + 7;
+        let mut bytes = [b'/'; OBJECT_HASH_NAMESPACE.len() + 7 + 64];
+        bytes[..namespace].copy_from_slice(OBJECT_HASH_NAMESPACE.as_bytes());
+        for (i, byte) in oid.as_bytes().iter().enumerate() {
+            bytes[start + i * 2] = HEX[(byte >> 4) as usize];
+            bytes[start + i * 2 + 1] = HEX[(byte & 0xf) as usize];
+        }
+        bytes.copy_within(start..start + 2, namespace + 1);
+        bytes.copy_within(start + 2..start + 4, namespace + 4);
+        Self(bytes)
     }
-    push_hex_byte(&mut out, bytes[0]);
-    out.push('/');
-    push_hex_byte(&mut out, bytes[1]);
-    out.push('/');
-    for &b in bytes {
-        push_hex_byte(&mut out, b);
+
+    pub(super) fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.0).expect("object keys contain only ASCII")
     }
-    out
 }
 
 /// Parses `key` (a path/key found while listing a remote or local
@@ -88,23 +96,105 @@ pub fn parse_object_key(key: &str) -> Option<Oid> {
     else {
         return None;
     };
-    let is_hex2 = |s: &str| s.len() == 2 && s.bytes().all(|b| b.is_ascii_hexdigit());
-    if !is_hex2(l1) || !is_hex2(l2) {
-        return None;
+    ObjectFanout::from_segments(l1, l2)?.parse_leaf(oid_hex)
+}
+
+/// Parsed directory identity, reusable for every leaf in a fan-out directory.
+#[derive(Clone, Copy)]
+pub(crate) struct ObjectFanout([u8; 4]);
+
+pub(crate) fn parse_fanout_segment(segment: &str) -> Option<u8> {
+    const fn digit(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            _ => None,
+        }
     }
-    let oid_bytes = oid_hex.as_bytes();
-    if oid_bytes.len() < 4 || !oid_bytes[..4].is_ascii() {
+    let [high, low] = *segment.as_bytes() else {
         return None;
+    };
+    Some(digit(high)? * 16 + digit(low)?)
+}
+
+impl ObjectFanout {
+    pub(crate) const fn new(first: u8, second: u8) -> Self {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        Self([
+            HEX[(first >> 4) as usize],
+            HEX[(first & 0xf) as usize],
+            HEX[(second >> 4) as usize],
+            HEX[(second & 0xf) as usize],
+        ])
     }
-    if &oid_hex[0..2] != l1 || &oid_hex[2..4] != l2 {
-        return None;
+
+    pub(crate) fn from_segments(first: &str, second: &str) -> Option<Self> {
+        Some(Self::new(
+            parse_fanout_segment(first)?,
+            parse_fanout_segment(second)?,
+        ))
     }
-    Oid::from_hex(oid_hex).ok()
+
+    pub(crate) fn parse_leaf(self, name: &str) -> Option<Oid> {
+        // Reject unrelated names before parsing an OID (whose diagnostic owns
+        // invalid input). Inventory only needs an optional identity.
+        if name.len() != 64 || !name.as_bytes().starts_with(&self.0) {
+            return None;
+        }
+        Oid::from_hex(name).ok()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_encoding_and_local_paths_agree_for_every_byte() {
+        for byte in 0..=u8::MAX {
+            let oid = Oid::from_bytes([byte; 32]);
+            let hex = oid.to_hex();
+            let expected = format!("blake3/{}/{}/{hex}", &hex[..2], &hex[2..4]);
+            assert_eq!(object_key_oid(&oid), expected);
+            assert_eq!(parse_object_key(&expected), Some(oid));
+            for root in ["", ".", "/", "relative", "relative/", "space name/é"] {
+                let root = std::path::Path::new(root);
+                assert_eq!(
+                    super::super::object::cache_path_oid(root, &oid),
+                    root.join(&expected)
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_object_paths_preserve_non_utf8_roots() {
+        use std::os::unix::ffi::OsStringExt;
+        let root = std::path::PathBuf::from(std::ffi::OsString::from_vec(b"cache/\xff".to_vec()));
+        let oid = Oid::from_bytes([0xab; 32]);
+        assert_eq!(
+            super::super::object::cache_path_oid(&root, &oid),
+            root.join(object_key_oid(&oid))
+        );
+    }
+
+    #[test]
+    fn fanout_requires_canonical_segments_and_matching_leaves() {
+        let oid = Oid::from_bytes([0xab; 32]);
+        for segment in ["AB", "aB", "Ab", "a", "abc", "é", "gg", ""] {
+            assert!(ObjectFanout::from_segments(segment, "ab").is_none());
+            assert!(ObjectFanout::from_segments("ab", segment).is_none());
+        }
+        let fanout = ObjectFanout::from_segments("ab", "ab").unwrap();
+        assert_eq!(fanout.parse_leaf(&oid.to_hex()), Some(oid));
+        assert!(fanout.parse_leaf(&oid.to_hex().to_uppercase()).is_none());
+        assert!(
+            ObjectFanout::new(0xab, 0xac)
+                .parse_leaf(&oid.to_hex())
+                .is_none()
+        );
+    }
 
     #[test]
     fn object_key_nests_fan_out_under_the_hash_namespace() {

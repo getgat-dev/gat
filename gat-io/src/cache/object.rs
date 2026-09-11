@@ -10,7 +10,7 @@
 //! holds sibling state that is *not* part of that namespace:
 //! `cache.sqlite3` (the proof database) and `tmp-*` ingest scratch files.
 
-use crate::cache::proof::{CachePublication, CacheState, ObjectVerification};
+use crate::cache::proof::{CacheObservation, CachePublication, CacheState, ObjectVerification};
 #[cfg(any(test, feature = "test-support"))]
 use crate::file_state::observe_regular_file_no_follow;
 #[cfg(test)]
@@ -23,7 +23,6 @@ use std::io::Read;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tempfile::NamedTempFile;
 
 /// Local, filesystem-level failures for the object cache root
@@ -172,11 +171,16 @@ fn ensure_cache_directory(dir: &Path) -> Result<()> {
 }
 
 /// Builds the complete on-disk path for an already-validated [`Oid`] via
-/// [`crate::cache::layout::object_key_oid`], infallibly (an `Oid` is
+/// the shared stack-based object-key encoding, infallibly (an `Oid` is
 /// always well-formed, so there is no [`gat_core::oid::OidFormatError`]
 /// to propagate) and in one destination allocation.
 pub fn cache_path_oid(objects_dir: &Path, oid: &Oid) -> PathBuf {
-    objects_dir.join(crate::cache::layout::object_key_oid(oid))
+    let encoded = crate::cache::layout::ObjectKey::new(oid);
+    let key = encoded.as_str();
+    let mut path = PathBuf::with_capacity(objects_dir.as_os_str().len() + 1 + key.len());
+    path.push(objects_dir);
+    path.push(key);
+    path
 }
 
 /// The root of the finalized BLAKE3 object namespace under `objects_dir`
@@ -569,8 +573,7 @@ impl Read for CacheObjectReader {
 pub struct CacheClient {
     root: Arc<crate::cache::root::CacheRootInner>,
     index: CacheState,
-    memo: std::cell::RefCell<std::collections::HashMap<Oid, ObjectVerification>>,
-    sizes: std::cell::RefCell<std::collections::HashMap<Oid, u64>>,
+    memo: std::cell::RefCell<std::collections::HashMap<Oid, CacheObservation>>,
 }
 
 /// Owned cache-verification work prepared by the coordinator.
@@ -586,7 +589,7 @@ pub struct PreparedCacheVerification {
 
 struct PreparedCacheObjectVerification {
     oid: Oid,
-    object: CacheObject,
+    path: PathBuf,
     prior: Option<crate::file_state::StatProof>,
 }
 
@@ -595,12 +598,7 @@ struct PreparedCacheObjectVerification {
 pub struct CompletedCacheVerification {
     oids: Vec<Oid>,
     known: std::collections::HashMap<Oid, ObjectVerification>,
-    results: Vec<(
-        Oid,
-        ObjectVerification,
-        Option<CachePublication>,
-        Option<u64>,
-    )>,
+    results: Vec<(Oid, CacheObservation, Option<CachePublication>)>,
 }
 
 /// A filesystem verification failure attributed to the OID whose cache
@@ -630,10 +628,6 @@ impl PreparedCacheVerification {
     ///
     /// This deliberately consumes an owned preparation so callers can move
     /// it directly into `spawn_blocking` without capturing `CacheClient`.
-    #[allow(
-        clippy::missing_panics_doc,
-        reason = "Successful verification always supplies an observed or prior proof"
-    )]
     pub fn verify(
         self,
     ) -> std::result::Result<CompletedCacheVerification, CacheVerificationFailure> {
@@ -642,16 +636,11 @@ impl PreparedCacheVerification {
             .into_par_iter()
             .map(
                 |prepared| -> std::result::Result<
-                    (
-                        Oid,
-                        ObjectVerification,
-                        Option<CachePublication>,
-                        Option<u64>,
-                    ),
+                    (Oid, CacheObservation, Option<CachePublication>),
                     CacheVerificationFailure,
                 > {
-                    let (status, delta) = crate::cache::proof::verify_object_path_fs(
-                        prepared.object.path.as_ref(),
+                    let (observation, delta) = crate::cache::proof::verify_object_path_fs(
+                        &prepared.path,
                         &prepared.oid,
                         prepared.prior.as_ref(),
                     )
@@ -659,14 +648,7 @@ impl PreparedCacheVerification {
                         oid: prepared.oid,
                         source: source.into(),
                     })?;
-                    let size = (status == ObjectVerification::Valid).then(|| {
-                        delta
-                            .as_ref()
-                            .and_then(CachePublication::verified_size)
-                            .or_else(|| prepared.prior.map(|proof| proof.size))
-                            .expect("valid verification has an observed proof")
-                    });
-                    Ok((prepared.oid, status, delta, size))
+                    Ok((prepared.oid, observation, delta))
                 },
             )
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -700,7 +682,6 @@ impl CacheClient {
             root,
             index,
             memo: std::cell::RefCell::new(std::collections::HashMap::new()),
-            sizes: std::cell::RefCell::new(std::collections::HashMap::new()),
         }
     }
 
@@ -735,7 +716,12 @@ impl CacheClient {
     pub fn object(&self, oid: &Oid) -> CacheObject {
         CacheObject {
             path: Arc::new(cache_path_oid(&self.root.objects_dir, oid)),
-            verified_size: self.sizes.borrow().get(oid).copied(),
+            verified_size: self
+                .memo
+                .borrow()
+                .get(oid)
+                .copied()
+                .and_then(CacheObservation::verified_size),
         }
     }
 
@@ -751,68 +737,56 @@ impl CacheClient {
         let mut memo = self.memo.borrow_mut();
         for oid in oids {
             memo.remove(&oid);
-            self.sizes.borrow_mut().remove(&oid);
         }
     }
 
     /// Apply a batch of freshly produced [`CachePublication`]s to this
-    /// session's shared proof index, then forget any memoized
+    /// session's shared proof index. First forget any memoized
     /// verification status for the affected oids so a later
     /// `verify`/`verify_windows` call in the same
     /// operation (e.g. a resync immediately following a repair) always
     /// re-derives its status from the just-updated ground truth instead
-    /// of an earlier, now-stale memo entry.
+    /// of an earlier, now-stale memo entry. Invalidation must happen even if
+    /// proof persistence fails: the filesystem mutation has already happened.
     pub fn apply_publications(&self, receipts: &[CachePublication]) -> Result<()> {
-        self.index.apply_many(receipts)?;
         self.forget_memo(receipts.iter().map(CachePublication::oid));
+        self.index.apply_many(receipts)?;
         Ok(())
     }
 
     /// Remove proof rows for objects that have been swept from disk.
     pub fn remove_proofs(&self, oids: &[Oid]) -> Result<()> {
-        self.index.remove_many(oids)?;
         self.forget_memo(oids.iter().copied());
+        self.index.remove_many(oids)?;
         Ok(())
     }
 
     /// Verify one object outside a multi-object loop, reusing an
     /// operation-local memoized result if this oid was already verified
     /// in this session so composing helpers never re-verify the same oid.
-    #[allow(
-        clippy::missing_panics_doc,
-        reason = "Successful verification always supplies an observed or prior proof"
-    )]
     pub fn verify(&self, oid: &Oid) -> Result<ObjectVerification> {
-        if let Some(status) = self.memo.borrow().get(oid).copied() {
+        if let Some(observation) = self.memo.borrow().get(oid).copied() {
             #[cfg(any(test, feature = "test-support"))]
             crate::cache::proof::test_support::record_memo_hit();
-            return Ok(status);
+            return Ok(observation.status());
         }
         #[cfg(any(test, feature = "test-support"))]
         crate::cache::proof::test_support::record_fs_verification();
         let prior = self.index.lookup(oid).ok().flatten();
-        let (status, delta) =
+        let (observation, delta) =
             crate::cache::proof::verify_object_fs(&self.root.objects_dir, oid, prior.as_ref())?;
-        if status == ObjectVerification::Valid {
-            let size = delta
-                .as_ref()
-                .and_then(CachePublication::verified_size)
-                .or_else(|| prior.map(|proof| proof.size))
-                .expect("valid verification has an observed proof");
-            self.sizes.borrow_mut().insert(*oid, size);
-        }
         if let Some(delta) = delta {
-            // Best-effort: `status` above is already fully determined from
+            // Best-effort: `observation` above is already fully determined from
             // the just-completed filesystem verification: a failure to
             // persist this proof only costs a later call an extra hash,
             // never this call's correctness.
             let _ = self.index.apply_many(std::slice::from_ref(&delta));
         }
         let mut memo = self.memo.borrow_mut();
-        memo.insert(*oid, status);
+        memo.insert(*oid, observation);
         #[cfg(any(test, feature = "test-support"))]
         test_support::record_memo_size(memo.len());
-        Ok(status)
+        Ok(observation.status())
     }
 
     /// Prepare one bounded verification batch on the coordinator thread.
@@ -827,8 +801,8 @@ impl CacheClient {
             let memo = self.memo.borrow();
             let mut seen = std::collections::HashSet::new();
             for oid in oids {
-                if let Some(status) = memo.get(oid).copied() {
-                    known.insert(*oid, status);
+                if let Some(observation) = memo.get(oid).copied() {
+                    known.insert(*oid, observation.status());
                 } else if seen.insert(*oid) {
                     pending_oids.push(*oid);
                 }
@@ -848,7 +822,9 @@ impl CacheClient {
             .into_iter()
             .map(|oid| PreparedCacheObjectVerification {
                 oid,
-                object: self.object(&oid),
+                // Pending OIDs have no memoized observation. Verification only
+                // needs an owned path, not a shared reader handle or another lookup.
+                path: cache_path_oid(&self.root.objects_dir, &oid),
                 prior: priors.remove(&oid),
             })
             .collect();
@@ -871,34 +847,35 @@ impl CacheClient {
     ) -> Vec<ObjectVerification> {
         let CompletedCacheVerification {
             oids,
-            mut known,
+            known,
             results,
         } = completed;
         let mut deltas = Vec::new();
         let mut memo = self.memo.borrow_mut();
-        for (oid, status, delta, size) in results {
-            if let Some(size) = size {
-                self.sizes.borrow_mut().insert(oid, size);
-            }
-            memo.insert(oid, status);
-            known.insert(oid, status);
+        for (oid, observation, delta) in results {
+            memo.insert(oid, observation);
             if let Some(delta) = delta {
                 deltas.push(delta);
             }
         }
         #[cfg(any(test, feature = "test-support"))]
         test_support::record_memo_size(memo.len());
-        drop(memo);
-        let _ = self.index.apply_many(&deltas);
-
-        oids.iter()
+        // Fresh observations already live in the memo; do not build a second
+        // OID-keyed map containing their projected statuses. `known` preserves
+        // only the memo hits captured during preparation.
+        let statuses = oids
+            .iter()
             .map(|oid| {
                 known
                     .get(oid)
                     .copied()
+                    .or_else(|| memo.get(oid).copied().map(CacheObservation::status))
                     .unwrap_or(ObjectVerification::Missing)
             })
-            .collect()
+            .collect();
+        drop(memo);
+        let _ = self.index.apply_many(&deltas);
+        statuses
     }
 
     /// Verify `oids` in bounded windows, invoking `on_window` with each
@@ -998,11 +975,12 @@ impl CacheClient {
                 .par_iter()
                 .map(
                     |oid| -> Result<(ObjectVerification, Option<CachePublication>)> {
-                        Ok(crate::cache::proof::verify_object_fs(
+                        let (observation, delta) = crate::cache::proof::verify_object_fs(
                             objects_dir,
                             oid,
                             priors.get(oid),
-                        )?)
+                        )?;
+                        Ok((observation.status(), delta))
                     },
                 )
                 .collect::<Result<Vec<_>>>()?;
@@ -1237,6 +1215,30 @@ fn ingest_file_to_tmp(
     }
 }
 
+/// Poll only while the copy is active. Dropping the completion sender wakes
+/// the observer immediately on success, failure, or unwind, instead of joining
+/// a sleeping thread for the remainder of its reporting interval.
+fn with_copy_progress<T>(
+    path: &Path,
+    on_progress: &(impl Fn(u64) + Sync),
+    copy: impl FnOnce() -> T,
+) -> T {
+    std::thread::scope(|scope| {
+        let (complete, waiting) = std::sync::mpsc::channel::<()>();
+        scope.spawn(move || {
+            while matches!(
+                waiting.recv_timeout(std::time::Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ) {
+                on_progress(std::fs::metadata(path).map_or(0, |m| m.len()));
+            }
+        });
+        let result = copy();
+        drop(complete);
+        result
+    })
+}
+
 /// [`IngestStrategy::Safe`] (the default): copy `path` into the cache and
 /// then BLAKE3-hash the *copy* (not the source) via
 /// [`update_mmap_rayon`](blake3::Hasher::update_mmap_rayon).
@@ -1261,23 +1263,12 @@ fn ingest_file_safe_to_tmp(
     ensure_cache_directory(objects_dir)?;
     let mut tmp = create_tmp_file(objects_dir)?;
     let tmp_path = tmp.path().to_path_buf();
-    let done = AtomicBool::new(false);
-    std::thread::scope(|s| {
-        s.spawn(|| {
-            while !done.load(Ordering::Acquire) {
-                let len = std::fs::metadata(&tmp_path).map_or(0, |m| m.len());
-                on_progress(len);
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-        });
-        let result = std::fs::copy(path, &tmp_path);
-        done.store(true, Ordering::Release);
-        result
-    })
-    .map_err(|source| CacheError::PathUnreadable {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    with_copy_progress(&tmp_path, &on_progress, || std::fs::copy(path, &tmp_path)).map_err(
+        |source| CacheError::PathUnreadable {
+            path: path.to_path_buf(),
+            source,
+        },
+    )?;
     tmp.as_file_mut()
         .sync_all()
         .map_err(|source| CacheError::EntryUnwritable {
@@ -1321,29 +1312,15 @@ fn ingest_file_hybrid_to_tmp(
     let mut tmp = create_tmp_file(objects_dir)?;
     let tmp_path = tmp.path().to_path_buf();
     let before = source_fingerprint(path);
-    let done = AtomicBool::new(false);
     let (copy_result, hash_result): (std::io::Result<u64>, std::io::Result<blake3::Hash>) =
-        std::thread::scope(|s| {
-            s.spawn(|| {
-                while !done.load(Ordering::Acquire) {
-                    let len = std::fs::metadata(&tmp_path).map_or(0, |m| m.len());
-                    on_progress(len);
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-            });
-            rayon::join(
-                || {
-                    let result = std::fs::copy(path, &tmp_path);
-                    done.store(true, Ordering::Release);
-                    result
-                },
-                || {
-                    let mut hasher = blake3::Hasher::new();
-                    hasher.update_mmap_rayon(path)?;
-                    Ok(hasher.finalize())
-                },
-            )
-        });
+        rayon::join(
+            || with_copy_progress(&tmp_path, &on_progress, || std::fs::copy(path, &tmp_path)),
+            || {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update_mmap_rayon(path)?;
+                Ok(hasher.finalize())
+            },
+        );
     let size = copy_result.map_err(|source| CacheError::PathUnreadable {
         path: path.to_path_buf(),
         source,
@@ -1439,26 +1416,17 @@ fn ingest_file_mmap_to_tmp(
             path: path.to_path_buf(),
             source,
         })?;
-    let done = AtomicBool::new(false);
-    let (write_result, hash): (std::io::Result<()>, blake3::Hash) = std::thread::scope(|s| {
-        s.spawn(|| {
-            while !done.load(Ordering::Acquire) {
-                let len = std::fs::metadata(&tmp_path).map_or(0, |m| m.len());
-                on_progress(len);
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
+    let (write_result, hash): (std::io::Result<()>, blake3::Hash) =
+        with_copy_progress(&tmp_path, &on_progress, || {
+            rayon::join(
+                || tmp.as_file_mut().write_all(&mmap),
+                || {
+                    let mut hasher = blake3::Hasher::new();
+                    hasher.update_rayon(&mmap);
+                    hasher.finalize()
+                },
+            )
         });
-        let joined = rayon::join(
-            || tmp.as_file_mut().write_all(&mmap),
-            || {
-                let mut hasher = blake3::Hasher::new();
-                hasher.update_rayon(&mmap);
-                hasher.finalize()
-            },
-        );
-        done.store(true, Ordering::Release);
-        joined
-    });
     write_result.map_err(|source| CacheError::EntryUnwritable {
         path: tmp_path.clone(),
         source,
@@ -2241,6 +2209,57 @@ mod tests {
             CacheError::SourceUnreadable { ref source }
                 if source.to_string() == "source-read-sentinel"
         ));
+    }
+
+    #[test]
+    fn copy_progress_completion_preserves_results_and_unwinds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("staging");
+        assert_eq!(
+            with_copy_progress(&path, &|_| {}, || Ok::<_, u8>(42)),
+            Ok(42)
+        );
+        assert_eq!(
+            with_copy_progress(&path, &|_| {}, || Err::<u8, _>(7)),
+            Err(7)
+        );
+        // The completion sender must be dropped before the scoped observer is
+        // joined during unwinding, or this call would never return.
+        assert!(
+            std::panic::catch_unwind(|| {
+                with_copy_progress(&path, &|_| {}, || panic!("copy failed"));
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn file_ingest_reports_final_size_and_cleans_staging_on_read_failure() {
+        for strategy in [
+            IngestStrategy::Safe,
+            IngestStrategy::Hybrid,
+            IngestStrategy::Mmap,
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let objects = tmp.path().join("objects");
+            let source = tmp.path().join("source");
+            let reported = std::sync::Mutex::new(Vec::new());
+            std::fs::write(&source, b"content").unwrap();
+            let result = ingest_file(&objects, &source, strategy, |size| {
+                reported.lock().unwrap().push(size);
+            })
+            .unwrap();
+            assert_eq!(result.size, 7);
+            assert_eq!(reported.lock().unwrap().last(), Some(&7));
+            assert!(ingest_file(&objects, &tmp.path().join("absent"), strategy, |_| {}).is_err());
+            assert!(!std::fs::read_dir(&objects).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("tmp-")
+            }));
+        }
     }
 
     #[test]
@@ -3031,6 +3050,138 @@ mod tests {
         }
 
         #[test]
+        fn valid_size_survives_cold_warm_and_unavailable_proofs_in_both_verifiers() {
+            for staged in [false, true] {
+                for proof_state in ["cold", "warm", "unavailable"] {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let objects_dir = tmp.path().join("objects");
+                    let oid = write_object(&objects_dir, b"payload");
+                    if proof_state == "warm" {
+                        CacheClient::open(objects_dir.clone()).verify(&oid).unwrap();
+                    }
+                    let cache = CacheClient::open(objects_dir);
+                    if proof_state == "unavailable" {
+                        cache.break_database_for_test();
+                    }
+                    assert_eq!(cache.object(&oid).verified_size(), None);
+                    let status = if staged {
+                        let completed = cache.prepare_verification(&[oid, oid]).verify().unwrap();
+                        assert_eq!(cache.object(&oid).verified_size(), None);
+                        let statuses = cache.commit_verification(completed);
+                        assert_eq!(statuses.len(), 2);
+                        assert_eq!(statuses[0], statuses[1]);
+                        statuses[0]
+                    } else {
+                        cache.verify(&oid).unwrap()
+                    };
+                    assert_eq!(status, ObjectVerification::Valid);
+                    assert_eq!(cache.object(&oid).verified_size(), Some(7));
+                    let before = test_support::snapshot();
+                    assert_eq!(cache.verify(&oid).unwrap(), ObjectVerification::Valid);
+                    assert_eq!(cache.object(&oid).verified_size(), Some(7));
+                    assert_eq!(
+                        test_support::snapshot().fs_verifications,
+                        before.fs_verifications
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn proof_database_failure_cannot_keep_a_pre_mutation_observation() {
+            for removed in [false, true] {
+                let tmp = tempfile::tempdir().unwrap();
+                let objects_dir = tmp.path().join("objects");
+                let oid = write_object(&objects_dir, b"payload");
+                let cache = CacheClient::open(objects_dir.clone());
+                assert_eq!(cache.verify(&oid).unwrap(), ObjectVerification::Valid);
+                assert_eq!(cache.object(&oid).verified_size(), Some(7));
+                cache.break_database_for_test();
+                let object = cache_path_oid(&objects_dir, &oid);
+                std::fs::remove_file(&object).unwrap();
+                let error = if removed {
+                    cache.remove_proofs(&[oid])
+                } else {
+                    std::fs::write(&object, b"broken").unwrap();
+                    cache.apply_publications(&[CachePublication::remove(oid)])
+                };
+                assert!(error.is_err());
+                assert_eq!(cache.object(&oid).verified_size(), None);
+                assert_eq!(
+                    cache.verify(&oid).unwrap(),
+                    if removed {
+                        ObjectVerification::Missing
+                    } else {
+                        ObjectVerification::Corrupt
+                    }
+                );
+            }
+        }
+
+        #[test]
+        fn invalidation_discards_status_and_size_before_observing_missing_or_corrupt() {
+            for staged in [false, true] {
+                for missing in [false, true] {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let objects_dir = tmp.path().join("objects");
+                    let oid = write_object(&objects_dir, b"payload");
+                    let cache = CacheClient::open(objects_dir.clone());
+                    cache.verify(&oid).unwrap();
+                    assert_eq!(cache.object(&oid).verified_size(), Some(7));
+                    let path = cache_path_oid(&objects_dir, &oid);
+                    std::fs::remove_file(&path).unwrap();
+                    if missing {
+                        cache.remove_proofs(&[oid]).unwrap();
+                    } else {
+                        std::fs::write(path, b"broken").unwrap();
+                        cache
+                            .apply_publications(&[CachePublication::remove(oid)])
+                            .unwrap();
+                    }
+                    assert_eq!(cache.object(&oid).verified_size(), None);
+                    let status = if staged {
+                        let completed = cache.prepare_verification(&[oid]).verify().unwrap();
+                        cache.commit_verification(completed)[0]
+                    } else {
+                        cache.verify(&oid).unwrap()
+                    };
+                    assert_eq!(
+                        status,
+                        if missing {
+                            ObjectVerification::Missing
+                        } else {
+                            ObjectVerification::Corrupt
+                        }
+                    );
+                    assert_eq!(cache.object(&oid).verified_size(), None);
+                    assert_eq!(cache.verify(&oid).unwrap(), status);
+                }
+            }
+        }
+
+        #[test]
+        fn unmemoized_verification_preserves_existing_memo_without_retaining_new_sizes() {
+            let tmp = tempfile::tempdir().unwrap();
+            let objects_dir = tmp.path().join("objects");
+            let retained = write_object(&objects_dir, b"retained");
+            let fresh = write_object(&objects_dir, b"fresh");
+            let cache = CacheClient::open(objects_dir);
+            cache.verify(&retained).unwrap();
+            cache
+                .verify_windows_unmemoized(&[retained, fresh], |_, statuses| -> Result<()> {
+                    assert_eq!(
+                        statuses,
+                        &[ObjectVerification::Valid, ObjectVerification::Valid]
+                    );
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(cache.memo.borrow().len(), 1);
+            assert_eq!(cache.object(&retained).verified_size(), Some(8));
+            assert_eq!(cache.object(&fresh).verified_size(), None);
+        }
+
+        #[test]
         fn verify_many_deduplicates_repeated_oids_to_one_verification() {
             let tmp = tempfile::tempdir().unwrap();
             let objects_dir = tmp.path().join("objects");
@@ -3219,6 +3370,34 @@ mod tests {
             // verification, no proof lookup.
             assert_eq!(after.fs_verifications - before.fs_verifications, 0);
             assert_eq!(after.memo_hits - before.memo_hits, 1);
+        }
+
+        #[test]
+        fn staged_results_preserve_input_order_across_memo_hits_and_fresh_duplicates() {
+            let tmp = tempfile::tempdir().unwrap();
+            let objects_dir = tmp.path().join("objects");
+            let known = write_object(&objects_dir, b"known");
+            let fresh = write_object(&objects_dir, b"fresh bytes");
+            let missing = Oid::from_bytes([0xaa; 32]);
+            let cache = CacheClient::open(objects_dir);
+            cache.verify(&known).unwrap();
+            let completed = cache
+                .prepare_verification(&[fresh, known, missing, fresh, known])
+                .verify()
+                .unwrap();
+            assert_eq!(
+                cache.commit_verification(completed),
+                vec![
+                    ObjectVerification::Valid,
+                    ObjectVerification::Valid,
+                    ObjectVerification::Missing,
+                    ObjectVerification::Valid,
+                    ObjectVerification::Valid
+                ]
+            );
+            assert_eq!(cache.object(&known).verified_size(), Some(5));
+            assert_eq!(cache.object(&fresh).verified_size(), Some(11));
+            assert_eq!(cache.object(&missing).verified_size(), None);
         }
 
         #[test]

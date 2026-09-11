@@ -28,6 +28,8 @@ pub enum SystemVerb {
     Clean,
 }
 
+/// Raw maintenance input. Execution accepts only the private validated form,
+/// constructed after lifecycle observation and before repository work.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SystemRequest {
     Inspect {
@@ -122,19 +124,10 @@ pub fn system_with_lifecycle_observer(
     observe: &dyn Fn(lifecycle::Surface<'_>),
 ) -> Result<SystemOutcome, SystemError> {
     observe(lifecycle::Surface::Command("system"));
-    validate(&request)?;
-    match request {
-        SystemRequest::Inspect { scope } => inspect(repo, scope, progress),
-        SystemRequest::Repair {
-            scope,
-            transaction,
-            recovery,
-        } => repair(repo, scope, transaction, recovery, progress),
-        SystemRequest::Clean {
-            scope,
-            purge_temporary,
-            purge_objects,
-        } => clean(repo, scope, purge_temporary, purge_objects, progress),
+    match ValidatedSystemRequest::try_from(request)? {
+        ValidatedSystemRequest::Inspect(scope) => inspect(repo, scope, progress),
+        ValidatedSystemRequest::Repair(request) => repair(repo, request, progress),
+        ValidatedSystemRequest::Clean(request) => clean(repo, request, progress),
     }
 }
 
@@ -168,11 +161,13 @@ fn inspect(
 
 fn repair(
     repo: &Repository,
-    scope: SystemScope,
-    transaction: Option<String>,
-    recovery: Option<RecoveryChoice>,
+    request: ValidatedRepair,
     progress: &dyn ProgressReporter,
 ) -> Result<SystemOutcome, SystemError> {
+    let ValidatedRepair {
+        scope,
+        lock_request,
+    } = request;
     let domains = resolve_domains(scope);
     let task = progress.begin(ProgressSpec::items(
         ProgressOperation::SystemRepair,
@@ -180,10 +175,6 @@ fn repair(
         Some(domains.len() as u64),
     ));
     let maintenance = repo.maintenance();
-    let lock_request = LockRepairRequest {
-        choice: recovery,
-        transaction,
-    };
     if scope == SystemScope::All {
         let lock = maintenance.repair_lock(&lock_request)?;
         task.inc(1);
@@ -229,11 +220,14 @@ fn repair(
 
 fn clean(
     repo: &Repository,
-    scope: SystemScope,
-    purge_temporary: bool,
-    purge_objects: bool,
+    request: ValidatedClean,
     progress: &dyn ProgressReporter,
 ) -> Result<SystemOutcome, SystemError> {
+    let ValidatedClean {
+        scope,
+        purge_temporary,
+        purge_objects,
+    } = request;
     let domains = resolve_domains(scope);
     let task = progress.begin(ProgressSpec::items(
         ProgressOperation::SystemClean,
@@ -259,32 +253,68 @@ fn clean(
     })
 }
 
-fn validate(request: &SystemRequest) -> Result<(), SystemError> {
-    match request {
-        SystemRequest::Repair {
-            scope,
-            transaction,
-            recovery,
-        } => {
-            if transaction.is_some() && recovery.is_none() {
-                return Err(SystemError::TransactionChoiceRequired);
+// These private types are the executable boundary. Only this conversion creates
+// them; maintenance dispatch never accepts raw dependent option combinations.
+enum ValidatedSystemRequest {
+    Inspect(SystemScope),
+    Repair(ValidatedRepair),
+    Clean(ValidatedClean),
+}
+
+struct ValidatedRepair {
+    scope: SystemScope,
+    lock_request: LockRepairRequest,
+}
+
+struct ValidatedClean {
+    scope: SystemScope,
+    purge_temporary: bool,
+    purge_objects: bool,
+}
+
+impl TryFrom<SystemRequest> for ValidatedSystemRequest {
+    type Error = SystemError;
+
+    fn try_from(request: SystemRequest) -> Result<Self, Self::Error> {
+        match request {
+            SystemRequest::Inspect { scope } => Ok(Self::Inspect(scope)),
+            SystemRequest::Repair {
+                scope,
+                transaction,
+                recovery,
+            } => {
+                if transaction.is_some() && recovery.is_none() {
+                    return Err(SystemError::TransactionChoiceRequired);
+                }
+                if recovery.is_some() && scope != SystemScope::Lock {
+                    return Err(SystemError::RecoveryChoiceOnlyForLock);
+                }
+                Ok(Self::Repair(ValidatedRepair {
+                    scope,
+                    lock_request: LockRepairRequest {
+                        choice: recovery,
+                        transaction,
+                    },
+                }))
             }
-            if recovery.is_some() && *scope != SystemScope::Lock {
-                return Err(SystemError::RecoveryChoiceOnlyForLock);
+            SystemRequest::Clean {
+                scope,
+                purge_temporary,
+                purge_objects,
+            } => {
+                if (purge_temporary || purge_objects)
+                    && !matches!(scope, SystemScope::Cache | SystemScope::All)
+                {
+                    return Err(SystemError::CachePurgeOnlyForCacheScope);
+                }
+                Ok(Self::Clean(ValidatedClean {
+                    scope,
+                    purge_temporary,
+                    purge_objects,
+                }))
             }
         }
-        SystemRequest::Clean {
-            scope,
-            purge_temporary,
-            purge_objects,
-        } if (*purge_temporary || *purge_objects)
-            && !matches!(scope, SystemScope::Cache | SystemScope::All) =>
-        {
-            return Err(SystemError::CachePurgeOnlyForCacheScope);
-        }
-        SystemRequest::Inspect { .. } | SystemRequest::Clean { .. } => {}
     }
-    Ok(())
 }
 
 fn resolve_domains(scope: SystemScope) -> Vec<Domain> {
@@ -362,6 +392,85 @@ mod tests {
                 .unwrap()
                 .push((spec.operation(), spec.total()));
             ProgressTask::from_backend(Arc::clone(&self.backend) as Arc<dyn ActivityBackend>)
+        }
+    }
+
+    #[test]
+    fn repair_validation_preserves_scope_rules_and_error_precedence() {
+        for scope in [
+            SystemScope::Lock,
+            SystemScope::State,
+            SystemScope::Cache,
+            SystemScope::Git,
+            SystemScope::All,
+        ] {
+            for transaction in [None, Some("txn".to_string())] {
+                for recovery in [
+                    None,
+                    Some(RecoveryChoice::RestoreBackup),
+                    Some(RecoveryChoice::PromoteStaged),
+                ] {
+                    let result = ValidatedSystemRequest::try_from(SystemRequest::Repair {
+                        scope,
+                        transaction: transaction.clone(),
+                        recovery,
+                    });
+                    if transaction.is_some() && recovery.is_none() {
+                        assert!(matches!(
+                            result,
+                            Err(SystemError::TransactionChoiceRequired)
+                        ));
+                    } else if recovery.is_some() && scope != SystemScope::Lock {
+                        assert!(matches!(
+                            result,
+                            Err(SystemError::RecoveryChoiceOnlyForLock)
+                        ));
+                    } else {
+                        let Ok(ValidatedSystemRequest::Repair(request)) = result else {
+                            panic!("valid repair request rejected")
+                        };
+                        assert_eq!(request.scope, scope);
+                        assert_eq!(request.lock_request.choice, recovery);
+                        assert_eq!(request.lock_request.transaction, transaction);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clean_validation_keeps_purge_choices_only_for_cache_and_all() {
+        for scope in [
+            SystemScope::Lock,
+            SystemScope::State,
+            SystemScope::Cache,
+            SystemScope::Git,
+            SystemScope::All,
+        ] {
+            for purge_temporary in [false, true] {
+                for purge_objects in [false, true] {
+                    let result = ValidatedSystemRequest::try_from(SystemRequest::Clean {
+                        scope,
+                        purge_temporary,
+                        purge_objects,
+                    });
+                    if (purge_temporary || purge_objects)
+                        && !matches!(scope, SystemScope::Cache | SystemScope::All)
+                    {
+                        assert!(matches!(
+                            result,
+                            Err(SystemError::CachePurgeOnlyForCacheScope)
+                        ));
+                    } else {
+                        let Ok(ValidatedSystemRequest::Clean(request)) = result else {
+                            panic!("valid clean request rejected")
+                        };
+                        assert_eq!(request.scope, scope);
+                        assert_eq!(request.purge_temporary, purge_temporary);
+                        assert_eq!(request.purge_objects, purge_objects);
+                    }
+                }
+            }
         }
     }
 

@@ -294,13 +294,6 @@ impl std::fmt::Debug for CachePublication {
 }
 
 impl CachePublication {
-    pub(super) const fn verified_size(&self) -> Option<u64> {
-        match self.0 {
-            ProofMutation::Upsert(_, proof) => Some(proof.size),
-            ProofMutation::Remove(_) => None,
-        }
-    }
-
     pub(super) const fn upsert(oid: Oid, proof: StatProof) -> Self {
         Self(ProofMutation::Upsert(oid, proof))
     }
@@ -735,12 +728,38 @@ pub enum ObjectVerification {
     Corrupt,
 }
 
+/// One filesystem observation, not a guarantee against later external changes.
+/// Validity and its required metadata are established together by the verifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CacheObservation {
+    Missing,
+    Corrupt,
+    Valid { size: u64 },
+}
+
+impl CacheObservation {
+    pub(super) const fn status(self) -> ObjectVerification {
+        match self {
+            Self::Missing => ObjectVerification::Missing,
+            Self::Corrupt => ObjectVerification::Corrupt,
+            Self::Valid { .. } => ObjectVerification::Valid,
+        }
+    }
+
+    pub(super) const fn verified_size(self) -> Option<u64> {
+        match self {
+            Self::Valid { size } => Some(size),
+            Self::Missing | Self::Corrupt => None,
+        }
+    }
+}
+
 /// The pure filesystem/content step of cache-object verification,
 /// separated from the shared proof index so object stat/hash work can run
 /// in parallel without any worker touching `SQLite`. Given an
 /// optional `prior` proof (whatever the operation-scoped proof index
 /// already knew for `oid`, looked up once in a bounded set-based batch by
-/// the caller), it decides the object's [`ObjectVerification`] and returns
+/// the caller), it establishes the object's [`CacheObservation`] and returns
 /// the [`CachePublication`] that should later be persisted for it, if any:
 ///
 /// ```text
@@ -756,24 +775,24 @@ pub enum ObjectVerification {
 /// This performs no `SQLite` I/O whatsoever -- it only reads the `prior`
 /// value handed to it and reports what the index *should* become, leaving
 /// every actual read/write batched and serialized on the operation thread.
-pub fn verify_object_fs(
+pub(super) fn verify_object_fs(
     objects_dir: &Path,
     oid: &Oid,
     prior: Option<&StatProof>,
-) -> Result<(ObjectVerification, Option<CachePublication>)> {
+) -> Result<(CacheObservation, Option<CachePublication>)> {
     let path = cache_path_oid(objects_dir, oid);
     verify_object_path_fs(&path, oid, prior)
 }
 
-pub(crate) fn verify_object_path_fs(
+pub(super) fn verify_object_path_fs(
     path: &Path,
     oid: &Oid,
     prior: Option<&StatProof>,
-) -> Result<(ObjectVerification, Option<CachePublication>)> {
+) -> Result<(CacheObservation, Option<CachePublication>)> {
     let meta = match std::fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((ObjectVerification::Missing, None));
+            return Ok((CacheObservation::Missing, None));
         }
         Err(e) => {
             return Err(crate::cache::object::CacheError::EntryUnreadable {
@@ -788,7 +807,7 @@ pub(crate) fn verify_object_path_fs(
         // cache path is never trustworthy content, regardless of any
         // proof that might still be on record for it.
         return Ok((
-            ObjectVerification::Corrupt,
+            CacheObservation::Corrupt,
             Some(CachePublication::remove(*oid)),
         ));
     }
@@ -796,7 +815,7 @@ pub(crate) fn verify_object_path_fs(
     if let (Some(prior), Some(current)) = (prior, observe_regular_file_no_follow(path))
         && current.matches(prior)
     {
-        return Ok((ObjectVerification::Valid, None));
+        return Ok((CacheObservation::Valid { size: current.size }, None));
     }
 
     // The stat cache couldn't prove identity on its own: perform exactly
@@ -810,12 +829,14 @@ pub(crate) fn verify_object_path_fs(
 
     if observation.value == *oid {
         Ok((
-            ObjectVerification::Valid,
+            CacheObservation::Valid {
+                size: observation.proof.size,
+            },
             Some(CachePublication::upsert(*oid, observation.proof)),
         ))
     } else {
         Ok((
-            ObjectVerification::Corrupt,
+            CacheObservation::Corrupt,
             Some(CachePublication::remove(*oid)),
         ))
     }

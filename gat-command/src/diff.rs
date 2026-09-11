@@ -65,13 +65,13 @@ pub fn diff(
         selection,
     } = request;
 
-    let (config, scope, rows) = match &to {
+    let (scope, rows) = match &to {
         DiffTarget::WorkingTree => {
             let current = repo.comparisons().current(progress)?;
             let ResolvedSelection { selection, scope } =
                 selection::resolve(selection.as_ref(), current.config())?;
             let rows = current.revision_with_current(&from, &selection, Unchanged::Drop)?;
-            (current.config().clone(), scope, rows)
+            (scope, annotate_rows(rows, &current.config().mounts))
         }
         DiffTarget::Revision(revision) => {
             let config = repo.load_config()?;
@@ -85,10 +85,9 @@ pub fn diff(
                         .revisions(&from, revision, &selection, Unchanged::Drop)
                 },
             )?;
-            (config, scope, rows)
+            (scope, annotate_rows(rows, &config.mounts))
         }
     };
-    let ownership = gat_engine::MountOwnership::new(&config.mounts);
 
     let changes = rows.len();
     if changes == 0 {
@@ -98,17 +97,27 @@ pub fn diff(
             scope,
             from,
             to,
-            rows: rows
-                .into_iter()
-                .map(|row| DiffRow {
-                    mount: ownership
-                        .owner_for_path(&row.path)
-                        .map(|owner| owner.name.clone()),
-                    path: row.path,
-                    change: row.change,
-                })
-                .collect(),
+            rows,
             changes,
         })
     }
+}
+
+fn annotate_rows(
+    rows: Vec<gat_engine::ChangedRow>,
+    mounts: &gat_core::config::MountsConfig,
+) -> Vec<DiffRow> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let ownership = gat_engine::MountOwnership::new(mounts);
+    rows.into_iter()
+        .map(|row| DiffRow {
+            mount: ownership
+                .owner_for_path(&row.path)
+                .map(|owner| owner.name.clone()),
+            path: row.path,
+            change: row.change,
+        })
+        .collect()
 }

@@ -40,6 +40,6 @@ fn hook_reconciliation_is_clean_for_an_empty_repository() {
     let (_tmp, repo) = repository();
     let outcome = gat_command::hook(&repo, HookRequest, &NoopProgress).unwrap();
 
-    assert!(outcome.completion.is_clean());
+    assert!(outcome.is_clean());
     assert_eq!(outcome.fetched, 0);
 }

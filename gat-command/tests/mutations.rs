@@ -239,7 +239,7 @@ fn add_repairs_deleted_cache_objects_and_whole_cache() {
         &NoopProgress,
     )
     .unwrap();
-    assert!(synced.completion.is_clean());
+    assert!(synced.is_clean());
     assert_eq!(
         std::fs::read(tmp.path().join("a.bin")).unwrap(),
         b"shared payload"

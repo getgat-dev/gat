@@ -78,7 +78,6 @@ pub fn status(
 ) -> Result<StatusOutcome, StatusError> {
     let current = repo.comparisons().current(progress)?;
     let config = current.config();
-    let ownership = gat_engine::MountOwnership::new(&config.mounts);
     let ResolvedSelection { selection, scope } =
         selection::resolve(request.selection.as_ref(), config)?;
     let rows_by_path = current.staged_with_current(&selection, Unchanged::Keep)?;
@@ -91,8 +90,14 @@ pub fn status(
         });
     }
 
+    let ownership = gat_engine::MountOwnership::new(&config.mounts);
     let cache = current.cache_presence();
-    let changes = std::sync::atomic::AtomicUsize::new(0);
+    // Counting is pure and independent of parallel cache/ownership annotation.
+    // Avoid making every changed row contend on the same atomic counter.
+    let changes = rows_by_path
+        .iter()
+        .filter(|row| !matches!(row.change, RowChange::Unchanged { .. }))
+        .count();
     let rows = with_progress_typed(
         progress,
         ProgressSpec::items(
@@ -109,20 +114,12 @@ pub fn status(
                     let cache_presence = match &change {
                         RowChange::Added { oid }
                         | RowChange::Modified { oid }
-                        | RowChange::Unchanged { oid } => {
-                            if !matches!(change, RowChange::Unchanged { .. }) {
-                                changes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            }
-                            Some(if presence[oid] {
-                                CachePresence::Present
-                            } else {
-                                CachePresence::Missing
-                            })
-                        }
-                        RowChange::Removed => {
-                            changes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            None
-                        }
+                        | RowChange::Unchanged { oid } => Some(if presence[oid] {
+                            CachePresence::Present
+                        } else {
+                            CachePresence::Missing
+                        }),
+                        RowChange::Removed => None,
                     };
                     inspect.inc(1);
                     StatusRow {
@@ -141,7 +138,7 @@ pub fn status(
     Ok(StatusOutcome::WorkingTree {
         scope,
         rows,
-        changes: changes.into_inner(),
+        changes,
     })
 }
 

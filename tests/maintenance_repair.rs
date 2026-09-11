@@ -21,7 +21,7 @@ fn repaired_state_forces_validation_before_trust_state_can_overwrite_local_edits
     ));
     fixture.write("tracked.bin", b"locally edited");
 
-    let outcome = gat_command::recover_incomplete(gat_command::sync(
+    let outcome = gat_command::sync(
         &repo,
         gat_command::SyncRequest {
             selection: Some(Selection::root()),
@@ -34,7 +34,7 @@ fn repaired_state_forces_validation_before_trust_state_can_overwrite_local_edits
             rematerialize: false,
         },
         &NoopProgress,
-    ))
+    )
     .unwrap();
 
     assert_eq!(outcome.outcome.conflicts, vec!["tracked.bin".to_string()]);

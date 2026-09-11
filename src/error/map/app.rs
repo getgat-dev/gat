@@ -1,5 +1,4 @@
-//! `Failure` mapping for `crate::app`'s app-level policy errors and
-//! synchronization-completion diagnostics.
+//! `Failure` mapping for `crate::app`'s app-level policy errors.
 
 use super::super::{Diagnostic, ErrorCode, Failure};
 use crate::app::AppError;
@@ -38,21 +37,4 @@ impl From<AppError> for Failure {
         };
         Self::expected(diagnostic)
     }
-}
-
-/// Summarizes an incomplete sync returned as an error before a report exists.
-/// Completed sync outcomes retain their own presentation and exit status.
-pub fn sync_completion_conflict(conflicts: usize, missing: usize, corrupted: usize) -> Failure {
-    Failure::expected(Diagnostic::new(
-        ErrorCode::Conflict,
-        UserLine::compose([
-            UserLine::authored("sync incomplete: "),
-            UserLine::number(conflicts as i64),
-            UserLine::authored(" conflict(s), "),
-            UserLine::number(missing as i64),
-            UserLine::authored(" missing object(s), "),
-            UserLine::number(corrupted as i64),
-            UserLine::authored(" corrupted object(s)"),
-        ]),
-    ))
 }

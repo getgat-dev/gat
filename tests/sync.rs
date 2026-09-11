@@ -371,3 +371,36 @@ fn reshape_and_reconciliation_share_one_progress_task() {
     );
     assert_eq!(progress.max_active_tasks(), 1);
 }
+
+#[test]
+fn sync_and_hook_return_reports_with_the_same_unresolved_paths() {
+    let tmp = test_repo();
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
+    repo.write_config_fixture(&Config {
+        cache: gat_core::config::CacheConfig {
+            materialization_strategy: Some("copy".parse().unwrap()),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .unwrap();
+    std::fs::write(tmp.path().join("local.bin"), b"original").unwrap();
+    add(&repo, &[PathBuf::from("local.bin")], &NoopProgress).unwrap();
+    commit_all(tmp.path(), "track local.bin");
+    std::fs::write(tmp.path().join("local.bin"), b"locally edited").unwrap();
+
+    let synced = run(&repo, request(), &NoopProgress).unwrap();
+    let hooked = gat_command::hook(&repo, gat_command::HookRequest, &NoopProgress).unwrap();
+    assert!(!synced.is_clean());
+    assert!(!hooked.is_clean());
+    assert_eq!(synced.outcome.conflicts, vec!["local.bin".to_string()]);
+    assert_eq!(hooked.outcome.conflicts, synced.outcome.conflicts);
+    assert_eq!(hooked.outcome.missing, synced.outcome.missing);
+    assert_eq!(hooked.outcome.corrupted, synced.outcome.corrupted);
+    assert_eq!(
+        std::fs::read(tmp.path().join("local.bin")).unwrap(),
+        b"locally edited"
+    );
+}

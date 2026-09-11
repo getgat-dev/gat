@@ -85,9 +85,8 @@ pub use status::{
     StatusRequest, StatusRow, ls_files, status,
 };
 pub use sync::{
-    HookRequest, PullRequest, SyncCompletionStatus, SyncError, SyncIncompleteError, SyncOutcome,
-    SyncRequest, hook, pull, pull_with_desired_operation, recover_incomplete, sync,
-    sync_with_operation,
+    HookRequest, PullRequest, SyncError, SyncOutcome, SyncRequest, hook, pull,
+    pull_with_desired_operation, sync, sync_with_operation,
 };
 pub use system::{
     CacheClean, CacheDbState, CacheFact, CacheInspect, CacheRepair, CandidateInvalidReason,

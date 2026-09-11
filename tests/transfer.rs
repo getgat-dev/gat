@@ -618,7 +618,6 @@ fn hook_and_repair_resync_share_pulls_stale_desired_revision_rejection_before_an
         },
         0,
         false,
-        false,
         &NoopProgress,
     )
     .unwrap_err();

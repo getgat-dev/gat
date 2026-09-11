@@ -93,19 +93,67 @@ pub enum Validation {
     TrustState,
 }
 
-/// Bundles [`Validation`] with whether this reconciliation run should
-/// rematerialize already-correct paths, so [`plan::plan_into_sink`]/
-/// [`plan::plan_with_store`]/[`plan::merge_desired_with_prior`] (already
-/// at seven parameters -- see their doc comments on `TargetCtx`/
-/// `DesiredSource` for the same reasoning) don't need an eighth bare
-/// argument. Constructed once per sync run from
-/// [`SyncOptions`]; the read-only [`plan`] API never builds one with
-/// `rematerialize: true` -- only `gat sync --rematerialize`'s mutating
-/// and dry-run paths do.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ReconciliationPolicy {
-    pub(crate) validation: Validation,
-    pub(crate) rematerialize: bool,
+/// Requested reconciliation behavior. Rematerialization always validates the
+/// working tree; trusting state cannot request it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconciliationPolicy {
+    /// Check the working tree using stat proofs and hash when needed.
+    Validate {
+        /// Recreate selected managed files using the current materialization
+        /// strategy even when their desired content is unchanged.
+        rematerialize: bool,
+    },
+    /// Trust the materialized ledger without accessing unchanged working files.
+    /// A rebuilt ledger can still require validation at runtime.
+    TrustState,
+}
+
+impl Default for ReconciliationPolicy {
+    fn default() -> Self {
+        Self::Validate {
+            rematerialize: false,
+        }
+    }
+}
+
+impl ReconciliationPolicy {
+    #[must_use]
+    pub const fn validation(self) -> Validation {
+        match self {
+            Self::Validate { .. } => Validation::Validate,
+            Self::TrustState => Validation::TrustState,
+        }
+    }
+
+    #[must_use]
+    pub const fn rematerialize(self) -> bool {
+        matches!(
+            self,
+            Self::Validate {
+                rematerialize: true
+            }
+        )
+    }
+
+    /// A rebuilt ledger is a runtime reason to validate even when trust was
+    /// requested. This preserves rematerialization for already validated runs.
+    const fn for_ledger(self, validation_required: bool) -> Self {
+        match self {
+            Self::TrustState if validation_required => Self::Validate {
+                rematerialize: false,
+            },
+            other => other,
+        }
+    }
+}
+
+impl From<Validation> for ReconciliationPolicy {
+    fn from(validation: Validation) -> Self {
+        match validation {
+            Validation::Validate => Self::default(),
+            Validation::TrustState => Self::TrustState,
+        }
+    }
 }
 
 /// Inputs that control one sync run's planning and execution.
@@ -120,30 +168,41 @@ pub struct SyncOptions {
     pub force: bool,
     /// Plan only; never touch disk, excludes, or the materialized state.
     pub dry_run: bool,
-    /// How hard to check the working tree against the materialized state
-    /// before replacing/removing a path. Default
-    /// [`Validation::Validate`]: Git-style stat validation with hash
-    /// fallback only on ambiguity. [`Validation::TrustState`] is the
-    /// explicit opt-in that trusts `gat.lock` plus materialized state and
-    /// performs zero working-tree access. See [`Validation`].
-    pub validation: Validation,
-    /// Recreate every selected already-correct managed file using the
-    /// current `cache.materialization_strategy`, instead of leaving it
-    /// untouched. Only `gat sync --rematerialize` sets this; `gat pull`
-    /// and every installed Git hook stay at `false`, and the read-only
-    /// [`plan`] API doesn't consult it at all. The sync engine itself
-    /// (`effective_validation` in `engine::workspace::sync`, consulted by both
-    /// [`sync_from_snapshot`]'s dry-run and mutating paths) forces
-    /// [`Validation::Validate`] for the run whenever this is set,
-    /// regardless of `validation`/`sync.trust_state` -- this is the
-    /// authoritative enforcement point, not merely a CLI-level default
-    /// (`crate::app`'s `resolve_sync_validation` computes the same thing
-    /// early for documentation/UX purposes, but a `SyncOptions`
-    /// constructed directly with `validation: Validation::TrustState,
-    /// rematerialize: true` still gets the safe behavior here) -- so a
-    /// locally modified file is reported as a conflict rather than
-    /// silently overwritten.
-    pub rematerialize: bool,
+    /// Validation and rematerialization policy, resolved before execution.
+    /// A rebuilt materialized ledger can still require runtime validation.
+    pub policy: ReconciliationPolicy,
+}
+
+/// A finite resolution for a locally modified path. The payload is the sole
+/// source of path identity; corruption cannot be overridden by force.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConflictResolution {
+    Replace(Entry),
+    Rematerialize(Entry),
+    Remove(gat_core::lexical_path::GatPath),
+    /// Force exposes the missing object without modifying the working file.
+    MissingObject(Entry),
+}
+
+impl ConflictResolution {
+    #[must_use]
+    pub const fn path(&self) -> &gat_core::lexical_path::GatPath {
+        match self {
+            Self::Replace(entry) | Self::Rematerialize(entry) | Self::MissingObject(entry) => {
+                &entry.path
+            }
+            Self::Remove(path) => path,
+        }
+    }
+
+    fn into_action(self) -> SyncAction {
+        match self {
+            Self::Replace(entry) => SyncAction::Replace(entry),
+            Self::Rematerialize(entry) => SyncAction::Rematerialize(entry),
+            Self::Remove(path) => SyncAction::Remove(path),
+            Self::MissingObject(Entry { path, oid }) => SyncAction::MissingObject { path, oid },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,7 +217,7 @@ pub enum SyncAction {
     /// the working-tree file.
     Remove(gat_core::lexical_path::GatPath),
     /// The desired object is already what was last materialized at this
-    /// path, but `SyncOptions::rematerialize` asked to recreate it anyway
+    /// path, but the reconciliation policy asked to recreate it anyway
     /// using the current `cache.materialization_strategy`. Never emitted
     /// unless `rematerialize` is set -- an ordinary sync leaves an
     /// already-correct file untouched (no action at all).
@@ -166,10 +225,7 @@ pub enum SyncAction {
     /// The working-tree file differs from what Gat last materialized
     /// there, so acting on it (`resolution`) would discard a local edit.
     /// Left untouched unless `SyncOptions::force` is set.
-    Conflict {
-        path: gat_core::lexical_path::GatPath,
-        resolution: Box<Self>,
-    },
+    Conflict(ConflictResolution),
     /// Desired object isn't in the local cache; the working-tree file (if
     /// any) is left exactly as-is.
     MissingObject {
@@ -349,37 +405,6 @@ pub fn sync_from_snapshot(
     execute_mutating_sync(&mut guard, opts, progress)
 }
 
-/// Resolves the validation mode a reconciliation run actually uses,
-/// applying both downgrades to `Validation::Validate` that must never
-/// depend solely on the CLI layer having already applied them:
-///
-/// - `opts.rematerialize` unconditionally forces `Validate`. This is the
-///   authoritative enforcement point for that invariant: a
-///   `--rematerialize` run must establish that the working-tree file
-///   still matches materialized state before replacing it, so a locally
-///   modified file becomes a conflict instead of being silently
-///   overwritten). `crate::app`'s `resolve_sync_validation` also computes
-///   this for documentation/early-CLI-error purposes, but correctness
-///   must not depend on that -- any caller that builds a `SyncOptions`
-///   directly gets the same guarantee here,
-///   inside the engine itself.
-/// - an outstanding `reconciliation_meta.validation_required` flag:
-///   `gat system repair state` destructively rebuilt the
-///   materialized ledger without being able to prove it still reflects
-///   the working tree) downgrades an explicit `Validation::TrustState`
-///   the same way, since trusting an admittedly-unproven ledger would be
-///   unsafe regardless of why `TrustState` was requested.
-fn effective_validation(opts: &SyncOptions, validation_required: bool) -> Validation {
-    if opts.rematerialize {
-        return Validation::Validate;
-    }
-    if opts.validation == Validation::TrustState && validation_required {
-        Validation::Validate
-    } else {
-        opts.validation
-    }
-}
-
 /// `--dry-run`'s strict read-only planning path: never
 /// registers cache usage, never creates/opens-for-write the
 /// materialized-state `SQLite` database, and never persists an incremental
@@ -414,12 +439,10 @@ fn plan_dry_run(
     // downgraded to `Validation::Validate` here rather than trusting a
     // ledger gat itself just admitted it can't vouch for. Consulting
     // the already-open store's cached flag costs nothing beyond the
-    // open this read-only path already does. `opts.rematerialize` forces
-    // the same downgrade unconditionally -- see `effective_validation`.
-    let validation = effective_validation(
-        opts,
-        store.as_ref().is_some_and(StateStore::validation_required),
-    );
+    // open this read-only path already does.
+    let policy = opts
+        .policy
+        .for_ledger(store.as_ref().is_some_and(StateStore::validation_required));
     set_phase(progress, ProgressActivity::LoadingTrackedState);
     let desired_lock = LockStore::load_repository(repo.layout())?;
     set_phase(progress, ProgressActivity::ValidatingWorkingTree);
@@ -441,10 +464,7 @@ fn plan_dry_run(
                     desired_lock: Some(&desired_lock),
                 },
                 &opts.selection,
-                ReconciliationPolicy {
-                    validation,
-                    rematerialize: opts.rematerialize,
-                },
+                policy,
                 merge_window,
                 &mut sink,
             )
@@ -510,13 +530,8 @@ fn execute_mutating_sync(
     // Same validation-required downgrade as the dry-run path above, but
     // reading the flag this store already loaded when it opened, so this
     // adds no extra query/filesystem operation to the normal sync path.
-    // `opts.rematerialize` forces the same downgrade unconditionally, and
-    // is the authoritative enforcement point for that invariant -- see
-    // `effective_validation`; this is what actually keeps a
-    // `SyncOptions { validation: TrustState, rematerialize: true, .. }`
-    // out of the dirty-row `TrustState` fast path just below, regardless
-    // of whether a caller already resolved `Validate` beforehand.
-    let validation = effective_validation(opts, store.validation_required());
+    let policy = opts.policy.for_ledger(store.validation_required());
+    let validation = policy.validation();
 
     // Reconciliation fast path: any unfiltered *or* path/glob-scoped
     // `Validation::TrustState` sync is exactly the case the single-state-row
@@ -559,13 +574,7 @@ fn execute_mutating_sync(
                     };
                     set_phase(progress, ProgressActivity::ApplyingChanges);
                     let chunk_outcome = execute::apply_actions(
-                        repo,
-                        cache,
-                        mode,
-                        Some(&mut store),
-                        &chunk_plan,
-                        opts.force,
-                        true,
+                        repo, cache, mode, &mut store, chunk_plan, opts.force,
                     )?;
                     outcome.merge(chunk_outcome);
                 }
@@ -600,7 +609,7 @@ fn execute_mutating_sync(
     // Bounded plan/apply: the merge streams each classified
     // action straight into `ExecutePlanSink`, which applies it to the
     // working tree and persists its materialized-state delta in the same
-    // bounded batches `apply_actions` itself flushes by -- unlike the
+    // bounded batches used for collected plans -- unlike the
     // dry-run path above, this never collects a complete `SyncPlan` in
     // memory first. The sink writes through its own, separately opened
     // `StateStore` connection (SQLite WAL already lets one writer
@@ -612,29 +621,22 @@ fn execute_mutating_sync(
     let mut outcome = session
         .cache_session_mut()
         .sync_scoped_cache(cache_root, |cache| {
-            let mut sink = execute::ExecutePlanSink::new(
-                repo,
-                cache,
-                mode.clone(),
-                &mut write_store,
-                opts.force,
-            );
-            plan::plan_into_sink(
-                repo,
-                cache,
-                plan::DesiredSource {
-                    store: Some(&store),
-                    desired_lock: None,
+            execute::ExecutePlanSink::new(repo, cache, mode, &mut write_store, opts.force).run(
+                |sink| {
+                    plan::plan_into_sink(
+                        repo,
+                        cache,
+                        plan::DesiredSource {
+                            store: Some(&store),
+                            desired_lock: None,
+                        },
+                        &opts.selection,
+                        policy,
+                        merge_window,
+                        sink,
+                    )
                 },
-                &opts.selection,
-                ReconciliationPolicy {
-                    validation,
-                    rematerialize: opts.rematerialize,
-                },
-                merge_window,
-                &mut sink,
-            )?;
-            sink.finish()
+            )
         })?;
     let excludes_status =
         excludes::sync_from_store_fast_path(repo, &mut store, cfg).map_err(Box::new)?;
@@ -698,7 +700,7 @@ mod tests {
 
     fn trust_state_opts() -> SyncOptions {
         SyncOptions {
-            validation: Validation::TrustState,
+            policy: ReconciliationPolicy::TrustState,
             ..Default::default()
         }
     }
@@ -737,8 +739,8 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
+                policy: ReconciliationPolicy::TrustState,
                 dry_run: true,
-                validation: Validation::TrustState,
                 ..Default::default()
             },
         )
@@ -775,8 +777,8 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
+                policy: ReconciliationPolicy::TrustState,
                 dry_run: true,
-                validation: Validation::TrustState,
                 ..Default::default()
             },
         )
@@ -910,7 +912,10 @@ mod tests {
     #[test]
     fn validation_defaults_to_validate() {
         assert_eq!(Validation::default(), Validation::Validate);
-        assert_eq!(SyncOptions::default().validation, Validation::Validate);
+        assert_eq!(
+            SyncOptions::default().policy.validation(),
+            Validation::Validate
+        );
     }
 
     /// While `gat system repair state`'s validation-required flag is set
@@ -935,24 +940,66 @@ mod tests {
             .set_validation_required(true)
             .unwrap();
 
-        let outcome = sync(&repo, &trust_state_opts()).unwrap();
-
-        assert_eq!(
-            outcome.conflicts,
-            vec!["a.bin".to_string()],
-            "a locally modified file must surface as a conflict once trust-state is downgraded"
-        );
-        assert_eq!(
-            std::fs::read(tmp.path().join("a.bin")).unwrap(),
-            b"local edit",
-            "the trust-state fast path must not silently keep/overwrite the file while unvalidated"
-        );
+        let planned = plan(
+            &repo,
+            &gat_core::selection::Selection::root(),
+            Validation::TrustState,
+        )
+        .unwrap();
         assert!(
-            StateStore::open(repo.layout())
-                .unwrap()
-                .validation_required(),
-            "a scoped/incomplete sync must not clear the validation-required flag"
+            matches!(planned.actions.as_slice(), [SyncAction::Conflict(_)]),
+            "standalone planning must also honor the rebuilt-ledger flag"
         );
+
+        for dry_run in [true, false] {
+            let outcome = sync(
+                &repo,
+                &SyncOptions {
+                    dry_run,
+                    ..trust_state_opts()
+                },
+            )
+            .unwrap();
+
+            assert_eq!(
+                outcome.conflicts,
+                vec!["a.bin".to_string()],
+                "a locally modified file must surface as a conflict once trust-state is downgraded"
+            );
+            assert_eq!(
+                std::fs::read(tmp.path().join("a.bin")).unwrap(),
+                b"local edit",
+                "the trust-state fast path must not silently keep/overwrite the file while unvalidated"
+            );
+            assert!(
+                StateStore::open(repo.layout())
+                    .unwrap()
+                    .validation_required(),
+                "a scoped/incomplete sync must not clear the validation-required flag"
+            );
+        }
+    }
+
+    #[test]
+    fn standalone_planning_does_not_create_the_materialized_ledger() {
+        let tmp = git_repo();
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
+        track(&repo, "file.bin", b"data");
+        assert!(StateStore::open_if_exists(repo.layout()).unwrap().is_none());
+        let planned = plan(
+            &repo,
+            &gat_core::selection::Selection::root(),
+            Validation::Validate,
+        )
+        .unwrap();
+        assert!(matches!(
+            planned.actions.as_slice(),
+            [SyncAction::Materialize(_)]
+        ));
+        assert!(StateStore::open_if_exists(repo.layout()).unwrap().is_none());
+        assert!(!tmp.path().join("file.bin").exists());
     }
 
     /// A full, unrestricted `Validation::Validate` sync re-establishes
@@ -976,7 +1023,7 @@ mod tests {
         sync(
             &repo,
             &SyncOptions {
-                validation: Validation::Validate,
+                policy: ReconciliationPolicy::default(),
                 ..Default::default()
             },
         )
@@ -1294,6 +1341,49 @@ mod tests {
         // A second sync must be a true no-op.
         let outcome = sync_with_limits(&repo, &trust_state_opts(), limits);
         assert!(outcome.did_nothing());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn planner_failure_flushes_mutations_from_an_earlier_window() {
+        let tmp = git_repo();
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
+        track(&repo, "a.bin", b"first");
+        let second = track(&repo, "z.bin", b"second");
+        let object = repo
+            .resolved_cache_root()
+            .unwrap()
+            .object_path_for_test(&second.oid);
+        let parent = object.parent().unwrap();
+        std::fs::remove_file(&object).unwrap();
+        std::fs::remove_dir(parent).unwrap();
+        // A cache-path ELOOP is a verification/planner error, before the second
+        // action ever reaches the execution sink.
+        std::os::unix::fs::symlink(parent.file_name().unwrap(), parent).unwrap();
+        let cfg = repo.load_config().unwrap();
+        let revision = crate::repository_state::current_desired_revision(&repo).unwrap();
+        let snapshot = crate::snapshot::Snapshot::new(repo.snapshot_input(cfg, revision)).unwrap();
+        let mut limits = crate::limits::ExecutionLimits::tiny();
+        limits.sync.merge_window = std::num::NonZeroUsize::new(1).unwrap();
+        let mut operation = crate::operation::Operation::new(
+            &repo,
+            snapshot,
+            crate::session::Session::with_limits(limits),
+        );
+        let error = sync_from_snapshot(&mut operation, &SyncOptions::default(), None).unwrap_err();
+        assert!(matches!(error.kind(), SyncErrorKind::Cache(_)));
+        assert_eq!(std::fs::read(tmp.path().join("a.bin")).unwrap(), b"first");
+        let materialized = crate::repository_mutation::load_materialized_for_test(&repo).unwrap();
+        assert!(
+            materialized
+                .entries
+                .iter()
+                .any(|entry| entry.path == "a.bin"),
+            "already successful mutations must be persisted on planner failure"
+        );
+        assert!(!tmp.path().join("z.bin").exists());
     }
 
     /// Builds an [`crate::operation::Operation`] for `repo`

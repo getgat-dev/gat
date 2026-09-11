@@ -129,19 +129,8 @@ pub fn remote_status_with_desired_operation(
         let key = (remote.id(), object.oid);
         window.record(
             key,
-            || StatusObligation {
-                object: Some(object),
-                remote,
-            },
-            |mut batch| {
-                run_status_window(
-                    operation,
-                    batch.as_mut_slice(),
-                    &mut checked,
-                    &mut missing,
-                    &task,
-                )
-            },
+            || StatusObligation { object, remote },
+            |batch| run_status_window(operation, batch, &mut checked, &mut missing, &task),
         )
     };
 
@@ -152,15 +141,8 @@ pub fn remote_status_with_desired_operation(
         false
     };
 
-    window.finish(|mut batch| {
-        run_status_window(
-            operation,
-            batch.as_mut_slice(),
-            &mut checked,
-            &mut missing,
-            &task,
-        )
-    })?;
+    window
+        .finish(|batch| run_status_window(operation, batch, &mut checked, &mut missing, &task))?;
     checking.finish();
 
     Ok(RemoteStatusOutcome {
@@ -173,13 +155,13 @@ pub fn remote_status_with_desired_operation(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct StatusObligation {
-    object: Option<SelectedObject>,
+    object: SelectedObject,
     remote: ResolvedRemote,
 }
 
 impl RemotePresenceObligation for StatusObligation {
     fn oid(&self) -> Oid {
-        self.object.as_ref().expect("object is present").oid
+        self.object.oid
     }
 
     fn resolved_remote(&self) -> &ResolvedRemote {
@@ -187,17 +169,13 @@ impl RemotePresenceObligation for StatusObligation {
     }
 
     fn representative_path(&self) -> &GatPath {
-        &self
-            .object
-            .as_ref()
-            .expect("object is present")
-            .representative_path
+        &self.object.representative_path
     }
 }
 
 fn run_status_window(
     operation: &mut gat_engine::Operation<'_>,
-    obligations: &mut [StatusObligation],
+    batch: gat_engine::WindowBatch<'_, StatusObligation>,
     checked: &mut usize,
     missing: &mut Vec<MissingRemoteObject>,
     task: &ProgressHandle,
@@ -209,6 +187,7 @@ fn run_status_window(
     // `missing` below is always built by walking `obligations` in their
     // original order afterwards, so the reported output never depends on
     // completion order.
+    let obligations = batch.as_slice();
     let mut present = vec![false; obligations.len()];
     operation.check_remote_presence_streaming(
         obligations,
@@ -227,13 +206,10 @@ fn run_status_window(
 
     let catalog = operation.remotes_catalog();
     let policy = operation.policy();
-    for (obligation, present) in obligations.iter_mut().zip(present) {
+    for (obligation, present) in batch.drain().zip(present) {
         if !present {
             let remote = obligation.remote;
-            let object = obligation
-                .object
-                .take()
-                .expect("each presence result addresses one obligation");
+            let object = obligation.object;
             missing.push(MissingRemoteObject {
                 object,
                 remote_name: catalog.remote_name(remote.id()),

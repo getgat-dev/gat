@@ -32,36 +32,55 @@ pub fn presence_stream(
         .into_stream()
         .boxed();
     }
-    let indices = entries.iter().map(|entry| entry.0).collect();
-    let prepared: Vec<_> = entries
-        .into_iter()
-        .map(|(_, oid, lease)| {
-            (
-                client
-                    .prepare_file_presence(&oid)
-                    .expect("file batch capability"),
-                lease,
-            )
-        })
-        .collect();
-    file_stream(
-        executor,
-        indices,
-        prepared,
-        gat_io::PreparedFilePresence::check,
-    )
+    let prepared = PreparedBatch::new(entries.into_iter().map(|(index, oid, lease)| {
+        (
+            index,
+            client
+                .prepare_file_presence(&oid)
+                .expect("file batch capability"),
+            lease,
+        )
+    }));
+    file_stream(executor, prepared, gat_io::PreparedFilePresence::check)
+}
+
+struct PreparedBatch {
+    indices: VecDeque<usize>,
+    checks: Vec<gat_io::PreparedFilePresence>,
+    leases: Vec<PresenceLease>,
+}
+
+impl PreparedBatch {
+    fn new(
+        entries: impl ExactSizeIterator<Item = (usize, gat_io::PreparedFilePresence, PresenceLease)>,
+    ) -> Self {
+        let mut batch = Self {
+            indices: VecDeque::with_capacity(entries.len()),
+            checks: Vec::with_capacity(entries.len()),
+            leases: Vec::with_capacity(entries.len()),
+        };
+        for (index, check, lease) in entries {
+            batch.indices.push_back(index);
+            batch.checks.push(check);
+            batch.leases.push(lease);
+        }
+        batch
+    }
 }
 
 fn file_stream(
     executor: &RemoteExecutor,
-    indices: VecDeque<usize>,
-    prepared: Vec<(gat_io::PreparedFilePresence, PresenceLease)>,
+    prepared: PreparedBatch,
     mut probe: impl FnMut(gat_io::PreparedFilePresence) -> std::io::Result<bool> + Send + 'static,
 ) -> BoxStream<'_, ProbeResult> {
     // At most one send per admitted entry: try_send never waits for the reader,
     // including when no results have been consumed yet.
-    let (sender, receiver) = tokio::sync::mpsc::channel(prepared.len());
-    let (checks, leases): (Vec<_>, Vec<_>) = prepared.into_iter().unzip();
+    let PreparedBatch {
+        indices,
+        checks,
+        leases,
+    } = prepared;
+    let (sender, receiver) = tokio::sync::mpsc::channel(checks.len());
     // Both owners retain admission: dropping the stream cannot release a
     // running worker's leases, and worker completion cannot admit fragmented
     // replacement batches before the final result is delivered.
@@ -89,8 +108,7 @@ fn file_stream(
     FileBatch {
         indices,
         receiver,
-        work: Some(work),
-        failure: None,
+        work: WorkerState::Running(work),
         leases: Some(leases),
     }
     .into_stream()
@@ -101,28 +119,30 @@ enum Failure {
     Task(Arc<tokio::task::JoinError>),
 }
 
+enum WorkerState<'a> {
+    Running(BoxFuture<'a, Result<(), LocalTransferError>>),
+    Finished(Result<(), Failure>),
+}
+
 struct FileBatch<'a> {
     indices: VecDeque<usize>,
     receiver: tokio::sync::mpsc::Receiver<Result<bool, PresenceProbeError>>,
-    work: Option<BoxFuture<'a, Result<(), LocalTransferError>>>,
-    failure: Option<Failure>,
+    work: WorkerState<'a>,
     leases: Option<Arc<Vec<PresenceLease>>>,
 }
 
 impl<'a> FileBatch<'a> {
     fn completed(&mut self, result: Result<(), LocalTransferError>) {
-        self.work = None;
-        self.failure = match result {
-            Ok(()) => None,
-            Err(LocalTransferError::Cancelled) => Some(Failure::Cancelled),
-            Err(LocalTransferError::Task(source)) => Some(Failure::Task(Arc::new(source))),
-        };
+        self.work = WorkerState::Finished(result.map_err(|error| match error {
+            LocalTransferError::Cancelled => Failure::Cancelled,
+            LocalTransferError::Task(source) => Failure::Task(Arc::new(source)),
+        }));
     }
 
     async fn next(&mut self) -> Option<ProbeResult> {
         let index = *self.indices.front()?;
         let message = loop {
-            let Some(work) = self.work.as_mut() else {
+            let WorkerState::Running(work) = &mut self.work else {
                 break self.receiver.recv().await;
             };
             tokio::select! {
@@ -133,9 +153,10 @@ impl<'a> FileBatch<'a> {
         // Earlier completions may be reported while later metadata is blocked.
         // The final completion, or a closed channel, must drain started work.
         if (message.is_none() || self.indices.len() == 1)
-            && let Some(work) = self.work.take()
+            && let WorkerState::Running(work) = &mut self.work
         {
-            self.completed(work.await);
+            let result = work.await;
+            self.completed(result);
         }
         self.indices.pop_front();
         if self.indices.is_empty() {
@@ -144,10 +165,12 @@ impl<'a> FileBatch<'a> {
         Some((
             index,
             message.unwrap_or_else(|| {
-                Err(match &self.failure {
-                    Some(Failure::Cancelled) => PresenceProbeError::Cancelled,
-                    Some(Failure::Task(source)) => PresenceProbeError::Task(source.clone()),
-                    None => PresenceProbeError::Incomplete,
+                Err(match &self.work {
+                    WorkerState::Finished(Err(Failure::Cancelled)) => PresenceProbeError::Cancelled,
+                    WorkerState::Finished(Err(Failure::Task(source))) => {
+                        PresenceProbeError::Task(source.clone())
+                    }
+                    _ => PresenceProbeError::Incomplete,
                 })
             }),
         ))
@@ -167,30 +190,17 @@ mod tests {
     use crate::remote_session::RemoteHandle;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn prepared(
-        executor: &RemoteExecutor,
-        handle: &RemoteHandle,
-        count: usize,
-    ) -> (
-        VecDeque<usize>,
-        Vec<(gat_io::PreparedFilePresence, PresenceLease)>,
-    ) {
-        (0..count)
-            .map(|index| {
-                (
-                    index * 3 + 1,
-                    (
-                        handle
-                            .client()
-                            .prepare_file_presence(&Oid::from_bytes(
-                                [u8::try_from(index).unwrap(); 32],
-                            ))
-                            .unwrap(),
-                        executor.try_presence(handle.id()).unwrap(),
-                    ),
-                )
-            })
-            .unzip()
+    fn prepared(executor: &RemoteExecutor, handle: &RemoteHandle, count: usize) -> PreparedBatch {
+        PreparedBatch::new((0..count).map(|index| {
+            (
+                index * 3 + 1,
+                handle
+                    .client()
+                    .prepare_file_presence(&Oid::from_bytes([u8::try_from(index).unwrap(); 32]))
+                    .unwrap(),
+                executor.try_presence(handle.id()).unwrap(),
+            )
+        }))
     }
 
     #[test]
@@ -232,13 +242,13 @@ mod tests {
         let (_remote, handles) =
             crate::remote_session::test_support::open_handles_on_current_runtime(&["remote"]);
         let executor = RemoteExecutor::new(crate::limits::ExecutionLimits::default().remote);
-        let (indices, checks) = prepared(&executor, &handles[0], 128);
+        let batch = prepared(&executor, &handles[0], 128);
         let calls = Arc::new(AtomicUsize::new(0));
         let observed = calls.clone();
         let (started, running) = tokio::sync::oneshot::channel();
         let mut started = Some(started);
         let (release, released) = std::sync::mpsc::channel();
-        let mut stream = file_stream(&executor, indices, checks, move |check| {
+        let mut stream = file_stream(&executor, batch, move |check| {
             if observed.fetch_add(1, Ordering::Relaxed) == 1 {
                 started.take().unwrap().send(()).unwrap();
                 let _ = released.recv();
@@ -272,16 +282,50 @@ mod tests {
     }
 
     #[test]
+    fn dropping_stream_retains_running_worker_admission() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let entered = runtime.enter();
+        let (_remote, handles) =
+            crate::remote_session::test_support::open_handles_on_current_runtime(&["remote"]);
+        let executor = RemoteExecutor::new(crate::limits::ExecutionLimits::default().remote);
+        let batch = prepared(&executor, &handles[0], 128);
+        let (started, running) = tokio::sync::oneshot::channel();
+        let mut started = Some(started);
+        let (release, released) = std::sync::mpsc::channel();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let mut stream = file_stream(&executor, batch, move |check| {
+            if observed.fetch_add(1, Ordering::Relaxed) == 0 {
+                started.take().unwrap().send(()).unwrap();
+                let _ = released.recv();
+            }
+            check.check()
+        });
+        runtime.block_on(async {
+            assert!(futures::poll!(stream.next()).is_pending());
+            running.await.unwrap();
+            drop(stream);
+            assert!(executor.try_presence(handles[0].id()).is_none());
+            release.send(()).unwrap();
+        });
+        drop(entered);
+        // Runtime shutdown joins the blocking worker before checking release.
+        drop(runtime);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        let _reusable = prepared(&executor, &handles[0], 128);
+    }
+
+    #[test]
     fn worker_failure_preserves_prior_results_and_marks_remaining_indices() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _entered = runtime.enter();
         let (_remote, handles) =
             crate::remote_session::test_support::open_handles_on_current_runtime(&["remote"]);
         let executor = RemoteExecutor::new(crate::limits::ExecutionLimits::default().remote);
-        let (indices, checks) = prepared(&executor, &handles[0], 4);
+        let batch = prepared(&executor, &handles[0], 4);
         let mut called = 0;
         let results = runtime.block_on(
-            file_stream(&executor, indices, checks, move |check| {
+            file_stream(&executor, batch, move |check| {
                 called += 1;
                 assert!(called != 3, "fixture-owned task failure");
                 check.check()
@@ -312,10 +356,10 @@ mod tests {
         let (_remote, handles) =
             crate::remote_session::test_support::open_handles_on_current_runtime(&["remote"]);
         let executor = RemoteExecutor::new(crate::limits::ExecutionLimits::default().remote);
-        let (indices, checks) = prepared(&executor, &handles[0], 7);
+        let batch = prepared(&executor, &handles[0], 7);
         executor.cancellation().cancel();
         let results = runtime.block_on(
-            file_stream(&executor, indices, checks, |_| {
+            file_stream(&executor, batch, |_| {
                 panic!("cancelled check must not start")
             })
             .collect::<Vec<_>>(),
@@ -364,9 +408,9 @@ mod tests {
                 let calls = Arc::new(AtomicUsize::new(0));
                 let mut batches = futures::stream::SelectAll::new();
                 for handle in &handles {
-                    let (indices, checks) = prepared(&executor, handle, 128);
+                    let batch = prepared(&executor, handle, 128);
                     let calls = calls.clone();
-                    batches.push(file_stream(&executor, indices, checks, move |check| {
+                    batches.push(file_stream(&executor, batch, move |check| {
                         calls.fetch_add(1, Ordering::Relaxed);
                         check.check()
                     }));

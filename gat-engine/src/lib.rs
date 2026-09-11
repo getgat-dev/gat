@@ -241,7 +241,7 @@ pub use workspace::sync::{
     CacheFailureKind as SyncCacheFailureKind, ExcludesFailureKind as SyncExcludesFailureKind,
     FileStateFailureKind as SyncFileStateFailureKind,
     FilesystemFailureKind as SyncFilesystemFailureKind, LockFailureKind as SyncLockFailureKind,
-    MutationAuthorityFailureKind as SyncMutationAuthorityFailureKind,
+    MutationAuthorityFailureKind as SyncMutationAuthorityFailureKind, ReconciliationPolicy,
     StateFailureKind as SyncStateFailureKind, SyncAction, SyncError, SyncErrorKind, SyncOptions,
     SyncOutcome, SyncPlan, Validation, WorktreePathFailureKind as SyncWorktreePathFailureKind,
     plan as plan_sync, sync_from_snapshot,
