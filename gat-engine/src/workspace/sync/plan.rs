@@ -119,7 +119,7 @@ enum PendingCache {
     Materialize(Entry),
     Replace(Entry),
     /// The desired object already equals what was last materialized, but
-    /// `SyncOptions::rematerialize` asked to recreate it anyway.
+    /// the reconciliation policy asked to recreate it anyway.
     Rematerialize(Entry),
     /// Local edits require force, unless cache corruption prevents resolution.
     ConflictOrReplace(Entry),
@@ -590,10 +590,7 @@ pub fn plan(repo: &Repo, selection: &Selection, validation: Validation) -> Resul
         // `gat sync --rematerialize`'s mutating/dry-run paths (which call
         // `plan_with_store`/`plan_into_sink` directly with their own
         // `ReconciliationPolicy`) do.
-        super::ReconciliationPolicy {
-            validation,
-            rematerialize: false,
-        },
+        crate::ReconciliationPolicy::from(validation),
         merge_window,
     )
 }
@@ -661,7 +658,7 @@ pub(crate) fn plan_into_sink(
     cache: &CacheClient,
     desired: DesiredSource<'_>,
     selection: &Selection,
-    policy: super::ReconciliationPolicy,
+    policy: crate::ReconciliationPolicy,
     merge_window: usize,
     sink: &mut dyn super::PlanSink,
 ) -> Result<()> {
@@ -729,7 +726,7 @@ pub(crate) fn plan_with_store(
     cache: &CacheClient,
     desired: DesiredSource<'_>,
     selection: &Selection,
-    policy: super::ReconciliationPolicy,
+    policy: crate::ReconciliationPolicy,
     merge_window: usize,
 ) -> Result<SyncPlan> {
     let mut sink = CollectPlanSink::default();
@@ -764,13 +761,13 @@ pub(crate) fn plan_with_store(
 fn merge_desired_with_prior<D: DesiredSide>(
     repo: &Repo,
     cache: &CacheClient,
-    policy: super::ReconciliationPolicy,
+    policy: crate::ReconciliationPolicy,
     next_desired: &mut dyn FnMut() -> Result<Option<D>>,
     next_prior: &mut dyn FnMut() -> Result<Option<MaterializedRow>>,
     merge_window: usize,
     sink: &mut dyn super::PlanSink,
 ) -> Result<()> {
-    let validation = policy.validation;
+    let validation = policy.validation();
     let worktree = repo.worktree_client();
     // Cache-dependent classifications (anything that needs
     // `CacheClient::verify`) are not resolved as soon as they're seen:
@@ -780,7 +777,7 @@ fn merge_desired_with_prior<D: DesiredSide>(
     // instead of the merge falling back to one point lookup per row.
     // Cache-free rows (`Remove`, or a `Matches` with no action)
     // are still pushed directly.
-    let mut buffer = MergeBuffer::new(cache, merge_window, sink, policy.rematerialize);
+    let mut buffer = MergeBuffer::new(cache, merge_window, sink, policy.rematerialize());
 
     #[cfg(debug_assertions)]
     let mut last_desired_path: Option<GatPath> = None;
@@ -871,7 +868,7 @@ fn merge_desired_with_prior<D: DesiredSide>(
                                 enqueue!(PendingCache::Materialize(d.to_entry()));
                             }
                             FileStatus::Matches => {
-                                if policy.rematerialize {
+                                if policy.rematerialize() {
                                     // Recreate this already-correct path
                                     // using the current materialization
                                     // strategy. Skip persisting
@@ -889,7 +886,7 @@ fn merge_desired_with_prior<D: DesiredSide>(
                             }
                             FileStatus::Differs => {
                                 let entry = d.to_entry();
-                                enqueue!(if policy.rematerialize {
+                                enqueue!(if policy.rematerialize() {
                                     PendingCache::ConflictOrRematerialize(entry)
                                 } else {
                                     PendingCache::ConflictOrReplace(entry)
@@ -1336,7 +1333,7 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
-                validation: Validation::Validate,
+                policy: crate::ReconciliationPolicy::default(),
                 ..Default::default()
             },
         )
@@ -1372,7 +1369,7 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
-                validation: Validation::Validate,
+                policy: crate::ReconciliationPolicy::default(),
                 ..Default::default()
             },
         )
@@ -1403,7 +1400,7 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
-                validation: Validation::Validate,
+                policy: crate::ReconciliationPolicy::default(),
                 ..Default::default()
             },
         )
@@ -1446,7 +1443,7 @@ mod tests {
             let outcome = sync(
                 &repo,
                 &SyncOptions {
-                    validation,
+                    policy: validation.into(),
                     ..Default::default()
                 },
             )
@@ -1648,7 +1645,7 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
-                validation: Validation::Validate,
+                policy: crate::ReconciliationPolicy::default(),
                 ..Default::default()
             },
         )
@@ -1697,7 +1694,7 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
-                validation: Validation::Validate,
+                policy: crate::ReconciliationPolicy::default(),
                 ..Default::default()
             },
         )
@@ -1740,7 +1737,7 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
-                validation: Validation::Validate,
+                policy: crate::ReconciliationPolicy::default(),
                 ..Default::default()
             },
         )
@@ -1766,7 +1763,7 @@ mod tests {
         sync(
             &repo,
             &SyncOptions {
-                validation: Validation::Validate,
+                policy: crate::ReconciliationPolicy::default(),
                 ..Default::default()
             },
         )
@@ -1812,7 +1809,7 @@ mod tests {
             let outcome = sync(
                 &repo,
                 &SyncOptions {
-                    validation: Validation::TrustState,
+                    policy: crate::ReconciliationPolicy::TrustState,
                     ..Default::default()
                 },
             )
@@ -2109,7 +2106,9 @@ mod tests {
         let outcome = sync_with_limits(
             &repo,
             &SyncOptions {
-                rematerialize: true,
+                policy: crate::ReconciliationPolicy::Validate {
+                    rematerialize: true,
+                },
                 ..Default::default()
             },
             limits,
@@ -2159,7 +2158,9 @@ mod tests {
         let outcome = sync_with_limits(
             &repo,
             &SyncOptions {
-                rematerialize: true,
+                policy: crate::ReconciliationPolicy::Validate {
+                    rematerialize: true,
+                },
                 ..Default::default()
             },
             limits,
@@ -2182,7 +2183,7 @@ mod tests {
     /// Ordinary non-`--rematerialize` sync must keep
     /// benefiting from cross-window memoization -- `MergeBuffer::flush`
     /// uses [`gat_io::CacheClient::verify_windows`] (not
-    /// `_unmemoized`) whenever `policy.rematerialize == false`, so a
+    /// `_unmemoized`) whenever `policy.rematerialize() == false`, so a
     /// shared oid that reappears in a later merge window is resolved
     /// from the memo instead of triggering another filesystem
     /// verification. Spans more than 3 merge windows so an accidental
@@ -2444,7 +2445,9 @@ mod tests {
         let outcome = sync_with_limits(
             &repo,
             &SyncOptions {
-                rematerialize: true,
+                policy: crate::ReconciliationPolicy::Validate {
+                    rematerialize: true,
+                },
                 dry_run: true,
                 ..Default::default()
             },
@@ -2496,7 +2499,9 @@ mod tests {
         let dry_run_outcome = sync_with_limits(
             &repo,
             &SyncOptions {
-                rematerialize: true,
+                policy: crate::ReconciliationPolicy::Validate {
+                    rematerialize: true,
+                },
                 dry_run: true,
                 ..Default::default()
             },
@@ -2505,7 +2510,9 @@ mod tests {
         let real_outcome = sync_with_limits(
             &repo,
             &SyncOptions {
-                rematerialize: true,
+                policy: crate::ReconciliationPolicy::Validate {
+                    rematerialize: true,
+                },
                 ..Default::default()
             },
             limits,

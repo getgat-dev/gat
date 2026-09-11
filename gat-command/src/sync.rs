@@ -10,11 +10,12 @@ use gat_core::progress::{
 };
 use gat_core::selection::Selection;
 use gat_engine::{
-    DesiredOperation, Operation, Repository, SyncError as EngineSyncError,
-    SyncOptions as EngineSyncOptions, SyncOutcome as EngineSyncOutcome, Validation,
-    sync_from_snapshot,
+    DesiredOperation, Operation, ReconciliationPolicy, Repository, SyncError as EngineSyncError,
+    SyncOptions as EngineSyncOptions, SyncOutcome as EngineSyncOutcome, sync_from_snapshot,
 };
 
+/// Raw invocation preferences. Configuration precedence is resolved before any
+/// fetch, repair, or reconciliation is dispatched. Preview suppresses transfers.
 #[derive(Clone, Debug)]
 pub struct SyncRequest {
     /// None uses configured defaults; Some replaces them completely.
@@ -106,33 +107,31 @@ pub fn sync(
     request: SyncRequest,
     progress: &dyn ProgressReporter,
 ) -> Result<SyncOutcome, SyncError> {
-    let entry = SyncEntry::acquire(repo, request.dry_run, progress)?;
-    let ResolvedSelection { selection, scope } =
-        selection::resolve(request.selection.as_ref(), entry.config())?;
-    let validation = resolve_validation(entry.config(), request.trust_state, request.rematerialize);
-    let repair = !request.dry_run && (request.repair || entry.config().sync.auto_repair());
-    let (fetched, mut operation) = entry.into_operation_after_fetch(
-        request.fetch,
-        &selection,
-        request.remote.as_ref(),
-        progress,
-    )?;
-    sync_with_operation_impl(
-        &mut operation,
-        ReconciliationRequest {
-            scope,
-            selection: selection.into_owned(),
-            force: request.force,
-            dry_run: request.dry_run,
-            validation,
-            repair,
-            remote: request.remote.as_ref(),
-            rematerialize: request.rematerialize,
-            fetched,
-            shallow: false,
-        },
-        progress,
-    )
+    if request.dry_run {
+        let mut operation = gat_engine::acquire_operation_without_desired_state(repo, progress)?;
+        let request = resolve_request(request, operation.config())?;
+        return sync_with_operation_impl(&mut operation, request, progress);
+    }
+    let mut desired = DesiredOperation::acquire(repo, progress)?;
+    let mut request = resolve_request(request, desired.operation().config())?;
+    if let ReconciliationMode::Execute {
+        fetch: true,
+        remote,
+        ..
+    } = &request.mode
+    {
+        request.fetched = super::fetch_with_desired_operation(
+            &mut desired,
+            super::FetchRequest {
+                selection: Some(&request.selection),
+                remote: remote.as_ref(),
+                source: super::FetchSource::Current,
+            },
+            progress,
+        )?
+        .fetched;
+    }
+    sync_with_operation_impl(&mut desired.finish_selection(), request, progress)
 }
 
 pub fn pull(
@@ -162,7 +161,7 @@ pub fn pull_with_desired_operation(
         progress,
     )?;
     let mut operation = desired.finish_selection();
-    let validation = resolve_validation(operation.config(), false, false);
+    let policy = resolve_policy(operation.config(), false, false);
     let repair = operation.config().sync.auto_repair();
     sync_with_operation_impl(
         &mut operation,
@@ -170,11 +169,12 @@ pub fn pull_with_desired_operation(
             scope,
             selection: selection.into_owned(),
             force: false,
-            dry_run: false,
-            validation,
-            repair,
-            remote: request.remote.as_ref(),
-            rematerialize: false,
+            policy,
+            mode: ReconciliationMode::Execute {
+                fetch: false,
+                repair,
+                remote: request.remote,
+            },
             fetched: fetched.fetched,
             shallow: fetched.shallow,
         },
@@ -190,30 +190,10 @@ pub fn sync_with_operation(
     shallow: bool,
     progress: &dyn ProgressReporter,
 ) -> Result<SyncOutcome, SyncError> {
-    let ResolvedSelection { selection, scope } =
-        selection::resolve(request.selection.as_ref(), operation.config())?;
-    let validation = resolve_validation(
-        operation.config(),
-        request.trust_state,
-        request.rematerialize,
-    );
-    let repair = !request.dry_run && (request.repair || operation.config().sync.auto_repair());
-    sync_with_operation_impl(
-        operation,
-        ReconciliationRequest {
-            scope,
-            selection: selection.into_owned(),
-            force: request.force,
-            dry_run: request.dry_run,
-            validation,
-            repair,
-            remote: request.remote.as_ref(),
-            rematerialize: request.rematerialize,
-            fetched,
-            shallow,
-        },
-        progress,
-    )
+    let mut request = resolve_request(request, operation.config())?;
+    request.fetched = fetched;
+    request.shallow = shallow;
+    sync_with_operation_impl(operation, request, progress)
 }
 
 pub fn hook(
@@ -239,7 +219,7 @@ pub fn hook(
         0
     };
     let mut operation = desired.finish_selection();
-    let validation = resolve_validation(operation.config(), false, false);
+    let policy = resolve_policy(operation.config(), false, false);
     let repair = operation.config().sync.auto_repair();
     sync_with_operation_impl(
         &mut operation,
@@ -247,11 +227,12 @@ pub fn hook(
             scope,
             selection: selection.into_owned(),
             force: false,
-            dry_run: false,
-            validation,
-            repair,
-            remote: None,
-            rematerialize: false,
+            policy,
+            mode: ReconciliationMode::Execute {
+                fetch: false,
+                repair,
+                remote: None,
+            },
             fetched,
             shallow: false,
         },
@@ -259,102 +240,82 @@ pub fn hook(
     )
 }
 
-fn resolve_validation(
+fn resolve_policy(
     config: &gat_core::config::Config,
     trust_state: bool,
     rematerialize: bool,
-) -> Validation {
-    if rematerialize {
-        Validation::Validate
-    } else if trust_state || config.sync.trust_state == Some(true) {
-        Validation::TrustState
+) -> ReconciliationPolicy {
+    if !rematerialize && (trust_state || config.sync.trust_state == Some(true)) {
+        ReconciliationPolicy::TrustState
     } else {
-        Validation::Validate
+        ReconciliationPolicy::Validate { rematerialize }
     }
 }
 
-enum SyncEntry<'repo> {
-    Desired(DesiredOperation<'repo>),
-    Bare(Operation<'repo>),
-}
-
-impl<'repo> SyncEntry<'repo> {
-    fn acquire(
-        repo: &'repo Repository,
-        dry_run: bool,
-        progress: &dyn ProgressReporter,
-    ) -> Result<Self, SyncError> {
-        if dry_run {
-            Ok(Self::Bare(
-                gat_engine::acquire_operation_without_desired_state(repo, progress)?,
-            ))
-        } else {
-            Ok(Self::Desired(DesiredOperation::acquire(repo, progress)?))
-        }
-    }
-
-    const fn config(&self) -> &gat_core::config::Config {
-        match self {
-            Self::Desired(desired) => desired.operation().config(),
-            Self::Bare(operation) => operation.config(),
-        }
-    }
-
-    fn into_operation_after_fetch(
-        self,
+/// Preview carries no active transfer or repair work, even when configuration
+/// enables automatic maintenance for mutating invocations.
+#[derive(Debug, PartialEq, Eq)]
+enum ReconciliationMode {
+    Preview,
+    Execute {
         fetch: bool,
-        selection: &Selection,
-        remote: Option<&RemoteName>,
-        progress: &dyn ProgressReporter,
-    ) -> Result<(usize, Operation<'repo>), SyncError> {
-        match self {
-            Self::Bare(operation) => Ok((0, operation)),
-            Self::Desired(mut desired) => {
-                let fetched = if fetch || desired.operation().config().sync.auto_fetch() {
-                    super::fetch_with_desired_operation(
-                        &mut desired,
-                        super::FetchRequest {
-                            selection: Some(selection),
-                            remote,
-                            source: super::FetchSource::Current,
-                        },
-                        progress,
-                    )?
-                    .fetched
-                } else {
-                    0
-                };
-                Ok((fetched, desired.finish_selection()))
-            }
-        }
+        repair: bool,
+        remote: Option<RemoteName>,
+    },
+}
+
+impl ReconciliationMode {
+    const fn is_preview(&self) -> bool {
+        matches!(self, Self::Preview)
     }
 }
 
-struct ReconciliationRequest<'a> {
+struct ReconciliationRequest {
     scope: super::SelectionScope,
     selection: Selection,
     force: bool,
-    dry_run: bool,
-    validation: Validation,
-    repair: bool,
-    remote: Option<&'a RemoteName>,
-    rematerialize: bool,
+    policy: ReconciliationPolicy,
+    mode: ReconciliationMode,
     fetched: usize,
     shallow: bool,
 }
 
+fn resolve_request(
+    request: SyncRequest,
+    config: &gat_core::config::Config,
+) -> Result<ReconciliationRequest, SyncError> {
+    let ResolvedSelection { selection, scope } =
+        selection::resolve(request.selection.as_ref(), config)?;
+    Ok(ReconciliationRequest {
+        scope,
+        selection: selection.into_owned(),
+        force: request.force,
+        policy: resolve_policy(config, request.trust_state, request.rematerialize),
+        mode: if request.dry_run {
+            ReconciliationMode::Preview
+        } else {
+            ReconciliationMode::Execute {
+                fetch: request.fetch || config.sync.auto_fetch(),
+                repair: request.repair || config.sync.auto_repair(),
+                remote: request.remote,
+            }
+        },
+        fetched: 0,
+        shallow: false,
+    })
+}
+
 fn sync_with_operation_impl(
     operation: &mut Operation<'_>,
-    request: ReconciliationRequest<'_>,
+    request: ReconciliationRequest,
     progress: &dyn ProgressReporter,
 ) -> Result<SyncOutcome, SyncError> {
     operation.check_cancelled()?;
     let options = EngineSyncOptions {
         selection: request.selection,
         force: request.force,
-        dry_run: request.dry_run,
-        validation: request.validation,
-        rematerialize: request.rematerialize,
+        dry_run: request.mode.is_preview(),
+        policy: request.policy,
     };
     let sync_task = progress.begin(ProgressSpec::indeterminate(
         ProgressOperation::Synchronizing,
@@ -369,7 +330,10 @@ fn sync_with_operation_impl(
         })?
     };
 
-    let repair_then_rematerialize = request.repair && options.rematerialize;
+    let repair_then_rematerialize = matches!(
+        request.mode,
+        ReconciliationMode::Execute { repair: true, .. }
+    ) && options.policy.rematerialize();
     let first_pass_options = if repair_then_rematerialize {
         EngineSyncOptions {
             dry_run: true,
@@ -385,7 +349,13 @@ fn sync_with_operation_impl(
 
     let mut repaired = 0;
     let mut repair_failures = Vec::new();
-    if request.repair && !options.dry_run && !outcome.corrupted.is_empty() {
+    if let ReconciliationMode::Execute {
+        repair: true,
+        remote,
+        ..
+    } = &request.mode
+        && !outcome.corrupted.is_empty()
+    {
         with_progress_typed(
             progress,
             ProgressSpec::items(
@@ -398,7 +368,7 @@ fn sync_with_operation_impl(
                     operation,
                     super::RepairRequest {
                         corrupted: &outcome.corrupted,
-                        remote: request.remote,
+                        remote: remote.as_ref(),
                     },
                     &task.handle(),
                 );
@@ -450,21 +420,86 @@ mod tests {
     use gat_core::config::{Config, SyncConfig};
 
     #[test]
-    fn rematerialize_forces_validation_over_trust_state() {
-        let config = Config {
-            sync: SyncConfig {
-                trust_state: Some(true),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        assert_eq!(
-            resolve_validation(&config, false, true),
-            Validation::Validate
-        );
-        assert_eq!(
-            resolve_validation(&config, false, false),
-            Validation::TrustState
-        );
+    fn rematerialization_and_trust_preferences_resolve_to_one_policy() {
+        for configured_trust in [None, Some(false), Some(true)] {
+            for trust_state in [false, true] {
+                for rematerialize in [false, true] {
+                    let config = Config {
+                        sync: SyncConfig {
+                            trust_state: configured_trust,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    };
+                    let policy = resolve_policy(&config, trust_state, rematerialize);
+                    if rematerialize {
+                        assert_eq!(
+                            policy,
+                            ReconciliationPolicy::Validate {
+                                rematerialize: true
+                            }
+                        );
+                    } else if trust_state || configured_trust == Some(true) {
+                        assert_eq!(policy, ReconciliationPolicy::TrustState);
+                    } else {
+                        assert_eq!(
+                            policy,
+                            ReconciliationPolicy::Validate {
+                                rematerialize: false
+                            }
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn preview_requests_discard_transfers_while_execution_resolves_config_defaults() {
+        for dry_run in [false, true] {
+            for auto_fetch in [false, true] {
+                for auto_repair in [false, true] {
+                    for fetch in [false, true] {
+                        for repair in [false, true] {
+                            let config = Config {
+                                sync: SyncConfig {
+                                    auto_fetch: Some(auto_fetch),
+                                    auto_repair: Some(auto_repair),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            };
+                            let remote = RemoteName::from_string("origin".to_string());
+                            let resolved = resolve_request(
+                                SyncRequest {
+                                    selection: Some(Selection::root()),
+                                    force: false,
+                                    dry_run,
+                                    trust_state: false,
+                                    fetch,
+                                    repair,
+                                    remote: Some(remote.clone()),
+                                    rematerialize: false,
+                                },
+                                &config,
+                            )
+                            .unwrap();
+                            assert_eq!(
+                                resolved.mode,
+                                if dry_run {
+                                    ReconciliationMode::Preview
+                                } else {
+                                    ReconciliationMode::Execute {
+                                        fetch: fetch || auto_fetch,
+                                        repair: repair || auto_repair,
+                                        remote: Some(remote),
+                                    }
+                                }
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }

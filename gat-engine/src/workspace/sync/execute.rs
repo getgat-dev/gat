@@ -428,10 +428,11 @@ mod tests {
                         let outcome = sync(
                             &repo,
                             &SyncOptions {
+                                policy: crate::ReconciliationPolicy::Validate {
+                                    rematerialize: intent == "rematerialize",
+                                },
                                 force,
                                 dry_run,
-                                rematerialize: intent == "rematerialize",
-                                validation: Validation::Validate,
                                 ..Default::default()
                             },
                         )
@@ -752,7 +753,7 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
-                validation: Validation::TrustState,
+                policy: crate::ReconciliationPolicy::TrustState,
                 ..Default::default()
             },
         )
@@ -783,7 +784,7 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
-                validation: Validation::TrustState,
+                policy: crate::ReconciliationPolicy::TrustState,
                 ..Default::default()
             },
         )
@@ -811,7 +812,7 @@ mod tests {
         sync(
             &repo,
             &SyncOptions {
-                validation: Validation::Validate,
+                policy: crate::ReconciliationPolicy::default(),
                 ..Default::default()
             },
         )
@@ -825,7 +826,7 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
-                validation: Validation::Validate,
+                policy: crate::ReconciliationPolicy::default(),
                 ..Default::default()
             },
         )
@@ -857,7 +858,7 @@ mod tests {
         sync(
             &repo,
             &SyncOptions {
-                validation: Validation::Validate,
+                policy: crate::ReconciliationPolicy::default(),
                 ..Default::default()
             },
         )
@@ -867,7 +868,7 @@ mod tests {
             let outcome = sync(
                 &repo,
                 &SyncOptions {
-                    validation: Validation::Validate,
+                    policy: crate::ReconciliationPolicy::default(),
                     ..Default::default()
                 },
             )
@@ -901,7 +902,7 @@ mod tests {
         sync(
             &repo,
             &SyncOptions {
-                validation: Validation::Validate,
+                policy: crate::ReconciliationPolicy::default(),
                 ..Default::default()
             },
         )
@@ -916,7 +917,7 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
-                validation: Validation::Validate,
+                policy: crate::ReconciliationPolicy::default(),
                 ..Default::default()
             },
         )
@@ -949,7 +950,7 @@ mod tests {
         sync(
             &repo,
             &SyncOptions {
-                validation: Validation::Validate,
+                policy: crate::ReconciliationPolicy::default(),
                 ..Default::default()
             },
         )
@@ -960,7 +961,7 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
-                validation: Validation::Validate,
+                policy: crate::ReconciliationPolicy::default(),
                 ..Default::default()
             },
         )
@@ -989,7 +990,7 @@ mod tests {
             let first = sync(
                 &repo,
                 &SyncOptions {
-                    validation: Validation::Validate,
+                    policy: crate::ReconciliationPolicy::default(),
                     ..Default::default()
                 },
             )
@@ -1009,7 +1010,7 @@ mod tests {
             let second = sync(
                 &repo,
                 &SyncOptions {
-                    validation: Validation::Validate,
+                    policy: crate::ReconciliationPolicy::default(),
                     ..Default::default()
                 },
             )
@@ -1040,8 +1041,8 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
+                policy: crate::ReconciliationPolicy::default(),
                 dry_run: true,
-                validation: Validation::Validate,
                 ..Default::default()
             },
         )
@@ -1279,7 +1280,7 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
-                validation: Validation::Validate,
+                policy: crate::ReconciliationPolicy::default(),
                 force: true,
                 ..Default::default()
             },
@@ -1346,7 +1347,7 @@ mod tests {
         let result = sync(
             &repo,
             &SyncOptions {
-                validation: Validation::TrustState,
+                policy: crate::ReconciliationPolicy::TrustState,
                 ..Default::default()
             },
         );
@@ -1384,7 +1385,7 @@ mod tests {
         let err = sync(
             &repo,
             &SyncOptions {
-                validation: Validation::TrustState,
+                policy: crate::ReconciliationPolicy::TrustState,
                 ..Default::default()
             },
         )
@@ -1687,7 +1688,7 @@ mod tests {
         let err = sync(
             &repo,
             &SyncOptions {
-                validation: Validation::TrustState,
+                policy: crate::ReconciliationPolicy::TrustState,
                 ..Default::default()
             },
         )
@@ -1885,7 +1886,7 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
-                validation: Validation::TrustState,
+                policy: crate::ReconciliationPolicy::TrustState,
                 ..Default::default()
             },
         )
@@ -2116,7 +2117,7 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
-                validation: Validation::TrustState,
+                policy: crate::ReconciliationPolicy::TrustState,
                 ..Default::default()
             },
         )
@@ -2145,7 +2146,7 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
-                validation: Validation::TrustState,
+                policy: crate::ReconciliationPolicy::TrustState,
                 ..Default::default()
             },
         )
@@ -2302,7 +2303,9 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
-                rematerialize: true,
+                policy: crate::ReconciliationPolicy::Validate {
+                    rematerialize: true,
+                },
                 ..Default::default()
             },
         )
@@ -2340,7 +2343,9 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
-                rematerialize: true,
+                policy: crate::ReconciliationPolicy::Validate {
+                    rematerialize: true,
+                },
                 ..Default::default()
             },
         )
@@ -2373,7 +2378,9 @@ mod tests {
         let first = sync(
             &repo,
             &SyncOptions {
-                rematerialize: true,
+                policy: crate::ReconciliationPolicy::Validate {
+                    rematerialize: true,
+                },
                 ..Default::default()
             },
         )
@@ -2381,7 +2388,9 @@ mod tests {
         let second = sync(
             &repo,
             &SyncOptions {
-                rematerialize: true,
+                policy: crate::ReconciliationPolicy::Validate {
+                    rematerialize: true,
+                },
                 ..Default::default()
             },
         )
@@ -2403,25 +2412,21 @@ mod tests {
         sync(
             &repo,
             &SyncOptions {
-                validation: Validation::TrustState,
+                policy: crate::ReconciliationPolicy::TrustState,
                 ..Default::default()
             },
         )
         .unwrap();
         std::fs::write(tmp.path().join("a.bin"), b"locally edited").unwrap();
 
-        // Direct engine-level proof (not just an `app.rs`-level default):
-        // `SyncOptions { validation: TrustState, rematerialize: true, .. }`
-        // must still force real working-tree validation inside
-        // `engine::workspace::sync` itself (`effective_validation`) rather than
-        // blindly trusting materialized state and taking the `TrustState`
-        // dirty-row fast path -- this test never resolves `Validate`
-        // anywhere above `sync_from_snapshot`.
+        // Rematerialization uses a validating policy even when the ledger was
+        // originally populated by a trust-state run.
         let outcome = sync(
             &repo,
             &SyncOptions {
-                validation: Validation::TrustState,
-                rematerialize: true,
+                policy: crate::ReconciliationPolicy::Validate {
+                    rematerialize: true,
+                },
                 ..Default::default()
             },
         )
@@ -2447,16 +2452,13 @@ mod tests {
         sync(&repo, &SyncOptions::default()).unwrap();
         std::fs::write(tmp.path().join("a.bin"), b"locally edited").unwrap();
 
-        // Same direct-engine setup as the conflict test above
-        // (`validation: TrustState`, no CLI-level pre-resolution): explicit
-        // `--force` must still permit rematerialization even though the
-        // engine forces real validation, which is what surfaces the local
-        // edit as a conflict for `force` to then override.
+        // Validation exposes the local edit; force then resolves its conflict.
         let outcome = sync(
             &repo,
             &SyncOptions {
-                validation: Validation::TrustState,
-                rematerialize: true,
+                policy: crate::ReconciliationPolicy::Validate {
+                    rematerialize: true,
+                },
                 force: true,
                 ..Default::default()
             },
@@ -2486,7 +2488,9 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
-                rematerialize: true,
+                policy: crate::ReconciliationPolicy::Validate {
+                    rematerialize: true,
+                },
                 ..Default::default()
             },
         )
@@ -2522,8 +2526,9 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
-                validation: Validation::Validate,
-                rematerialize: true,
+                policy: crate::ReconciliationPolicy::Validate {
+                    rematerialize: true,
+                },
                 ..Default::default()
             },
         )
@@ -2554,7 +2559,9 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
-                rematerialize: true,
+                policy: crate::ReconciliationPolicy::Validate {
+                    rematerialize: true,
+                },
                 ..Default::default()
             },
         )
@@ -2579,7 +2586,9 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
-                rematerialize: true,
+                policy: crate::ReconciliationPolicy::Validate {
+                    rematerialize: true,
+                },
                 ..Default::default()
             },
         )
@@ -2606,7 +2615,9 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
-                rematerialize: true,
+                policy: crate::ReconciliationPolicy::Validate {
+                    rematerialize: true,
+                },
                 dry_run: true,
                 ..Default::default()
             },
@@ -2630,16 +2641,9 @@ mod tests {
         assert_eq!(materialized_row(&repo, "a.bin"), before_stat);
     }
 
-    /// Same engine-level invariant as
-    /// `rematerialize_reports_a_conflict_instead_of_overwriting_a_local_edit`,
-    /// but through the dry-run planning path (`plan_dry_run`): a
-    /// `--dry-run --rematerialize` run with `validation: TrustState` must
-    /// still report the locally modified file as a conflict rather than a
-    /// clean rematerialization, proving `effective_validation` is applied
-    /// on both of `engine::workspace::sync`'s reconciliation paths, not just the
-    /// mutating one.
+    /// Preview must validate local edits just as mutating rematerialization does.
     #[test]
-    fn dry_run_rematerialize_with_trust_state_still_reports_a_conflict() {
+    fn dry_run_rematerialize_reports_a_conflict_after_trust_state_sync() {
         let tmp = git_repo();
         let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
             .unwrap()
@@ -2649,7 +2653,7 @@ mod tests {
         sync(
             &repo,
             &SyncOptions {
-                validation: Validation::TrustState,
+                policy: crate::ReconciliationPolicy::TrustState,
                 ..Default::default()
             },
         )
@@ -2659,8 +2663,9 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
-                validation: Validation::TrustState,
-                rematerialize: true,
+                policy: crate::ReconciliationPolicy::Validate {
+                    rematerialize: true,
+                },
                 dry_run: true,
                 ..Default::default()
             },
@@ -2700,7 +2705,9 @@ mod tests {
         let result = sync(
             &repo,
             &SyncOptions {
-                rematerialize: true,
+                policy: crate::ReconciliationPolicy::Validate {
+                    rematerialize: true,
+                },
                 ..Default::default()
             },
         );
@@ -2749,7 +2756,9 @@ mod tests {
         let outcome = sync(
             &repo,
             &SyncOptions {
-                rematerialize: true,
+                policy: crate::ReconciliationPolicy::Validate {
+                    rematerialize: true,
+                },
                 ..Default::default()
             },
         )
