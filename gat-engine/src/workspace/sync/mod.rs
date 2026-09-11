@@ -621,21 +621,22 @@ fn execute_mutating_sync(
     let mut outcome = session
         .cache_session_mut()
         .sync_scoped_cache(cache_root, |cache| {
-            let mut sink =
-                execute::ExecutePlanSink::new(repo, cache, mode, &mut write_store, opts.force);
-            plan::plan_into_sink(
-                repo,
-                cache,
-                plan::DesiredSource {
-                    store: Some(&store),
-                    desired_lock: None,
+            execute::ExecutePlanSink::new(repo, cache, mode, &mut write_store, opts.force).run(
+                |sink| {
+                    plan::plan_into_sink(
+                        repo,
+                        cache,
+                        plan::DesiredSource {
+                            store: Some(&store),
+                            desired_lock: None,
+                        },
+                        &opts.selection,
+                        policy,
+                        merge_window,
+                        sink,
+                    )
                 },
-                &opts.selection,
-                policy,
-                merge_window,
-                &mut sink,
-            )?;
-            sink.finish()
+            )
         })?;
     let excludes_status =
         excludes::sync_from_store_fast_path(repo, &mut store, cfg).map_err(Box::new)?;
@@ -939,6 +940,17 @@ mod tests {
             .set_validation_required(true)
             .unwrap();
 
+        let planned = plan(
+            &repo,
+            &gat_core::selection::Selection::root(),
+            Validation::TrustState,
+        )
+        .unwrap();
+        assert!(
+            matches!(planned.actions.as_slice(), [SyncAction::Conflict(_)]),
+            "standalone planning must also honor the rebuilt-ledger flag"
+        );
+
         for dry_run in [true, false] {
             let outcome = sync(
                 &repo,
@@ -966,6 +978,28 @@ mod tests {
                 "a scoped/incomplete sync must not clear the validation-required flag"
             );
         }
+    }
+
+    #[test]
+    fn standalone_planning_does_not_create_the_materialized_ledger() {
+        let tmp = git_repo();
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
+        track(&repo, "file.bin", b"data");
+        assert!(StateStore::open_if_exists(repo.layout()).unwrap().is_none());
+        let planned = plan(
+            &repo,
+            &gat_core::selection::Selection::root(),
+            Validation::Validate,
+        )
+        .unwrap();
+        assert!(matches!(
+            planned.actions.as_slice(),
+            [SyncAction::Materialize(_)]
+        ));
+        assert!(StateStore::open_if_exists(repo.layout()).unwrap().is_none());
+        assert!(!tmp.path().join("file.bin").exists());
     }
 
     /// A full, unrestricted `Validation::Validate` sync re-establishes
@@ -1307,6 +1341,49 @@ mod tests {
         // A second sync must be a true no-op.
         let outcome = sync_with_limits(&repo, &trust_state_opts(), limits);
         assert!(outcome.did_nothing());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn planner_failure_flushes_mutations_from_an_earlier_window() {
+        let tmp = git_repo();
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
+        track(&repo, "a.bin", b"first");
+        let second = track(&repo, "z.bin", b"second");
+        let object = repo
+            .resolved_cache_root()
+            .unwrap()
+            .object_path_for_test(&second.oid);
+        let parent = object.parent().unwrap();
+        std::fs::remove_file(&object).unwrap();
+        std::fs::remove_dir(parent).unwrap();
+        // A cache-path ELOOP is a verification/planner error, before the second
+        // action ever reaches the execution sink.
+        std::os::unix::fs::symlink(parent.file_name().unwrap(), parent).unwrap();
+        let cfg = repo.load_config().unwrap();
+        let revision = crate::repository_state::current_desired_revision(&repo).unwrap();
+        let snapshot = crate::snapshot::Snapshot::new(repo.snapshot_input(cfg, revision)).unwrap();
+        let mut limits = crate::limits::ExecutionLimits::tiny();
+        limits.sync.merge_window = std::num::NonZeroUsize::new(1).unwrap();
+        let mut operation = crate::operation::Operation::new(
+            &repo,
+            snapshot,
+            crate::session::Session::with_limits(limits),
+        );
+        let error = sync_from_snapshot(&mut operation, &SyncOptions::default(), None).unwrap_err();
+        assert!(matches!(error.kind(), SyncErrorKind::Cache(_)));
+        assert_eq!(std::fs::read(tmp.path().join("a.bin")).unwrap(), b"first");
+        let materialized = crate::repository_mutation::load_materialized_for_test(&repo).unwrap();
+        assert!(
+            materialized
+                .entries
+                .iter()
+                .any(|entry| entry.path == "a.bin"),
+            "already successful mutations must be persisted on planner failure"
+        );
+        assert!(!tmp.path().join("z.bin").exists());
     }
 
     /// Builds an [`crate::operation::Operation`] for `repo`

@@ -242,7 +242,7 @@ impl super::PlanSink for DryRunPlanSink {
 
 /// Execution boundary for both streamed decisions and collected plans. Successful
 /// mutations and stat refreshes share one ordered, bounded persistence batch.
-/// Call [`Self::finish`] after the final decision to flush the remaining batch.
+/// Drive the producer through [`Self::run`] so every exit flushes pending state.
 pub(crate) struct ExecutePlanSink<'a> {
     worktree: WorktreeClient<'a>,
     cache: &'a CacheClient,
@@ -250,6 +250,7 @@ pub(crate) struct ExecutePlanSink<'a> {
     force: bool,
     store: &'a mut StateStore,
     pending: PendingBatch,
+    flush_failed: bool,
     outcome: SyncOutcome,
 }
 
@@ -268,16 +269,33 @@ impl<'a> ExecutePlanSink<'a> {
             force,
             store,
             pending: PendingBatch::default(),
+            flush_failed: false,
             outcome: SyncOutcome::default(),
         }
     }
 
-    /// Flush whatever has accumulated so far and return the fully applied
-    /// [`SyncOutcome`]. Must be called once, after every action/refresh
-    /// the merge produced has been delivered via [`super::PlanSink`].
-    pub(crate) fn finish(mut self) -> Result<SyncOutcome> {
-        self.pending.flush(self.store, self.worktree)?;
-        Ok(self.outcome)
+    /// Own the producer's completion boundary, including planner failures that
+    /// occur between actions. An already-failed full-batch flush is never retried.
+    pub(crate) fn run(
+        mut self,
+        produce: impl FnOnce(&mut Self) -> Result<()>,
+    ) -> Result<SyncOutcome> {
+        let result = produce(&mut self);
+        self.finish(result)
+    }
+
+    fn finish(mut self, result: Result<()>) -> Result<SyncOutcome> {
+        match result {
+            Ok(()) => {
+                self.pending.flush(self.store, self.worktree)?;
+                Ok(self.outcome)
+            }
+            Err(primary) if self.flush_failed => Err(primary),
+            Err(primary) => Err(flush_after_failure(
+                primary,
+                self.pending.flush(self.store, self.worktree),
+            )),
+        }
     }
 }
 
@@ -311,7 +329,9 @@ impl ExecutePlanSink<'_> {
 
     fn flush_if_full(&mut self) -> Result<()> {
         if self.pending.is_full() {
-            self.pending.flush(self.store, self.worktree)?;
+            let result = self.pending.flush(self.store, self.worktree);
+            self.flush_failed = result.is_err();
+            return result;
         }
         Ok(())
     }
@@ -319,12 +339,7 @@ impl ExecutePlanSink<'_> {
 
 impl super::PlanSink for ExecutePlanSink<'_> {
     fn action(&mut self, action: SyncAction) -> Result<()> {
-        if let Err(primary) = self.apply_action(action) {
-            return Err(flush_after_failure(
-                primary,
-                self.pending.flush(self.store, self.worktree),
-            ));
-        }
+        self.apply_action(action)?;
         self.flush_if_full()
     }
 
@@ -345,14 +360,15 @@ pub(crate) fn apply_actions(
     plan: SyncPlan,
     force: bool,
 ) -> Result<SyncOutcome> {
-    let mut sink = ExecutePlanSink::new(repo, cache, mode, store, force);
-    for action in plan.actions {
-        sink.action(action)?;
-    }
-    for mutation in plan.validated_state_mutations {
-        sink.state_mutation(mutation)?;
-    }
-    sink.finish()
+    ExecutePlanSink::new(repo, cache, mode, store, force).run(|sink| {
+        for action in plan.actions {
+            sink.action(action)?;
+        }
+        for mutation in plan.validated_state_mutations {
+            sink.state_mutation(mutation)?;
+        }
+        Ok(())
+    })
 }
 
 /// Test-only instrumentation: counts actual [`do_rematerialize`]
@@ -629,7 +645,7 @@ mod tests {
             sink.action(SyncAction::Materialize(tail)).unwrap();
             assert_eq!(sink.pending.len(), 1);
             assert!(materialized_row(&repo, "tail.bin").is_none());
-            assert_eq!(sink.finish().unwrap().materialized, 2);
+            assert_eq!(sink.finish(Ok(())).unwrap().materialized, 2);
             assert!(materialized_row(&repo, "tail.bin").is_some());
         }
     }
@@ -1401,6 +1417,41 @@ mod tests {
         assert!(
             !outside.path().join("out.bin").exists(),
             "sync must not write outside the repository via symlinked parent"
+        );
+    }
+
+    #[test]
+    fn producer_cancellation_flushes_successful_actions_before_returning() {
+        let tmp = git_repo();
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
+        let entry = track(&repo, "first.bin", b"first");
+        let cache = repo.resolved_cache_root().unwrap().open_client();
+        let mut store = StateStore::open(repo.layout()).unwrap();
+        let error =
+            ExecutePlanSink::new(&repo, &cache, &"copy".parse().unwrap(), &mut store, false)
+                .run(|sink| {
+                    sink.action(SyncAction::Materialize(entry))?;
+                    Err(crate::RepositoryError::Cancelled.into())
+                })
+                .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            &SyncErrorKind::MutationAuthority(
+                super::super::MutationAuthorityFailureKind::Cancelled
+            )
+        );
+        let materialized = crate::repository_mutation::load_materialized_for_test(&repo).unwrap();
+        assert!(
+            materialized
+                .entries
+                .iter()
+                .any(|entry| entry.path == "first.bin")
+        );
+        assert_eq!(
+            std::fs::read(tmp.path().join("first.bin")).unwrap(),
+            b"first"
         );
     }
 

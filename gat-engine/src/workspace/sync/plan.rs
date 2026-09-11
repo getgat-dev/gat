@@ -115,32 +115,19 @@ fn classify_object(
 /// [`MergeBuffer::flush`]), instead of [`merge_desired_with_prior`]
 /// falling back to one point-at-a-time [`CacheClient::verify`] call per
 /// distinct oid it streams past.
-enum PendingCache {
-    Materialize(Entry),
-    Replace(Entry),
-    /// The desired object already equals what was last materialized, but
-    /// the reconciliation policy asked to recreate it anyway.
-    Rematerialize(Entry),
-    /// Local edits require force, unless cache corruption prevents resolution.
-    ConflictOrReplace(Entry),
-    /// Local edits of an unchanged desired object require forced rematerialization.
-    ConflictOrRematerialize(Entry),
+struct PendingCache {
+    entry: Entry,
+    intent: MaterializationIntent,
 }
 
-const fn pending_oid(kind: &PendingCache) -> Oid {
-    match kind {
-        PendingCache::Materialize(entry)
-        | PendingCache::Replace(entry)
-        | PendingCache::Rematerialize(entry) => entry.oid,
-        PendingCache::ConflictOrReplace(entry) | PendingCache::ConflictOrRematerialize(entry) => {
-            entry.oid
-        }
+impl PendingCache {
+    const fn new(entry: Entry, intent: MaterializationIntent) -> Self {
+        Self { entry, intent }
     }
 }
 
 fn resolve_pending(
     statuses: &std::collections::HashMap<Oid, ObjectVerification>,
-    oid: Oid,
     kind: PendingCache,
 ) -> SyncAction {
     // A window's `statuses` map is always populated for every oid that
@@ -149,30 +136,17 @@ fn resolve_pending(
     // only guards against a logic error in that pairing, not a real
     // "unverified" case, so it degrades to `Missing` rather than panicking.
     let status = statuses
-        .get(&oid)
+        .get(&kind.entry.oid)
         .copied()
         .unwrap_or(ObjectVerification::Missing);
-    let (entry, intent) = match kind {
-        PendingCache::Materialize(entry) => (entry, MaterializationIntent::Materialize),
-        PendingCache::Replace(entry) => (entry, MaterializationIntent::Replace),
-        PendingCache::Rematerialize(entry) => (entry, MaterializationIntent::Rematerialize),
-        PendingCache::ConflictOrReplace(entry) => (entry, MaterializationIntent::ConflictOrReplace),
-        PendingCache::ConflictOrRematerialize(entry) => {
-            (entry, MaterializationIntent::ConflictOrRematerialize)
-        }
-    };
-    classify_object(status, entry, intent)
+    classify_object(status, kind.entry, kind.intent)
 }
 
-/// One buffered merge row, in the exact order it was classified: either
-/// already resolved (a cache-free row, e.g. `Remove`) or still awaiting
-/// its window's batched cache verification (see [`PendingCache`]). The
-/// oid is parsed once, when the row is first buffered (`pending_oid`),
-/// and carried alongside the classification so [`MergeBuffer::flush`]
-/// never has to re-parse or re-derive it when resolving the row.
+/// One buffered merge row, in merge order. Cache-dependent rows retain their
+/// entry's OID directly; neither identity nor intent needs a parallel copy.
 enum BufferedRow {
     Ready(SyncAction),
-    Pending(Oid, PendingCache),
+    Pending(PendingCache),
 }
 
 /// How many buffered merge rows -- resolved or still-pending -- accumulate
@@ -282,11 +256,11 @@ impl<'a> MergeBuffer<'a> {
     /// pending oids or `self.merge_window` buffered rows, whichever comes
     /// first.
     fn push_pending(&mut self, kind: PendingCache) -> Result<()> {
-        let oid = pending_oid(&kind);
+        let oid = kind.entry.oid;
         if self.pending_seen.insert(oid) {
             self.pending_oids.push(oid);
         }
-        self.rows.push(BufferedRow::Pending(oid, kind));
+        self.rows.push(BufferedRow::Pending(kind));
         if self.pending_oids.len() >= VERIFY_WINDOW {
             return self.flush();
         }
@@ -352,7 +326,7 @@ impl<'a> MergeBuffer<'a> {
         for row in self.rows.drain(..) {
             let action = match row {
                 BufferedRow::Ready(action) => action,
-                BufferedRow::Pending(oid, kind) => resolve_pending(&statuses, oid, kind),
+                BufferedRow::Pending(kind) => resolve_pending(&statuses, kind),
             };
             self.sink.action(action)?;
         }
@@ -388,7 +362,10 @@ fn desired_only_pending<D: DesiredSide>(
         // calling storage::materialize and restoring it if every mode fails,
         // so a pre-existing user-owned file is never silently destroyed on
         // an error.
-        return Ok(PendingCache::Materialize(d.to_entry()));
+        return Ok(PendingCache::new(
+            d.to_entry(),
+            MaterializationIntent::Materialize,
+        ));
     }
     // Route through the cheap, filesystem-free `resolve_worktree_path`
     // rather than a bare `root.join`: a canonical Gat path is
@@ -407,9 +384,11 @@ fn desired_only_pending<D: DesiredSide>(
     let status =
         file_status_without_prior(worktree, cache, d.path(), &d.to_entry().oid, validation)?;
     Ok(match status.kind() {
-        FileStatus::Absent => PendingCache::Materialize(d.to_entry()),
-        FileStatus::Matches => PendingCache::Replace(d.to_entry()),
-        FileStatus::Differs => PendingCache::ConflictOrReplace(d.to_entry()),
+        FileStatus::Absent => PendingCache::new(d.to_entry(), MaterializationIntent::Materialize),
+        FileStatus::Matches => PendingCache::new(d.to_entry(), MaterializationIntent::Replace),
+        FileStatus::Differs => {
+            PendingCache::new(d.to_entry(), MaterializationIntent::ConflictOrReplace)
+        }
     })
 }
 
@@ -431,22 +410,17 @@ trait DesiredSide {
     fn to_entry(&self) -> Entry;
 }
 
-#[derive(Debug)]
-struct DesiredEntry {
-    entry: Entry,
-}
-
-impl DesiredSide for DesiredEntry {
+impl DesiredSide for &Entry {
     fn path(&self) -> &GatPath {
-        &self.entry.path
+        &self.path
     }
 
     fn oid_matches(&self, prior_oid: &Oid) -> bool {
-        *prior_oid == self.entry.oid
+        *prior_oid == self.oid
     }
 
     fn to_entry(&self) -> Entry {
-        self.entry.clone()
+        (*self).clone()
     }
 }
 
@@ -464,14 +438,13 @@ impl DesiredSide for DesiredRow {
     }
 }
 
-fn filter_desired_entries(entries: &[Entry], selection: &Selection) -> Vec<DesiredEntry> {
+fn filter_desired_entries<'a>(entries: &'a [Entry], selection: &Selection) -> Vec<&'a Entry> {
     let mut filtered = entries
         .iter()
         .filter(|entry| selection.matches(&entry.path))
-        .map(|entry| DesiredEntry {
-            entry: entry.clone(),
-        })
         .collect::<Vec<_>>();
+    // Sort borrowed entries: the loaded lock owns their paths, and clean rows
+    // never need an owned action. Avoid cloning the entire selection first.
     // `gat_io::LockStore::load_repository()` does not guarantee global path ordering: a sharded
     // lock concatenates shard-local sorted entries in shard-filename
     // order, which is deterministic but not globally sorted by path. The
@@ -479,15 +452,15 @@ fn filter_desired_entries(entries: &[Entry], selection: &Selection) -> Vec<Desir
     // rather than trusting on-disk order. Stability is not semantically
     // required here (paths are unique), so this can use the typically
     // faster unstable sort.
-    filtered.sort_unstable_by(|a, b| a.entry.path.cmp(&b.entry.path));
+    filtered.sort_unstable_by(|a, b| a.path.cmp(&b.path));
     filtered
 }
 
-fn debug_assert_sorted_entries(entries: &[DesiredEntry]) {
+fn debug_assert_sorted_entries(entries: &[&Entry]) {
     debug_assert!(
         entries
             .windows(2)
-            .all(|window| window[0].entry.path < window[1].entry.path)
+            .all(|window| window[0].path < window[1].path)
     );
 }
 
@@ -563,7 +536,9 @@ pub fn plan(repo: &Repo, selection: &Selection, validation: Validation) -> Resul
         .sync
         .merge_window
         .get();
-    let store = StateStore::open(repo.layout())?;
+    let store = StateStore::open_if_exists(repo.layout())?;
+    let policy = crate::ReconciliationPolicy::from(validation)
+        .for_ledger(store.as_ref().is_some_and(StateStore::validation_required));
     // Justified full materialization: this entry point makes no
     // desired-index freshness guarantee, so the authoritative on-disk
     // `gat.lock` -- not the SQLite mirror -- is the only correct source
@@ -582,7 +557,7 @@ pub fn plan(repo: &Repo, selection: &Selection, validation: Validation) -> Resul
         repo,
         &cache,
         DesiredSource {
-            store: Some(&store),
+            store: store.as_ref(),
             desired_lock: Some(&desired_lock),
         },
         selection,
@@ -590,7 +565,7 @@ pub fn plan(repo: &Repo, selection: &Selection, validation: Validation) -> Resul
         // `gat sync --rematerialize`'s mutating/dry-run paths (which call
         // `plan_with_store`/`plan_into_sink` directly with their own
         // `ReconciliationPolicy`) do.
-        crate::ReconciliationPolicy::from(validation),
+        policy,
         merge_window,
     )
 }
@@ -750,7 +725,7 @@ pub(crate) fn plan_with_store(
 /// row in `path` order (or `None` once exhausted, including when there was
 /// never a materialized-state database to begin with). Generic over
 /// [`DesiredSide`] so the same merge drives both the `Lock`-based
-/// (`DesiredEntry`) and SQLite-streamed native
+/// (`&Entry`) and SQLite-streamed native
 /// ([`gat_io::DesiredRow`]) desired sources.
 ///
 /// Every classification is delivered to `sink` -- a bounded
@@ -848,7 +823,10 @@ fn merge_desired_with_prior<D: DesiredSide>(
                     // mismatched-oid `replace` action below -- skip
                     // building `dest`/hex-encoding anything else.
                     if !target_matches_prior {
-                        enqueue!(PendingCache::Replace(d.to_entry()));
+                        enqueue!(PendingCache::new(
+                            d.to_entry(),
+                            MaterializationIntent::Replace
+                        ));
                     }
                 } else {
                     // The stat proof recorded alongside `prior.oid` is
@@ -865,7 +843,10 @@ fn merge_desired_with_prior<D: DesiredSide>(
                     if target_matches_prior {
                         match status.kind() {
                             FileStatus::Absent => {
-                                enqueue!(PendingCache::Materialize(d.to_entry()));
+                                enqueue!(PendingCache::new(
+                                    d.to_entry(),
+                                    MaterializationIntent::Materialize
+                                ));
                             }
                             FileStatus::Matches => {
                                 if policy.rematerialize() {
@@ -877,7 +858,10 @@ fn merge_desired_with_prior<D: DesiredSide>(
                                     // representation it's about to write,
                                     // making any proof observed here
                                     // immediately stale.
-                                    enqueue!(PendingCache::Rematerialize(d.to_entry()));
+                                    enqueue!(PendingCache::new(
+                                        d.to_entry(),
+                                        MaterializationIntent::Rematerialize
+                                    ));
                                 } else if let Some(mutation) =
                                     status.into_state_refresh(path.clone())
                                 {
@@ -887,22 +871,37 @@ fn merge_desired_with_prior<D: DesiredSide>(
                             FileStatus::Differs => {
                                 let entry = d.to_entry();
                                 enqueue!(if policy.rematerialize() {
-                                    PendingCache::ConflictOrRematerialize(entry)
+                                    PendingCache::new(
+                                        entry,
+                                        MaterializationIntent::ConflictOrRematerialize,
+                                    )
                                 } else {
-                                    PendingCache::ConflictOrReplace(entry)
+                                    PendingCache::new(
+                                        entry,
+                                        MaterializationIntent::ConflictOrReplace,
+                                    )
                                 });
                             }
                         }
                     } else {
                         match status.kind() {
                             FileStatus::Absent => {
-                                enqueue!(PendingCache::Materialize(d.to_entry()));
+                                enqueue!(PendingCache::new(
+                                    d.to_entry(),
+                                    MaterializationIntent::Materialize
+                                ));
                             }
                             FileStatus::Matches => {
-                                enqueue!(PendingCache::Replace(d.to_entry()));
+                                enqueue!(PendingCache::new(
+                                    d.to_entry(),
+                                    MaterializationIntent::Replace
+                                ));
                             }
                             FileStatus::Differs => {
-                                enqueue!(PendingCache::ConflictOrReplace(d.to_entry()));
+                                enqueue!(PendingCache::new(
+                                    d.to_entry(),
+                                    MaterializationIntent::ConflictOrReplace
+                                ));
                             }
                         }
                     }
@@ -2064,7 +2063,7 @@ mod tests {
     /// `FileStatus::Matches` row's oid into cache verification at all
     /// (see the merge loop's `FileStatus::Matches` arm), but
     /// `--rematerialize` enqueues *every* selected clean row as a
-    /// `PendingCache::Rematerialize` -- so this proves the sync engine's
+    /// `MaterializationIntent::Rematerialize` -- so this proves the sync engine's
     /// cache-verification memo stays bounded near one verification
     /// window's worth of distinct oids for a `--rematerialize` run with
     /// many more unique oids than that, rather than retaining every
@@ -2203,7 +2202,7 @@ mod tests {
         let ingested = ingest(&repo, b"shared content".as_slice());
         // More than 3 merge windows' worth of paths, all sharing one oid,
         // and all already materialized under a *different* oid so every
-        // row is a genuine `PendingCache::Replace` (cache-dependent) --
+        // row is a genuine `MaterializationIntent::Replace` (cache-dependent) --
         // never a cache-free `Matches` row that ordinary sync would skip
         // enqueueing entirely.
         let path_count = merge_window * 5;
@@ -2346,7 +2345,7 @@ mod tests {
     /// A conflict whose forced resolution references the same oid as
     /// another conflicting path in the same operation must not trigger a
     /// second filesystem verification: conflicts are cache-dependent
-    /// (`PendingCache::ConflictOrReplace`) exactly like `Replace` rows,
+    /// (`MaterializationIntent::ConflictOrReplace`) exactly like `Replace` rows,
     /// so they go through the same memoized `verify_windows` path under
     /// ordinary sync.
     #[test]
