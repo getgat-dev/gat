@@ -1,4 +1,4 @@
-use super::layout::{OBJECT_HASH_NAMESPACE, parse_object_key};
+use super::layout::ObjectFanout;
 use super::object::object_namespace_dir;
 use super::proof::{CacheProofError, CacheState};
 use gat_core::oid::Oid;
@@ -45,8 +45,17 @@ impl CacheEnumerationError {
 fn directory_entries(dir: &Path) -> Result<Vec<std::fs::DirEntry>, CacheEnumerationError> {
     // Complete each directory listing before mutating its entries. This also
     // avoids depending on directory-iterator behavior during deletion.
-    std::fs::read_dir(dir)
-        .map_err(|source| CacheEnumerationError::io("read", dir, source))?
+    collect_entries(
+        dir,
+        std::fs::read_dir(dir).map_err(|source| CacheEnumerationError::io("read", dir, source))?,
+    )
+}
+
+fn collect_entries(
+    dir: &Path,
+    entries: std::fs::ReadDir,
+) -> Result<Vec<std::fs::DirEntry>, CacheEnumerationError> {
+    entries
         .collect::<std::io::Result<Vec<_>>>()
         .map_err(|source| CacheEnumerationError::io("read", dir, source))
 }
@@ -61,16 +70,21 @@ pub(crate) fn sweep_objects<E>(
 ) -> Result<Result<CacheSweepStats, E>, CacheEnumerationError> {
     let objects_dir = &root.objects_dir;
     let namespace = object_namespace_dir(objects_dir);
-    if !namespace.exists() {
-        return Ok(Ok(CacheSweepStats::default()));
-    }
+    let entries = match std::fs::read_dir(&namespace) {
+        Ok(entries) => collect_entries(&namespace, entries)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Ok(CacheSweepStats::default()));
+        }
+        Err(source) => return Err(CacheEnumerationError::io("read", &namespace, source)),
+    };
     // Merely enumerating objects needs neither a writable proof database nor
     // a removal buffer. Initialize them only when a deletion is selected.
     let mut state = None;
     let mut removed = Vec::new();
     let mut stats = CacheSweepStats::default();
 
-    for l1 in directory_entries(&namespace)? {
+    for l1 in entries {
+        let l1_name = l1.file_name();
         let l1_path = l1.path();
         if !l1
             .file_type()
@@ -90,15 +104,17 @@ pub(crate) fn sweep_objects<E>(
                 l1_nonempty = true;
                 continue;
             }
+            let l2_name = l2.file_name();
+            let fanout = l1_name
+                .to_str()
+                .zip(l2_name.to_str())
+                .and_then(|(first, second)| ObjectFanout::from_segments(first, second));
             let mut l2_nonempty = false;
             for leaf in directory_entries(&l2_path)? {
-                let key = format!(
-                    "{OBJECT_HASH_NAMESPACE}/{}/{}/{}",
-                    l1.file_name().to_string_lossy(),
-                    l2.file_name().to_string_lossy(),
-                    leaf.file_name().to_string_lossy()
-                );
-                let Some(oid) = parse_object_key(&key) else {
+                let name = leaf.file_name();
+                let Some(oid) = fanout
+                    .and_then(|fanout| name.to_str().and_then(|name| fanout.parse_leaf(name)))
+                else {
                     l2_nonempty = true;
                     continue;
                 };
@@ -207,6 +223,34 @@ mod tests {
     use crate::cache::object::{cache_path_oid, has_object_oid, ingest, object_namespace_dir};
     use crate::cache::{cache_has_proof_for_test, seed_cache_proof_for_test};
     use crate::file_state;
+
+    #[test]
+    fn missing_namespace_is_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = super::super::root::CacheRootInner::new(temp.path().to_path_buf(), None);
+        assert_eq!(
+            sweep_objects::<std::convert::Infallible>(&root, true, |_| panic!(
+                "missing namespace has no objects"
+            ))
+            .unwrap()
+            .unwrap(),
+            CacheSweepStats::default()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn namespace_inspection_errors_are_not_an_empty_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = super::super::root::CacheRootInner::new(temp.path().to_path_buf(), None);
+        std::os::unix::fs::symlink("blake3", temp.path().join("blake3")).unwrap();
+        assert!(matches!(
+            sweep_objects::<std::convert::Infallible>(&root, true, |_| Ok(
+                CacheSweepDecision::Keep
+            )),
+            Err(CacheEnumerationError::Io { .. })
+        ));
+    }
 
     #[test]
     fn sweep_removes_only_deleted_objects_and_empty_fanout_directories() {

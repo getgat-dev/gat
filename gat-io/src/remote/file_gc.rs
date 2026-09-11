@@ -1,6 +1,7 @@
 //! Bounded synchronous file inventory/deletion, driven by admitted GC workers.
 
 use super::{RemoteClient, RemoteError, classify_opendal_error};
+use crate::cache::layout::{ObjectFanout, parse_fanout_segment};
 use gat_core::oid::Oid;
 use std::{fs::ReadDir, io, path::PathBuf};
 
@@ -10,7 +11,14 @@ pub struct FileObjectScan {
     root: PathBuf,
     started: bool,
     // Namespace plus two fan-out directories: at most three live handles.
-    stack: Vec<(ReadDir, String)>,
+    stack: Vec<(ReadDir, ScanLevel)>,
+}
+
+#[derive(Clone, Copy)]
+enum ScanLevel {
+    Namespace,
+    First(u8),
+    Objects(ObjectFanout),
 }
 
 pub struct FileDeleteBatch(Vec<PathBuf>);
@@ -87,10 +95,8 @@ impl FileObjectScan {
             self.started = true;
             match std::fs::symlink_metadata(&self.root) {
                 Ok(metadata) if metadata.is_dir() => {
-                    self.stack.push((
-                        std::fs::read_dir(&self.root)?,
-                        crate::cache::OBJECT_HASH_NAMESPACE.to_owned(),
-                    ));
+                    self.stack
+                        .push((std::fs::read_dir(&self.root)?, ScanLevel::Namespace));
                 }
                 Ok(_) => {
                     return Err(io::Error::new(
@@ -104,7 +110,7 @@ impl FileObjectScan {
         }
         let mut objects = Vec::with_capacity(FILE_GC_BATCH_SIZE);
         let mut visited = 0;
-        while let Some((directory, prefix)) = self.stack.last_mut() {
+        while let Some((directory, level)) = self.stack.last_mut() {
             if visited == FILE_GC_BATCH_SIZE {
                 return Ok(Some(objects));
             }
@@ -116,31 +122,31 @@ impl FileObjectScan {
             visited += 1;
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
-            let key = format!("{prefix}/{name}");
+            let level = *level;
             let kind = match entry.file_type() {
                 Ok(kind) => kind,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(error),
             };
-            if self.stack.len() < 3 {
-                if kind.is_dir()
-                    && name.len() == 2
-                    && name
-                        .bytes()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-                {
-                    match std::fs::read_dir(entry.path()) {
-                        Ok(directory) => self.stack.push((directory, key)),
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                        Err(error) => return Err(error),
-                    }
+            let child = match level {
+                ScanLevel::Namespace if kind.is_dir() => {
+                    parse_fanout_segment(name).map(ScanLevel::First)
                 }
-            } else if kind.is_file()
-                && let Some(oid) = crate::cache::parse_object_key(&key)
-            {
-                objects.push(oid);
-                if objects.len() == FILE_GC_BATCH_SIZE {
-                    break;
+                ScanLevel::First(first) if kind.is_dir() => parse_fanout_segment(name)
+                    .map(|second| ScanLevel::Objects(ObjectFanout::new(first, second))),
+                ScanLevel::Objects(fanout) if kind.is_file() => {
+                    if let Some(oid) = fanout.parse_leaf(name) {
+                        objects.push(oid);
+                    }
+                    None
+                }
+                _ => None,
+            };
+            if let Some(child) = child {
+                match std::fs::read_dir(entry.path()) {
+                    Ok(directory) => self.stack.push((directory, child)),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
                 }
             }
         }
@@ -272,6 +278,40 @@ mod tests {
         assert_eq!(seen, expected);
         assert!(scan.stack.is_empty());
         assert!(scan.next_batch().unwrap().is_none());
+    }
+
+    #[test]
+    fn listing_matches_each_leaf_to_its_own_fanout() {
+        let (root, client) = fixture();
+        let expected: Vec<_> = [(0x01, 0x23), (0x01, 0xab), (0xab, 0x23), (0xab, 0xcd)]
+            .into_iter()
+            .map(|(first, second)| {
+                let mut bytes = [0; 32];
+                bytes[0] = first;
+                bytes[1] = second;
+                Oid::from_bytes(bytes)
+            })
+            .collect();
+        for oid in &expected {
+            let path = root.path().join(crate::cache::object_key_oid(oid));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"object").unwrap();
+        }
+        std::fs::write(
+            root.path().join("blake3/01/23").join(expected[1].to_hex()),
+            b"wrong fanout",
+        )
+        .unwrap();
+        let uppercase = root.path().join("blake3/AB/cd");
+        std::fs::create_dir_all(&uppercase).unwrap();
+        std::fs::write(uppercase.join(expected[3].to_hex()), b"noncanonical").unwrap();
+        let mut scan = client.file_gc().unwrap().listing();
+        let mut seen = Vec::new();
+        while let Some(batch) = scan.next_batch().unwrap() {
+            seen.extend(batch);
+        }
+        seen.sort();
+        assert_eq!(seen, expected);
     }
 
     #[test]

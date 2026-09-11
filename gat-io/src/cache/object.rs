@@ -23,7 +23,6 @@ use std::io::Read;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tempfile::NamedTempFile;
 
 /// Local, filesystem-level failures for the object cache root
@@ -172,11 +171,16 @@ fn ensure_cache_directory(dir: &Path) -> Result<()> {
 }
 
 /// Builds the complete on-disk path for an already-validated [`Oid`] via
-/// [`crate::cache::layout::object_key_oid`], infallibly (an `Oid` is
+/// the shared stack-based object-key encoding, infallibly (an `Oid` is
 /// always well-formed, so there is no [`gat_core::oid::OidFormatError`]
 /// to propagate) and in one destination allocation.
 pub fn cache_path_oid(objects_dir: &Path, oid: &Oid) -> PathBuf {
-    objects_dir.join(crate::cache::layout::object_key_oid(oid))
+    let encoded = crate::cache::layout::ObjectKey::new(oid);
+    let key = encoded.as_str();
+    let mut path = PathBuf::with_capacity(objects_dir.as_os_str().len() + 1 + key.len());
+    path.push(objects_dir);
+    path.push(key);
+    path
 }
 
 /// The root of the finalized BLAKE3 object namespace under `objects_dir`
@@ -1211,6 +1215,30 @@ fn ingest_file_to_tmp(
     }
 }
 
+/// Poll only while the copy is active. Dropping the completion sender wakes
+/// the observer immediately on success, failure, or unwind, instead of joining
+/// a sleeping thread for the remainder of its reporting interval.
+fn with_copy_progress<T>(
+    path: &Path,
+    on_progress: &(impl Fn(u64) + Sync),
+    copy: impl FnOnce() -> T,
+) -> T {
+    std::thread::scope(|scope| {
+        let (complete, waiting) = std::sync::mpsc::channel::<()>();
+        scope.spawn(move || {
+            while matches!(
+                waiting.recv_timeout(std::time::Duration::from_millis(100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ) {
+                on_progress(std::fs::metadata(path).map_or(0, |m| m.len()));
+            }
+        });
+        let result = copy();
+        drop(complete);
+        result
+    })
+}
+
 /// [`IngestStrategy::Safe`] (the default): copy `path` into the cache and
 /// then BLAKE3-hash the *copy* (not the source) via
 /// [`update_mmap_rayon`](blake3::Hasher::update_mmap_rayon).
@@ -1235,23 +1263,12 @@ fn ingest_file_safe_to_tmp(
     ensure_cache_directory(objects_dir)?;
     let mut tmp = create_tmp_file(objects_dir)?;
     let tmp_path = tmp.path().to_path_buf();
-    let done = AtomicBool::new(false);
-    std::thread::scope(|s| {
-        s.spawn(|| {
-            while !done.load(Ordering::Acquire) {
-                let len = std::fs::metadata(&tmp_path).map_or(0, |m| m.len());
-                on_progress(len);
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-        });
-        let result = std::fs::copy(path, &tmp_path);
-        done.store(true, Ordering::Release);
-        result
-    })
-    .map_err(|source| CacheError::PathUnreadable {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    with_copy_progress(&tmp_path, &on_progress, || std::fs::copy(path, &tmp_path)).map_err(
+        |source| CacheError::PathUnreadable {
+            path: path.to_path_buf(),
+            source,
+        },
+    )?;
     tmp.as_file_mut()
         .sync_all()
         .map_err(|source| CacheError::EntryUnwritable {
@@ -1295,29 +1312,15 @@ fn ingest_file_hybrid_to_tmp(
     let mut tmp = create_tmp_file(objects_dir)?;
     let tmp_path = tmp.path().to_path_buf();
     let before = source_fingerprint(path);
-    let done = AtomicBool::new(false);
     let (copy_result, hash_result): (std::io::Result<u64>, std::io::Result<blake3::Hash>) =
-        std::thread::scope(|s| {
-            s.spawn(|| {
-                while !done.load(Ordering::Acquire) {
-                    let len = std::fs::metadata(&tmp_path).map_or(0, |m| m.len());
-                    on_progress(len);
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-            });
-            rayon::join(
-                || {
-                    let result = std::fs::copy(path, &tmp_path);
-                    done.store(true, Ordering::Release);
-                    result
-                },
-                || {
-                    let mut hasher = blake3::Hasher::new();
-                    hasher.update_mmap_rayon(path)?;
-                    Ok(hasher.finalize())
-                },
-            )
-        });
+        rayon::join(
+            || with_copy_progress(&tmp_path, &on_progress, || std::fs::copy(path, &tmp_path)),
+            || {
+                let mut hasher = blake3::Hasher::new();
+                hasher.update_mmap_rayon(path)?;
+                Ok(hasher.finalize())
+            },
+        );
     let size = copy_result.map_err(|source| CacheError::PathUnreadable {
         path: path.to_path_buf(),
         source,
@@ -1413,26 +1416,17 @@ fn ingest_file_mmap_to_tmp(
             path: path.to_path_buf(),
             source,
         })?;
-    let done = AtomicBool::new(false);
-    let (write_result, hash): (std::io::Result<()>, blake3::Hash) = std::thread::scope(|s| {
-        s.spawn(|| {
-            while !done.load(Ordering::Acquire) {
-                let len = std::fs::metadata(&tmp_path).map_or(0, |m| m.len());
-                on_progress(len);
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
+    let (write_result, hash): (std::io::Result<()>, blake3::Hash) =
+        with_copy_progress(&tmp_path, &on_progress, || {
+            rayon::join(
+                || tmp.as_file_mut().write_all(&mmap),
+                || {
+                    let mut hasher = blake3::Hasher::new();
+                    hasher.update_rayon(&mmap);
+                    hasher.finalize()
+                },
+            )
         });
-        let joined = rayon::join(
-            || tmp.as_file_mut().write_all(&mmap),
-            || {
-                let mut hasher = blake3::Hasher::new();
-                hasher.update_rayon(&mmap);
-                hasher.finalize()
-            },
-        );
-        done.store(true, Ordering::Release);
-        joined
-    });
     write_result.map_err(|source| CacheError::EntryUnwritable {
         path: tmp_path.clone(),
         source,
@@ -2215,6 +2209,57 @@ mod tests {
             CacheError::SourceUnreadable { ref source }
                 if source.to_string() == "source-read-sentinel"
         ));
+    }
+
+    #[test]
+    fn copy_progress_completion_preserves_results_and_unwinds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("staging");
+        assert_eq!(
+            with_copy_progress(&path, &|_| {}, || Ok::<_, u8>(42)),
+            Ok(42)
+        );
+        assert_eq!(
+            with_copy_progress(&path, &|_| {}, || Err::<u8, _>(7)),
+            Err(7)
+        );
+        // The completion sender must be dropped before the scoped observer is
+        // joined during unwinding, or this call would never return.
+        assert!(
+            std::panic::catch_unwind(|| {
+                with_copy_progress(&path, &|_| {}, || panic!("copy failed"));
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn file_ingest_reports_final_size_and_cleans_staging_on_read_failure() {
+        for strategy in [
+            IngestStrategy::Safe,
+            IngestStrategy::Hybrid,
+            IngestStrategy::Mmap,
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let objects = tmp.path().join("objects");
+            let source = tmp.path().join("source");
+            let reported = std::sync::Mutex::new(Vec::new());
+            std::fs::write(&source, b"content").unwrap();
+            let result = ingest_file(&objects, &source, strategy, |size| {
+                reported.lock().unwrap().push(size);
+            })
+            .unwrap();
+            assert_eq!(result.size, 7);
+            assert_eq!(reported.lock().unwrap().last(), Some(&7));
+            assert!(ingest_file(&objects, &tmp.path().join("absent"), strategy, |_| {}).is_err());
+            assert!(!std::fs::read_dir(&objects).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("tmp-")
+            }));
+        }
     }
 
     #[test]

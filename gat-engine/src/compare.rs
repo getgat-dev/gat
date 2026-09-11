@@ -247,19 +247,16 @@ fn merge_ordered<R: RightRow>(
 ) -> Result<()> {
     let mut l = left()?;
     let mut r = right()?;
-    loop {
-        match (&l, &r) {
-            (None, None) => return Ok(()),
-            (Some(_), None) => {
-                let from = l.take().expect("left row present");
+    while let Some(pair) = take_ordered(&mut l, &mut r, |from, to| from.path.cmp(to.path())) {
+        match pair {
+            OrderedPair::Left(from) => {
                 out.push(ChangedRow {
                     path: from.path,
                     change: RowChange::Removed,
                 });
                 l = left()?;
             }
-            (None, Some(_)) => {
-                let to = r.take().expect("right row present");
+            OrderedPair::Right(to) => {
                 let (path, oid) = to.into_parts();
                 out.push(ChangedRow {
                     path,
@@ -267,46 +264,55 @@ fn merge_ordered<R: RightRow>(
                 });
                 r = right()?;
             }
-            (Some(from), Some(to)) => match from.path.cmp(to.path()) {
-                std::cmp::Ordering::Less => {
-                    let from = l.take().expect("left row present");
+            OrderedPair::Both(from, to) => {
+                let same = to.oid_eq(from.oid);
+                if !same || unchanged.keeps() {
+                    let (_, oid) = to.into_parts();
                     out.push(ChangedRow {
                         path: from.path,
-                        change: RowChange::Removed,
+                        change: if same {
+                            RowChange::Unchanged { oid }
+                        } else {
+                            RowChange::Modified { oid }
+                        },
                     });
-                    l = left()?;
                 }
-                std::cmp::Ordering::Greater => {
-                    let to = r.take().expect("right row present");
-                    let (path, oid) = to.into_parts();
-                    out.push(ChangedRow {
-                        path,
-                        change: RowChange::Added { oid },
-                    });
-                    r = right()?;
-                }
-                std::cmp::Ordering::Equal => {
-                    let same = to.oid_eq(from.oid);
-                    let from = l.take().expect("left row present");
-                    let to = r.take().expect("right row present");
-                    if !same {
-                        let (_, oid) = to.into_parts();
-                        out.push(ChangedRow {
-                            path: from.path,
-                            change: RowChange::Modified { oid },
-                        });
-                    } else if unchanged.keeps() {
-                        let (_, oid) = to.into_parts();
-                        out.push(ChangedRow {
-                            path: from.path,
-                            change: RowChange::Unchanged { oid },
-                        });
-                    }
-                    l = left()?;
-                    r = right()?;
-                }
-            },
+                l = left()?;
+                r = right()?;
+            }
         }
+    }
+    Ok(())
+}
+
+/// A merge step owns exactly the rows it consumes. The unconsumed row stays
+/// in its cursor; callers never reconstruct presence from parallel booleans.
+enum OrderedPair<L, R> {
+    Left(L),
+    Right(R),
+    Both(L, R),
+}
+
+fn take_ordered<L, R>(
+    left: &mut Option<L>,
+    right: &mut Option<R>,
+    compare: impl FnOnce(&L, &R) -> std::cmp::Ordering,
+) -> Option<OrderedPair<L, R>> {
+    match (left.take(), right.take()) {
+        (None, None) => None,
+        (Some(l), None) => Some(OrderedPair::Left(l)),
+        (None, Some(r)) => Some(OrderedPair::Right(r)),
+        (Some(l), Some(r)) => match compare(&l, &r) {
+            std::cmp::Ordering::Less => {
+                *right = Some(r);
+                Some(OrderedPair::Left(l))
+            }
+            std::cmp::Ordering::Greater => {
+                *left = Some(l);
+                Some(OrderedPair::Right(r))
+            }
+            std::cmp::Ordering::Equal => Some(OrderedPair::Both(l, r)),
+        },
     }
 }
 
@@ -387,31 +393,24 @@ impl<'a> Iterator for ShardIdMerge<'a> {
     type Item = (Option<&'a SnapshotShard>, Option<&'a SnapshotShard>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        match (self.left.get(self.li), self.right.get(self.ri)) {
-            (Some(l), Some(r)) => match l.id.cmp(&r.id) {
-                std::cmp::Ordering::Less => {
-                    self.li += 1;
-                    Some((Some(l), None))
-                }
-                std::cmp::Ordering::Greater => {
-                    self.ri += 1;
-                    Some((None, Some(r)))
-                }
-                std::cmp::Ordering::Equal => {
-                    self.li += 1;
-                    self.ri += 1;
-                    Some((Some(l), Some(r)))
-                }
-            },
-            (Some(l), None) => {
+        match take_ordered(
+            &mut self.left.get(self.li),
+            &mut self.right.get(self.ri),
+            |l, r| l.id.cmp(&r.id),
+        )? {
+            OrderedPair::Left(l) => {
                 self.li += 1;
                 Some((Some(l), None))
             }
-            (None, Some(r)) => {
+            OrderedPair::Right(r) => {
                 self.ri += 1;
                 Some((None, Some(r)))
             }
-            (None, None) => None,
+            OrderedPair::Both(l, r) => {
+                self.li += 1;
+                self.ri += 1;
+                Some((Some(l), Some(r)))
+            }
         }
     }
 }
@@ -576,55 +575,34 @@ fn merge_persisted_shards_with_current_groups<R: RightRow>(
     mut next_current_group: impl FnMut() -> Result<Option<(LockShardId, Vec<R>)>>,
     out: &mut Vec<ChangedRow>,
 ) -> Result<()> {
-    let persisted_shards = from.shards();
-    let mut pi = 0usize;
-    let mut pending_current: Option<(LockShardId, Vec<R>)> = None;
-    loop {
-        if pending_current.is_none() {
-            pending_current = next_current_group()?;
-        }
-        let persisted = persisted_shards.get(pi);
-        let next_current_id = pending_current.as_ref().map(|(id, _)| *id);
-        let take_persisted_only = match (&persisted, next_current_id) {
-            (None, _) => false,
-            (Some(_), None) => true,
-            (Some(shard), Some(cur_id)) => shard.id < cur_id,
-        };
-        let take_current_only = match (&persisted, next_current_id) {
-            (_, None) => false,
-            (None, Some(_)) => true,
-            (Some(shard), Some(cur_id)) => cur_id < shard.id,
-        };
-        if persisted.is_none() && next_current_id.is_none() {
-            break;
-        }
-        if take_persisted_only {
-            let left_rows = shard_rows(from, persisted.expect("checked Some above"), selection)?;
-            merge_ordered(
-                vec_source(left_rows),
-                vec_source(Vec::<R>::new()),
-                unchanged,
-                out,
-            )?;
-            pi += 1;
-        } else if take_current_only {
-            let (_, right_rows) = pending_current.take().expect("checked Some above");
-            merge_ordered(
-                vec_source(Vec::new()),
-                vec_source(right_rows),
-                unchanged,
-                out,
-            )?;
-        } else {
-            let left_rows = shard_rows(from, persisted.expect("checked Some above"), selection)?;
-            let (_, right_rows) = pending_current.take().expect("checked Some above");
-            merge_ordered(
-                vec_source(left_rows),
-                vec_source(right_rows),
-                unchanged,
-                out,
-            )?;
-            pi += 1;
+    let mut persisted = from.shards().iter();
+    let mut left = persisted.next();
+    let mut right = next_current_group()?;
+    while let Some(pair) = take_ordered(&mut left, &mut right, |shard, (id, _)| shard.id.cmp(id)) {
+        match pair {
+            OrderedPair::Left(shard) => {
+                merge_ordered(
+                    vec_source(shard_rows(from, shard, selection)?),
+                    vec_source(Vec::<R>::new()),
+                    unchanged,
+                    out,
+                )?;
+                left = persisted.next();
+            }
+            OrderedPair::Right((_, rows)) => {
+                merge_ordered(vec_source(Vec::new()), vec_source(rows), unchanged, out)?;
+                right = next_current_group()?;
+            }
+            OrderedPair::Both(shard, (_, rows)) => {
+                merge_ordered(
+                    vec_source(shard_rows(from, shard, selection)?),
+                    vec_source(rows),
+                    unchanged,
+                    out,
+                )?;
+                left = persisted.next();
+                right = next_current_group()?;
+            }
         }
     }
     Ok(())
@@ -1172,6 +1150,39 @@ mod tests {
         sorted.sort_unstable();
         assert_eq!(paths, sorted);
         assert_eq!(paths, vec!["a.bin", "b.bin", "m.bin", "z.bin"]);
+    }
+
+    #[test]
+    fn ordered_merge_preserves_failure_and_does_not_read_ahead() {
+        let mut calls = 0;
+        let mut right_calls = 0;
+        let mut output = Vec::new();
+        let error = merge_ordered(
+            || {
+                calls += 1;
+                if calls == 1 {
+                    Ok(Some(entry("a", "a")))
+                } else {
+                    Err(CompareError::new(
+                        CompareErrorKind::GitObject,
+                        std::io::Error::other("cursor failure"),
+                    ))
+                }
+            },
+            || {
+                right_calls += 1;
+                Ok(Some(entry("z", "z")))
+            },
+            Unchanged::Keep,
+            &mut output,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), &CompareErrorKind::GitObject);
+        assert_eq!(calls, 2);
+        assert_eq!(right_calls, 1);
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].path.as_str(), "a");
+        assert_eq!(output[0].change, RowChange::Removed);
     }
 
     #[test]

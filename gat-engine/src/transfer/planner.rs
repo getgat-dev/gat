@@ -18,6 +18,11 @@ pub struct WindowBatch<'a, V> {
 }
 
 impl<'a, V> WindowBatch<'a, V> {
+    #[must_use]
+    pub const fn as_slice(&self) -> &[V] {
+        self.items.as_slice()
+    }
+
     pub const fn as_mut_slice(&mut self) -> &mut [V] {
         self.items.as_mut_slice()
     }
@@ -110,6 +115,35 @@ impl<K: Eq + Hash, V> StreamingWindow<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batch_can_be_inspected_then_consumed_without_replacing_its_allocation() {
+        let mut window = StreamingWindow::new(NonZeroUsize::new(2).unwrap());
+        let mut delivered = Vec::new();
+        let allocation = window.window.as_ptr();
+        for key in 0..5 {
+            window
+                .record(
+                    key,
+                    || key,
+                    |batch| {
+                        assert_eq!(batch.as_slice().len(), 2);
+                        delivered.extend(batch.drain());
+                        Ok::<_, ()>(())
+                    },
+                )
+                .unwrap();
+            assert_eq!(window.window.as_ptr(), allocation);
+        }
+        window
+            .finish(|batch| {
+                assert_eq!(batch.as_slice(), &[4]);
+                delivered.extend(batch.drain());
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        assert_eq!(delivered, [0, 1, 2, 3, 4]);
+    }
 
     #[test]
     fn failed_callback_clears_the_window_before_reuse() {
