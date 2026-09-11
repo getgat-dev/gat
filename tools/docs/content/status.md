@@ -1,5 +1,6 @@
-Without `--remote`, compare the current lock with the <Tooltip tip="The gat.lock version in Git’s index, prepared by git add for the next commit. This can differ from both the working lock and the last committed lock." cta="Review and publish changes" href="/guides/branching-and-merging#typical-workflows">staged lock</Tooltip>. Deleted files
-remain visible because selection uses tracking metadata.
+`gat status` shows tracking changes not yet staged with Git by comparing the
+current `gat.lock` with the <Tooltip tip="The gat.lock version in Git’s index, prepared by git add for the next commit. This can differ from both the working lock and the last committed lock." cta="Review and publish changes" href="/guides/branching-and-merging#typical-workflows">staged lock</Tooltip>.
+Paths remain visible even when their working files are missing.
 
 <Note>
 Local status does not inspect file contents. Run {{command:add}} to record edits,

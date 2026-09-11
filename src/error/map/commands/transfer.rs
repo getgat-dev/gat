@@ -84,7 +84,7 @@ impl From<gat_engine::DownloadError> for Failure {
 
         match &err {
             DownloadError::Cancelled => Self::expected(Diagnostic::new(
-                ErrorCode::RemoteOperationFailed,
+                ErrorCode::Interrupted,
                 "Transfer cancelled",
             )),
             DownloadError::RemoteOpen {
@@ -192,6 +192,10 @@ impl From<gat_engine::UploadError> for Failure {
             UploadCacheFailureKind, UploadError, UploadRemoteFailureKind, UploadWriteFailureKind,
         };
 
+        let cleanup_failed = matches!(
+            err,
+            UploadError::Cleanup { .. } | UploadError::FileCleanup { .. }
+        );
         let mut primary = &err;
         while let UploadError::Cleanup { primary: cause, .. }
         | UploadError::FileCleanup { primary: cause, .. } = primary
@@ -200,7 +204,14 @@ impl From<gat_engine::UploadError> for Failure {
         }
         match primary {
             UploadError::Cancelled => Self::infrastructure(
-                Diagnostic::new(ErrorCode::RemoteOperationFailed, "Transfer cancelled"),
+                if cleanup_failed {
+                    Diagnostic::new(
+                        ErrorCode::RemoteOperationFailed,
+                        "Transfer cancelled, but upload cleanup failed",
+                    )
+                } else {
+                    Diagnostic::new(ErrorCode::Interrupted, "Transfer cancelled")
+                },
                 err,
             ),
             UploadError::Cleanup { .. } | UploadError::FileCleanup { .. } => {
@@ -214,9 +225,16 @@ impl From<gat_engine::UploadError> for Failure {
                 route_name,
                 route,
                 path,
-                ..
+                source,
             } => {
                 let code = match kind {
+                    _ if *cancelled
+                        && !*published
+                        && !cleanup_failed
+                        && source.cleanup.is_none() =>
+                    {
+                        ErrorCode::Interrupted
+                    }
                     UploadWriteFailureKind::PermissionDenied => ErrorCode::RemotePermissionDenied,
                     UploadWriteFailureKind::OperationFailed => ErrorCode::RemoteOperationFailed,
                 };
@@ -389,6 +407,12 @@ impl From<gat_engine::RemotePresenceError> for Failure {
             );
         }
         let (code, action, remote_name, route_name, route, path) = match &err {
+            gat_engine::RemotePresenceError::Cancelled => {
+                return Self::expected(Diagnostic::new(
+                    ErrorCode::Interrupted,
+                    "Transfer cancelled",
+                ));
+            }
             gat_engine::RemotePresenceError::RemoteOpen {
                 remote_name,
                 route_name,
@@ -617,6 +641,27 @@ mod tests {
             .technical_source()
             .expect("infrastructure() must retain a technical source");
         assert!(source.downcast_ref::<gat_engine::UploadError>().is_some());
+    }
+
+    #[test]
+    fn cancellation_does_not_hide_a_failed_cleanup() {
+        let cancelled = Failure::from(gat_engine::UploadError::Cancelled);
+        assert_eq!(cancelled.diagnostic().code(), ErrorCode::Interrupted);
+        let failure = Failure::from(gat_engine::UploadError::FileCleanup {
+            primary: Box::new(gat_engine::UploadError::Cancelled),
+            cleanup: Box::new(gat_io::FileWriteError {
+                phase: gat_io::FileWritePhase::Cleanup,
+                publication: gat_io::FilePublication::NotPublished,
+                source: std::io::Error::other("CLEANUP-SECRET"),
+                cleanup: None,
+            }),
+        });
+        assert_eq!(
+            failure.diagnostic().code(),
+            ErrorCode::RemoteOperationFailed
+        );
+        assert!(failure.diagnostic().summary().contains("cleanup failed"));
+        assert!(!failure.diagnostic().summary().contains("CLEANUP-SECRET"));
     }
 
     #[test]

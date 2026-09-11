@@ -172,8 +172,8 @@ fn example_config_creation_is_inert() {
     assert_eq!(config.sync.auto_fetch, Some(true));
     assert_eq!(config.sync.auto_repair, Some(true));
     let selection = config.selections.by_name["example"].clone();
-    assert_eq!(selection.include.unwrap()[0].as_str(), "data/**");
-    assert_eq!(selection.exclude.unwrap()[0].as_str(), "data/tmp/**");
+    assert_eq!(selection.include[0].as_str(), "data/**");
+    assert_eq!(selection.exclude[0].as_str(), "data/tmp/**");
     assert_eq!(
         config.lock.shard_levels,
         Some(gat_core::lock::LockShardLevels::FLAT)

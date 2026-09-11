@@ -1,6 +1,6 @@
 [package]
 name = "gat"
-version = "0.0.7"
+version = "0.0.8"
 edition = "2024"
 rust-version = "1.91"
 description = "Simple, fast, versioned large-file storage for git."
@@ -36,7 +36,7 @@ gat-core = { path = "gat-core" }
 gat-engine = { path = "gat-engine" }
 gat-command = { path = "gat-command" }
 clap = { version = "4.6", features = ["derive", "wrap_help"] }
-tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 rayon = "1.12"
 thiserror = "2.0"
 indicatif = "0.18"

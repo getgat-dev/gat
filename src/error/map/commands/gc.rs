@@ -43,6 +43,7 @@ impl From<GcError> for Failure {
     fn from(err: GcError) -> Self {
         match &err {
             GcError::Engine(engine) => match engine {
+                GcEngineError::Cancelled => Self::expected(Diagnostic::new(ErrorCode::Interrupted, "Garbage collection cancelled")),
                 GcEngineError::RemoteOpen { remote_name, source } => {
                     if let Some(diagnostic) = super::super::remote::readiness_diagnostic(source.kind(), remote_name.as_str()) {
                         Self::infrastructure(diagnostic, err)

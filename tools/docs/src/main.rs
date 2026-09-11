@@ -623,10 +623,8 @@ fn complete_config() -> Config {
                 "runtime".into(),
                 config::SelectionConfig {
                     path: gat_core::lexical_path::GatSubpath::normalize("data").unwrap(),
-                    include: Some(vec![gat_core::globs::GatGlobPattern::parse("**").unwrap()]),
-                    exclude: Some(vec![
-                        gat_core::globs::GatGlobPattern::parse("tmp/**").unwrap(),
-                    ]),
+                    include: vec![gat_core::globs::GatGlobPattern::parse("**").unwrap()],
+                    exclude: vec![gat_core::globs::GatGlobPattern::parse("tmp/**").unwrap()],
                 },
             )]),
         },
@@ -707,9 +705,7 @@ fn typical_config() -> Config {
             by_name: std::collections::BTreeMap::from([(
                 "runtime".into(),
                 config::SelectionConfig {
-                    exclude: Some(vec![
-                        gat_core::globs::GatGlobPattern::parse("tmp/**").unwrap(),
-                    ]),
+                    exclude: vec![gat_core::globs::GatGlobPattern::parse("tmp/**").unwrap()],
                     ..config::SelectionConfig::default()
                 },
             )]),

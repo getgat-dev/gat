@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use gat_core::git_location::GitLocationSpec;
 
@@ -81,6 +82,7 @@ pub fn parse_location(spec: &GitLocationSpec) -> Result<GitLocation, GitLocation
 /// Semantic stage at which repository cloning failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitCloneErrorKind {
+    Cancelled,
     PrepareDestination,
     PrepareClone,
     Fetch,
@@ -90,6 +92,7 @@ pub enum GitCloneErrorKind {
 impl std::fmt::Display for GitCloneErrorKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            Self::Cancelled => "cancelled",
             Self::PrepareDestination => "preparing the clone destination",
             Self::PrepareClone => "preparing to clone",
             Self::Fetch => "fetching",
@@ -164,11 +167,26 @@ impl std::error::Error for GitCloneError {
     }
 }
 
+// Clone destinations are privately owned staging directories. Cancellation here
+// cannot interrupt publication into a user's repository.
+fn check_interrupt(interrupt: &AtomicBool, destination: &Path) -> Result<(), GitCloneError> {
+    if interrupt.load(Ordering::Acquire) {
+        Err(GitCloneError::new(
+            GitCloneErrorKind::Cancelled,
+            destination,
+            std::io::Error::from(std::io::ErrorKind::Interrupted),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn clone_with_worktree_impl(
     location: &GitLocation,
     destination: &Path,
+    interrupt: &AtomicBool,
 ) -> Result<(), GitCloneError> {
-    let interrupt = std::sync::atomic::AtomicBool::new(false);
+    check_interrupt(interrupt, destination)?;
     let mut prepare = gix::clone::PrepareFetch::new(
         location.parsed.clone(),
         destination,
@@ -178,11 +196,31 @@ fn clone_with_worktree_impl(
     )
     .map_err(|source| GitCloneError::new(GitCloneErrorKind::PrepareClone, destination, source))?;
     let (mut checkout, _) = prepare
-        .fetch_then_checkout(gix::progress::Discard, &interrupt)
-        .map_err(|source| GitCloneError::new(GitCloneErrorKind::Fetch, destination, source))?;
+        .fetch_then_checkout(gix::progress::Discard, interrupt)
+        .map_err(|source| {
+            GitCloneError::new(
+                if interrupt.load(Ordering::Acquire) {
+                    GitCloneErrorKind::Cancelled
+                } else {
+                    GitCloneErrorKind::Fetch
+                },
+                destination,
+                source,
+            )
+        })?;
     checkout
-        .main_worktree(gix::progress::Discard, &interrupt)
-        .map_err(|source| GitCloneError::new(GitCloneErrorKind::Checkout, destination, source))?;
+        .main_worktree(gix::progress::Discard, interrupt)
+        .map_err(|source| {
+            GitCloneError::new(
+                if interrupt.load(Ordering::Acquire) {
+                    GitCloneErrorKind::Cancelled
+                } else {
+                    GitCloneErrorKind::Checkout
+                },
+                destination,
+                source,
+            )
+        })?;
     Ok(())
 }
 
@@ -237,7 +275,9 @@ pub enum PrepareGitWorktreeError {
 pub fn prepare_worktree(
     location: &GitLocation,
     spec: &GitLocationSpec,
+    interrupt: &AtomicBool,
 ) -> Result<PreparedGitWorktree, PrepareGitWorktreeError> {
+    check_interrupt(interrupt, Path::new(spec.as_location_str()))?;
     if location.kind() == GitLocationKind::LocalPath {
         let local = Path::new(spec.as_location_str());
         if !local.exists() {
@@ -257,7 +297,7 @@ pub fn prepare_worktree(
     }
 
     let temporary = tempfile::tempdir().map_err(PrepareGitWorktreeError::CreateTemporary)?;
-    clone_with_worktree_impl(location, temporary.path())?;
+    clone_with_worktree_impl(location, temporary.path(), interrupt)?;
     let root = std::fs::canonicalize(temporary.path()).map_err(|source| {
         PrepareGitWorktreeError::ResolveClone {
             path: temporary.path().to_path_buf(),
@@ -270,7 +310,12 @@ pub fn prepare_worktree(
     })
 }
 
-fn clone_bare_impl(location: &GitLocation, destination: &Path) -> Result<(), GitCloneError> {
+fn clone_bare_impl(
+    location: &GitLocation,
+    destination: &Path,
+    interrupt: &AtomicBool,
+) -> Result<(), GitCloneError> {
+    check_interrupt(interrupt, destination)?;
     if destination.exists() {
         std::fs::remove_dir_all(destination).map_err(|source| {
             GitCloneError::new(GitCloneErrorKind::PrepareDestination, destination, source)
@@ -281,7 +326,6 @@ fn clone_bare_impl(location: &GitLocation, destination: &Path) -> Result<(), Git
             GitCloneError::new(GitCloneErrorKind::PrepareDestination, destination, source)
         })?;
     }
-    let interrupt = std::sync::atomic::AtomicBool::new(false);
     let mut prepare = gix::clone::PrepareFetch::new(
         location.parsed.clone(),
         destination,
@@ -291,8 +335,18 @@ fn clone_bare_impl(location: &GitLocation, destination: &Path) -> Result<(), Git
     )
     .map_err(|source| GitCloneError::new(GitCloneErrorKind::PrepareClone, destination, source))?;
     prepare
-        .fetch_only(gix::progress::Discard, &interrupt)
-        .map_err(|source| GitCloneError::new(GitCloneErrorKind::Fetch, destination, source))?;
+        .fetch_only(gix::progress::Discard, interrupt)
+        .map_err(|source| {
+            GitCloneError::new(
+                if interrupt.load(Ordering::Acquire) {
+                    GitCloneErrorKind::Cancelled
+                } else {
+                    GitCloneErrorKind::Fetch
+                },
+                destination,
+                source,
+            )
+        })?;
     Ok(())
 }
 
@@ -335,19 +389,21 @@ pub enum PrepareBareGitRepositoryError {
 /// Bare-clones a location into an independently owned temporary repository.
 pub fn prepare_bare_repository(
     location: &GitLocation,
+    interrupt: &AtomicBool,
 ) -> Result<PreparedBareGitRepository, PrepareBareGitRepositoryError> {
     let temporary = tempfile::Builder::new()
         .prefix("gat-bare-")
         .tempdir()
         .map_err(PrepareBareGitRepositoryError::CreateTemporary)?;
-    prepare_bare_repository_in_owner(location, temporary)
+    prepare_bare_repository_in_owner(location, temporary, interrupt)
 }
 
 fn prepare_bare_repository_in_owner(
     location: &GitLocation,
     temporary: tempfile::TempDir,
+    interrupt: &AtomicBool,
 ) -> Result<PreparedBareGitRepository, PrepareBareGitRepositoryError> {
-    clone_bare_impl(location, temporary.path())?;
+    clone_bare_impl(location, temporary.path(), interrupt)?;
     let reader = super::GitReader::open_at_path(temporary.path())?;
     Ok(PreparedBareGitRepository {
         reader,
@@ -364,7 +420,7 @@ fn prepare_bare_repository_in(
         .prefix("gat-bare-")
         .tempdir_in(parent)
         .map_err(PrepareBareGitRepositoryError::CreateTemporary)?;
-    prepare_bare_repository_in_owner(location, temporary)
+    prepare_bare_repository_in_owner(location, temporary, &AtomicBool::new(false))
 }
 
 fn repo_basename(path: &Path) -> Option<std::ffi::OsString> {
@@ -446,6 +502,31 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_clones_leave_destinations_untouched_and_remove_temporary_owners() {
+        let source = tempfile::tempdir().unwrap();
+        let spec = GitLocationSpec::from_string(file_url(source.path()));
+        let location = parse_location(&spec).unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let destination = parent.path().join("existing");
+        std::fs::create_dir(&destination).unwrap();
+        let sentinel = destination.join("keep");
+        std::fs::write(&sentinel, b"preserve").unwrap();
+        let interrupt = AtomicBool::new(true);
+        for clone in [clone_bare_impl, clone_with_worktree_impl] {
+            let error = clone(&location, &destination, &interrupt).unwrap_err();
+            assert_eq!(error.kind(), GitCloneErrorKind::Cancelled);
+            assert_eq!(std::fs::read(&sentinel).unwrap(), b"preserve");
+        }
+        let owner = tempfile::tempdir_in(parent.path()).unwrap();
+        let staged = owner.path().to_path_buf();
+        assert!(
+            matches!(prepare_bare_repository_in_owner(&location, owner, &interrupt),
+            Err(PrepareBareGitRepositoryError::Clone(error)) if error.kind() == GitCloneErrorKind::Cancelled)
+        );
+        assert!(!staged.exists());
+    }
+
+    #[test]
     fn prepared_local_worktree_exposes_semantic_revision_and_config() {
         let source = tempfile::tempdir().unwrap();
         git(source.path(), &["init", "-q"]);
@@ -460,7 +541,7 @@ mod tests {
 
         let spec = GitLocationSpec::from_string(source.path().display().to_string());
         let location = parse_location(&spec).unwrap();
-        let prepared = prepare_worktree(&location, &spec).unwrap();
+        let prepared = prepare_worktree(&location, &spec, &AtomicBool::new(false)).unwrap();
 
         assert!(
             prepared
@@ -480,7 +561,7 @@ mod tests {
 
         let spec = GitLocationSpec::from_string(file_url(source.path()));
         let location = parse_location(&spec).unwrap();
-        let prepared = prepare_worktree(&location, &spec).unwrap();
+        let prepared = prepare_worktree(&location, &spec, &AtomicBool::new(false)).unwrap();
         let cloned_root = prepared.root().to_path_buf();
 
         assert!(cloned_root.join("tracked").is_file());

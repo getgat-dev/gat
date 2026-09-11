@@ -451,11 +451,10 @@ pub enum Command {
     /// <key>` prints the current (or default) value, `gat config <key>
     /// <value>` sets a scalar key, `gat config <key> <value> [<value>...]`
     /// sets a list-valued key (one positional argument per element -- no
-    /// `,`-delimited values). Supported keys: `cache.location`,
-    /// `cache.materialization_strategy`, `cache.ingest_strategy`,
-    /// `sync.trust_state`, `sync.auto_fetch`,
-    /// `sync.auto_repair`,
-    /// `lock.shard_levels`, `git.ignore_patterns`. `gat config <key>` (no
+    /// `,`-delimited values). Examples of supported keys include
+    /// `cache.location`, `git.ignore_patterns`, and
+    /// `network.request_concurrency`. See the configuration reference for
+    /// the complete list of keys and defaults. `gat config <key>` (no
     /// value) shows the effective value merged from every location in a
     /// human-readable report, with one value per line and its source below.
     /// List elements are never comma-joined. `gat config <key>

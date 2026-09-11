@@ -691,6 +691,8 @@ impl SelectionsConfig {
 
 /// One complete named selection. Same-name definitions replace as a whole.
 /// Explicit CLI selection replaces the path and both pattern lists.
+/// Pattern lists do not inherit independently, so omitted and empty lists
+/// share one representation and serialize without a key.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct SelectionConfig {
@@ -701,21 +703,19 @@ pub struct SelectionConfig {
     )]
     pub path: crate::lexical_path::GatSubpath,
     /// Include alternatives relative to path; omitted or empty selects everything.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub include: Option<Vec<crate::globs::GatGlobPattern>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<crate::globs::GatGlobPattern>,
     /// Excludes relative to path win over includes; omitted or empty excludes nothing.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub exclude: Option<Vec<crate::globs::GatGlobPattern>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<crate::globs::GatGlobPattern>,
 }
 
 impl SelectionConfig {
     /// Whether this definition has root scope and no pattern restrictions,
     /// independent of lock contents. Omitted and empty lists are equivalent.
     #[must_use]
-    pub fn is_unrestricted(&self) -> bool {
-        self.path.is_root()
-            && self.include.as_ref().is_none_or(Vec::is_empty)
-            && self.exclude.as_ref().is_none_or(Vec::is_empty)
+    pub const fn is_unrestricted(&self) -> bool {
+        self.path.is_root() && self.include.is_empty() && self.exclude.is_empty()
     }
 }
 
@@ -724,8 +724,8 @@ impl From<SelectionConfig> for crate::selection::Selection {
     fn from(definition: SelectionConfig) -> Self {
         Self::from_scope_patterns(
             definition.path.into_path_scope(),
-            definition.include.unwrap_or_default(),
-            definition.exclude.unwrap_or_default(),
+            definition.include,
+            definition.exclude,
         )
     }
 }
@@ -1620,9 +1620,7 @@ mod tests {
                 .by_name
                 .entry("runtime".into())
                 .or_default()
-                .include = Some(vec![
-                crate::globs::GatGlobPattern::parse("global-target").unwrap(),
-            ]);
+                .include = vec![crate::globs::GatGlobPattern::parse("global-target").unwrap()];
         });
         let project = cfg(|c| {
             c.cache.location = Some(
@@ -1635,9 +1633,7 @@ mod tests {
                 .by_name
                 .entry("runtime".into())
                 .or_default()
-                .include = Some(vec![
-                crate::globs::GatGlobPattern::parse("local-target").unwrap(),
-            ]);
+                .include = vec![crate::globs::GatGlobPattern::parse("local-target").unwrap()];
         });
 
         let merged = Config::merge_layers([global, project, local]);
@@ -1654,9 +1650,7 @@ mod tests {
         // selection does not affect inheritance.
         assert_eq!(
             merged.selections.by_name["runtime"].include,
-            Some(vec![
-                crate::globs::GatGlobPattern::parse("local-target").unwrap()
-            ])
+            vec![crate::globs::GatGlobPattern::parse("local-target").unwrap()]
         );
     }
 

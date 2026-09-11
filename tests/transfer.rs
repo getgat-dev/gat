@@ -1176,9 +1176,7 @@ fn broad_push_skips_mount_owned_paths_but_explicit_mount_root_push_is_allowed() 
         .by_name
         .entry("runtime".into())
         .or_default()
-        .include = Some(vec![
-        gat_core::globs::GatGlobPattern::parse("vendor/models/**").unwrap(),
-    ]);
+        .include = vec![gat_core::globs::GatGlobPattern::parse("vendor/models/**").unwrap()];
     repo.write_config_fixture(&cfg).unwrap();
     let configured = gat_command::push(
         &repo,

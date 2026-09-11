@@ -66,6 +66,8 @@ pub mod map;
 /// failure category emerges.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorCode {
+    /// Cooperative cancellation stopped the operation at a safe checkpoint.
+    Interrupted,
     /// The current directory is not inside a Gat-managed Git repository.
     NotRepository,
     /// A repository was found but could not be opened/used (e.g. its
@@ -167,7 +169,8 @@ impl ErrorCode {
         // Touching every variant here (through the match below) forces a
         // compile error on a new/renamed variant; the returned slice is
         // this const array, kept in sync with the match by construction.
-        const ALL: [ErrorCode; 30] = [
+        const ALL: [ErrorCode; 31] = [
+            ErrorCode::Interrupted,
             ErrorCode::NotRepository,
             ErrorCode::RepositoryUnavailable,
             ErrorCode::InvalidConfig,
@@ -204,7 +207,8 @@ impl ErrorCode {
         // variant is removed from the enum but left dangling here).
         const fn assert_exhaustive(code: ErrorCode) {
             match code {
-                ErrorCode::NotRepository
+                ErrorCode::Interrupted
+                | ErrorCode::NotRepository
                 | ErrorCode::RepositoryUnavailable
                 | ErrorCode::InvalidConfig
                 | ErrorCode::UnsupportedConfigVersion
@@ -249,6 +253,7 @@ impl ErrorCode {
     #[must_use]
     pub const fn as_str(&self) -> &'static str {
         match self {
+            Self::Interrupted => "interrupted",
             Self::NotRepository => "not_repository",
             Self::RepositoryUnavailable => "repository_unavailable",
             Self::InvalidConfig => "invalid_config",

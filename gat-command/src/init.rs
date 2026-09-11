@@ -42,14 +42,14 @@ static EXAMPLE_CONFIG: std::sync::LazyLock<gat_core::config::Config> =
                 by_name: std::collections::BTreeMap::from([(
                     "example".into(),
                     gat_core::config::SelectionConfig {
-                        include: Some(vec![
+                        include: vec![
                             gat_core::globs::GatGlobPattern::parse("data/**")
                                 .expect("valid example include glob"),
-                        ]),
-                        exclude: Some(vec![
+                        ],
+                        exclude: vec![
                             gat_core::globs::GatGlobPattern::parse("data/tmp/**")
                                 .expect("valid example exclude glob"),
-                        ]),
+                        ],
                         ..Default::default()
                     },
                 )]),

@@ -1,4 +1,4 @@
-use super::presence::{RemotePresenceError, RemotePresenceObligation};
+use super::presence::{PresenceProbeError, RemotePresenceError, RemotePresenceObligation};
 use super::upload::{
     ExecutedUpload, PreparedUpload, UploadError, UploadObject, cache_error_kind, execute_upload,
     worker_error,
@@ -16,7 +16,6 @@ use gat_core::oid::Oid;
 use gat_core::progress::{ProgressActivity, ProgressHandle};
 use gat_io::{CacheError, CacheObject, CompletedCacheVerification, ObjectVerification};
 use std::collections::{BTreeMap, VecDeque};
-use std::error::Error;
 
 const VERIFICATION_BATCH_SIZE: usize = 128;
 
@@ -150,7 +149,7 @@ enum AdmittedWork {
 enum RemoteCompletion {
     Presence {
         index: usize,
-        result: Result<bool, Box<dyn Error + Send + Sync>>,
+        result: Result<bool, PresenceProbeError>,
     },
     Upload {
         upload: ExecutedUpload,
@@ -605,10 +604,7 @@ fn refill_remote_work<'a>(
             scheduler.handles[&id].client().clone(),
             entries,
         )
-        .map(|(index, result)| RemoteCompletion::Presence {
-            index,
-            result: result.map_err(|source| Box::new(source) as Box<dyn Error + Send + Sync>),
-        })
+        .map(|(index, result)| RemoteCompletion::Presence { index, result })
         .boxed()
     };
     let mut presence = BTreeMap::<RemoteId, Vec<_>>::new();

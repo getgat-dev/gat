@@ -23,6 +23,9 @@ pub enum SelectionRequest {
         definition: SelectionConfig,
         scope: ConfigScope,
     },
+    /// Omitted fields preserve the saved value; an explicitly empty pattern
+    /// list clears that filter. This distinction applies only to the edit,
+    /// not to the complete persisted definition.
     Update {
         name: SelectionName,
         path: Option<GatSubpath>,
@@ -198,10 +201,10 @@ pub fn saved_selection(
                 definition.path = path;
             }
             if let Some(include) = include {
-                definition.include = Some(include);
+                definition.include = include;
             }
             if let Some(exclude) = exclude {
-                definition.exclude = Some(exclude);
+                definition.exclude = exclude;
             }
             let unrestricted = definition.is_unrestricted();
             edit.commit(&layers, &cfg, scope)?;

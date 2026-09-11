@@ -73,6 +73,10 @@ impl From<MountError> for Failure {
                 ])),
             ),
             MountError::Source { kind, location, .. } => match kind {
+                MountSourceErrorKind::Cancelled => Self::expected(Diagnostic::new(
+                    ErrorCode::Interrupted,
+                    "Source clone cancelled",
+                )),
                 MountSourceErrorKind::InvalidLocation => Self::expected(
                     Diagnostic::new(
                         ErrorCode::InvalidArgumentValue,
