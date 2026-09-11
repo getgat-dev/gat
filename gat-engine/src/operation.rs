@@ -44,7 +44,12 @@ pub(crate) struct WindowServices<'op> {
 }
 
 impl<'repo> Operation<'repo> {
-    /// Cancellation remains operation-scoped; callers may send it from another thread.
+    /// Checks cancellation between phases, never inside a publication sequence.
+    pub fn check_cancelled(&self) -> Result<(), crate::RepositoryError> {
+        self.repo.check_cancelled()
+    }
+
+    /// Shares the invocation cancellation source; callers may cancel from another thread.
     pub fn transfer_cancellation(&self) -> crate::TransferCancellation {
         self.session.transfer_cancellation()
     }

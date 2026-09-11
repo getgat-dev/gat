@@ -51,3 +51,7 @@ mod transfer_errors;
 
 #[path = "cli_integration/selection.rs"]
 mod selection;
+
+#[cfg(unix)]
+#[path = "cli_integration/interrupts.rs"]
+mod interrupts;

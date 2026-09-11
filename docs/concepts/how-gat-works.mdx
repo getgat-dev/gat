@@ -220,3 +220,21 @@ again to record the new bytes and content ID.
     Limit an operation to the files you need.
   </Card>
 </CardGroup>
+
+## Interrupting commands
+
+Press **Ctrl+C** once to request cancellation. Gat stops admitting new transfer
+work, interrupts Git fetch/checkout at its checkpoints, and waits for owned work
+and cleanup to finish. A filesystem publication or journaled mount update that
+has already started finishes its consistency-critical sequence before returning.
+Cancellation is cooperative: work without an interruption checkpoint may need to
+finish or reach its I/O timeout.
+
+A cancelled CLI invocation exits with status **130**, without a success summary.
+On Unix, **SIGTERM** requests the same cleanup and exits with **143**. On Windows,
+Ctrl+C uses the same cooperative behavior. Hooks suppress the interruption notice
+and keep reporting other errors.
+
+A second interrupt terminates the process immediately and skips remaining
+cleanup. Use it only when you intend to force termination; the next invocation
+may need to recover an interrupted transaction.

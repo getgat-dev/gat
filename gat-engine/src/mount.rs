@@ -43,6 +43,7 @@ pub struct MountSourceError {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MountSourceErrorKind {
+    Cancelled,
     InvalidLocation,
     MissingRepositoryName,
     LocalSourceMissing,
@@ -97,6 +98,7 @@ impl MountSourceError {
                 MountSourceErrorKind::CreateTemporary
             }
             gat_io::PrepareGitWorktreeError::Clone(error) => match error.kind() {
+                gat_io::GitCloneErrorKind::Cancelled => MountSourceErrorKind::Cancelled,
                 gat_io::GitCloneErrorKind::PrepareDestination
                 | gat_io::GitCloneErrorKind::PrepareClone => MountSourceErrorKind::ClonePrepare,
                 gat_io::GitCloneErrorKind::Fetch => MountSourceErrorKind::CloneFetch,
@@ -153,16 +155,23 @@ impl MountSourceLocation {
         self,
         revision: Option<&GitRevisionSpec>,
         progress: &dyn ProgressReporter,
+        cancellation: &crate::TransferCancellation,
     ) -> Result<PreparedMountSource, MountSourceError> {
         let worktree = match self.location.kind() {
             gat_io::GitLocationKind::LocalPath => {
-                gat_io::prepare_worktree(&self.location, &self.spec)
+                gat_io::prepare_worktree(&self.location, &self.spec, cancellation.git_interrupt())
                     .map_err(MountSourceError::prepare)?
             }
             gat_io::GitLocationKind::Clone => with_progress_typed(
                 progress,
                 ProgressSpec::indeterminate(ProgressOperation::CloningSource),
-                |_| gat_io::prepare_worktree(&self.location, &self.spec),
+                |_| {
+                    gat_io::prepare_worktree(
+                        &self.location,
+                        &self.spec,
+                        cancellation.git_interrupt(),
+                    )
+                },
             )
             .map_err(MountSourceError::prepare)?,
         };
@@ -594,6 +603,9 @@ impl<'repo> MountService<'repo> {
             levels: effective.lock.shard_levels(),
             layers: layers.clone(),
         };
+        // Cancellation is safe before a new journaled mutation. Once it starts,
+        // finish journal, config, row replay, and excludes as one recovery unit.
+        self.repo.check_cancelled().map_err(E::from)?;
         operation(&mut locked, layers, effective)
     }
 }
@@ -1115,7 +1127,7 @@ mod tests {
             source_dir.path().display().to_string(),
         ))
         .unwrap()
-        .prepare(None, &NoopProgress)
+        .prepare(None, &NoopProgress, &crate::TransferCancellation::default())
         .unwrap();
 
         let destination_dir = crate::test_harness::git_repo();
@@ -1235,7 +1247,7 @@ mod tests {
             source_dir.path().display().to_string(),
         ))
         .unwrap()
-        .prepare(None, &NoopProgress)
+        .prepare(None, &NoopProgress, &crate::TransferCancellation::default())
         .unwrap();
 
         let destination_dir = crate::test_harness::git_repo();
@@ -1311,7 +1323,7 @@ mod tests {
             source_dir.path().display().to_string(),
         ))
         .unwrap()
-        .prepare(None, &NoopProgress)
+        .prepare(None, &NoopProgress, &crate::TransferCancellation::default())
         .unwrap();
 
         let destination_dir = crate::test_harness::git_repo();
@@ -1398,7 +1410,7 @@ mod tests {
             source_dir.path().display().to_string(),
         ))
         .unwrap()
-        .prepare(None, &NoopProgress)
+        .prepare(None, &NoopProgress, &crate::TransferCancellation::default())
         .unwrap();
 
         let destination_dir = crate::test_harness::git_repo();

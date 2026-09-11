@@ -42,14 +42,17 @@ impl Session {
             crate::limits::ExecutionLimits::from_network(options),
             repo.inputs.templates(),
             options,
+            repo.cancellation.clone(),
         )
     }
     pub(crate) fn configured(
         limits: ExecutionLimits,
         resolver: gat_io::TemplateResolver,
         options: gat_core::settings::NetworkOptions,
+        cancellation: crate::TransferCancellation,
     ) -> Self {
-        let remote_executor = super::remote_executor::RemoteExecutor::new(limits.remote);
+        let remote_executor =
+            super::remote_executor::RemoteExecutor::with_cancellation(limits.remote, cancellation);
         let request_budget = remote_executor.request_budget();
         Self {
             remotes: RemoteSession::with_request_budget(request_budget, resolver, options),
@@ -70,6 +73,7 @@ impl Session {
                 .unwrap()
                 .templates(),
             gat_core::settings::NetworkOptions::default(),
+            crate::TransferCancellation::default(),
         )
     }
 

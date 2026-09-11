@@ -45,6 +45,7 @@ pub enum SnapshotFailureKind {
 /// Application-facing category for a coherent repository-snapshot failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RepoSnapshotErrorKind {
+    Cancelled,
     Repository,
     RepositoryLocked,
     RepositoryLock(FilesystemFailureKind),
@@ -97,6 +98,7 @@ impl RepoSnapshotError {
 impl std::fmt::Display for RepoSnapshotError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let stage = match self.kind {
+            RepoSnapshotErrorKind::Cancelled => "continue a cancelled operation",
             RepoSnapshotErrorKind::Repository => "open the repository",
             RepoSnapshotErrorKind::RepositoryLocked | RepoSnapshotErrorKind::RepositoryLock(_) => {
                 "acquire repository state"
@@ -141,6 +143,7 @@ const fn classify_repository_access(kind: RepositoryAccessFailureKind) -> RepoSn
 
 fn classify_repository(source: &RepositoryError) -> RepoSnapshotErrorKind {
     match source {
+        RepositoryError::Cancelled => RepoSnapshotErrorKind::Cancelled,
         RepositoryError::SettingLock { source } => classify_atomic(source),
         RepositoryError::PendingMountRecovery(source) => {
             RepoSnapshotErrorKind::MountRecovery(source.recovery_failure_kind())
@@ -237,6 +240,7 @@ const fn classify_sync(source: &SyncError) -> RepoSnapshotErrorKind {
             ExcludesFailureKind::Conflict => RepoSnapshotErrorKind::Conflict,
         },
         SyncErrorKind::MutationAuthority(kind) => match kind {
+            MutationAuthorityFailureKind::Cancelled => RepoSnapshotErrorKind::Cancelled,
             MutationAuthorityFailureKind::Lock(kind) => RepoSnapshotErrorKind::Lock(*kind),
             MutationAuthorityFailureKind::RepositoryLocked => {
                 RepoSnapshotErrorKind::RepositoryLocked
@@ -341,6 +345,7 @@ fn lock_and_load_config(
 ) -> Result<(RepoLock, gat_core::config::Config)> {
     let guard = repo.acquire_configuration_lock()?;
     repo.mounts().recover_pending_locked(&guard, progress)?;
+    repo.check_cancelled()?;
     let config = repo.load_config()?;
     Ok((guard, config))
 }

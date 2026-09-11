@@ -1,7 +1,7 @@
-Moving a tracked path renames the working-tree path, then publishes the move to
-`gat.lock`, updates <Tooltip tip="Local bookkeeping recording which content Gat last placed at each managed path. Sync uses it to distinguish clean files from local changes." cta="How sync plans changes" href="/concepts/how-gat-works#how-sync-decides-what-to-change">materialized ownership</Tooltip>, and regenerates managed excludes.
-Renaming reuses the content ID; see [path-independent content identity](/concepts/how-gat-works#content-identity-is-independent-of-path).
-Destinations must be explicit; `--force` is required to replace an existing destination.
+`gat mv SOURCE DEST` moves a tracked file or directory and updates its paths in
+`gat.lock`. The content IDs stay the same, so renaming does not create new objects.
+Supply the complete destination path. Use `--force` only when you intend to
+replace an existing destination.
 
 A move can change the [route](/guides/using-multiple-remotes#remote-selection-at-a-glance)
 that selects storage for the new path. Upload the required objects before

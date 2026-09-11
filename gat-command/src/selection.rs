@@ -88,8 +88,8 @@ mod tests {
                     "runtime".into(),
                     SelectionConfig {
                         path: gat_core::lexical_path::GatSubpath::normalize("models").unwrap(),
-                        include: Some(vec![GatGlobPattern::parse("**").unwrap()]),
-                        exclude: Some(vec![GatGlobPattern::parse("experimental/**").unwrap()]),
+                        include: vec![GatGlobPattern::parse("**").unwrap()],
+                        exclude: vec![GatGlobPattern::parse("experimental/**").unwrap()],
                     },
                 )]),
             },

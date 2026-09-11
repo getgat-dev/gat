@@ -50,7 +50,8 @@ impl From<SyncError> for Failure {
                 CacheFailureKind::StateIncompatible | CacheFailureKind::StateCorrupt,
             )
             | SyncErrorKind::MutationAuthority(
-                MutationAuthorityFailureKind::RepositoryLocked
+                MutationAuthorityFailureKind::Cancelled
+                | MutationAuthorityFailureKind::RepositoryLocked
                 | MutationAuthorityFailureKind::InvalidArgument
                 | MutationAuthorityFailureKind::Conflict,
             ) => Self::expected_with_source(diagnostic, err),
@@ -277,6 +278,9 @@ fn classify_excludes(kind: &ExcludesFailureKind) -> Diagnostic {
 
 fn classify_mutation_authority(kind: MutationAuthorityFailureKind) -> Diagnostic {
     match kind {
+        MutationAuthorityFailureKind::Cancelled => {
+            Diagnostic::new(ErrorCode::Interrupted, "Operation cancelled")
+        }
         MutationAuthorityFailureKind::Lock(kind) => {
             super::repository::repository_access_diagnostic(
                 gat_engine::RepositoryAccessFailureKind::Lock(kind),

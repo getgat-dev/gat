@@ -74,8 +74,14 @@ Routine sparse updates can then rewrite only affected shards.
     cost of more directories. `0` returns to a flat lock.
   </Step>
   <Step title="Convert and review">
-    The next lock-writing or reshaping command, such as `gat sync`, converts the
-    full lock once. Inspect the resulting metadata with Git.
+    Run sync to convert the lock, then review the metadata changes:
+
+    ```sh
+    gat sync
+    git status --short -- gat.yaml gat.lock
+    ```
+
+    Sync also updates working files; preserve any local edits first.
   </Step>
   <Step title="Commit the shared setting and lock">
     ```sh

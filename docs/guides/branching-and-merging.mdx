@@ -207,11 +207,6 @@ Use `git rebase` and `git commit --amend` normally. The merge driver resolves
 independent path changes during rebase; resolve incompatible changes using the
 steps above, then run `git rebase --continue`.
 
-<Warning>
-  During a rebase, Git's “ours” is the branch you are rebasing onto and “theirs”
-  is the commit being replayed. Inspect both stages before choosing a whole side.
-</Warning>
-
 The post-rewrite hook syncs after rebase or amend. After operations without a
 matching hook, such as `git reset --hard` or `git restore`, run `gat sync`
 yourself, or `gat pull` if objects are missing. See

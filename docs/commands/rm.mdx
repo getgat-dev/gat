@@ -3,8 +3,10 @@ title: "gat rm"
 description: "Stop tracking files or directories, optionally keeping local files."
 ---
 
-Selection is matched against `gat.lock`, so missing working-tree files and lock-only glob matches remain removable. By
-default Gat removes both tracked rows and working files; `--cached` retains the files while dropping <Tooltip tip="Gat’s responsibility for tracking and restoring a path. Removing ownership is different from deleting cached content; old Git snapshots can still refer to those bytes.">Gat ownership</Tooltip>.
+`gat rm PATH` stops tracking matching files and deletes their working copies.
+Use `gat rm --cached PATH` to stop tracking while keeping the files on disk.
+Paths and glob patterns match entries in `gat.lock`, so you can also remove
+entries whose working files are missing.
 
 Commit the changed `gat.lock` to share the removal; see the
 [publishing workflow](/guides/branching-and-merging#typical-workflows). Earlier

@@ -3,8 +3,10 @@ title: "gat diff"
 description: "Compare files across revisions or against the working tree."
 ---
 
-Compare tracked paths and content IDs across <Tooltip tip="Git commit identifiers such as a branch, tag, commit hash, or HEAD~2. Gat reads the lock at each selected commit to compare file versions." cta="Resolve ambiguous names" href="/concepts/history-selection#when-a-branch-and-tag-share-a-name">revisions</Tooltip>, independent of the lock's
-text layout. Mount-owned entries show their mount name.
+Compare tracked paths and content IDs across <Tooltip tip="Git commit identifiers such as a branch, tag, commit hash, or HEAD~2. Gat reads the lock at each selected commit to compare file versions." cta="Resolve ambiguous names" href="/concepts/history-selection#when-a-branch-and-tag-share-a-name">revisions</Tooltip>.
+This shows which file versions changed, not differences within binary contents.
+When comparing the current lock, run [gat add](/commands/add) first to include unrecorded
+file edits. Mount-owned entries show their mount name.
 
 | Revisions supplied | Comparison |
 | --- | --- |

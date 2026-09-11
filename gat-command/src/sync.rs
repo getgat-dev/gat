@@ -411,6 +411,7 @@ fn sync_with_operation_impl(
     request: ReconciliationRequest<'_>,
     progress: &dyn ProgressReporter,
 ) -> Result<SyncOutcome, SyncError> {
+    operation.check_cancelled()?;
     let options = EngineSyncOptions {
         selection: request.selection,
         force: request.force,
@@ -443,6 +444,7 @@ fn sync_with_operation_impl(
     let mut outcome =
         sync_from_snapshot(operation, &first_pass_options, Some(&sync_task.handle()))?;
     sync_task.finish();
+    operation.check_cancelled()?;
 
     let mut repaired = 0;
     let mut repair_failures = Vec::new();

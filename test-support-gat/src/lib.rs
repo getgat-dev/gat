@@ -354,6 +354,12 @@ impl ChildGuard {
         Self { child }
     }
 
+    /// OS process identifier, for process-boundary signal tests.
+    #[must_use]
+    pub fn id(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Takes the child's stdin handle (e.g. to close it, signaling the
     /// child to exit gracefully). Returns `None` if already taken or the
     /// child wasn't spawned with a piped stdin.
@@ -366,6 +372,11 @@ impl ChildGuard {
     /// taken or the child wasn't spawned with a piped stdout.
     pub const fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
         self.child.stdout.take()
+    }
+
+    /// Takes stderr for process-boundary output assertions.
+    pub const fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
+        self.child.stderr.take()
     }
 
     /// Sends a kill signal to the child (see [`Child::kill`]).
