@@ -14,7 +14,6 @@ use gat_engine::{
     SyncOptions as EngineSyncOptions, SyncOutcome as EngineSyncOutcome, Validation,
     sync_from_snapshot,
 };
-use std::fmt;
 
 #[derive(Clone, Debug)]
 pub struct SyncRequest {
@@ -40,6 +39,8 @@ pub struct PullRequest {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HookRequest;
 
+/// Report of a completed reconciliation attempt, including any unresolved paths.
+/// Execution failures are returned separately as [`SyncError`].
 #[derive(Debug)]
 pub struct SyncOutcome {
     pub scope: super::SelectionScope,
@@ -49,36 +50,14 @@ pub struct SyncOutcome {
     pub repair_failures: Vec<super::RepairFailure>,
     pub reshaped: Option<LockShardLevels>,
     pub shallow: bool,
-    pub completion: SyncCompletionStatus,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum SyncCompletionStatus {
-    #[default]
-    Clean,
-    Incomplete {
-        conflicts: usize,
-        missing: usize,
-        corrupted: usize,
-    },
-}
-
-impl SyncCompletionStatus {
-    const fn from_outcome(outcome: &EngineSyncOutcome, hook_mode: bool) -> Self {
-        if hook_mode || outcome.is_clean() {
-            Self::Clean
-        } else {
-            Self::Incomplete {
-                conflicts: outcome.conflicts.len(),
-                missing: outcome.missing.len(),
-                corrupted: outcome.corrupted.len(),
-            }
-        }
-    }
-
+impl SyncOutcome {
+    /// Whether reconciliation left no conflicts, missing objects, or corrupted objects.
+    /// This describes filesystem facts independently of the invocation's exit policy.
     #[must_use]
-    pub const fn is_clean(self) -> bool {
-        matches!(self, Self::Clean)
+    pub const fn is_clean(&self) -> bool {
+        self.outcome.is_clean()
     }
 }
 
@@ -96,8 +75,6 @@ pub enum SyncError {
     Reconciliation(#[from] EngineSyncError),
     #[error(transparent)]
     Fetch(#[from] Box<super::FetchError>),
-    #[error(transparent)]
-    Incomplete(#[from] Box<SyncIncompleteError>),
 }
 
 impl From<gat_engine::RepoSnapshotError> for SyncError {
@@ -121,40 +98,6 @@ impl From<gat_engine::RepoError> for SyncError {
 impl From<super::FetchError> for SyncError {
     fn from(error: super::FetchError) -> Self {
         Self::Fetch(Box::new(error))
-    }
-}
-
-#[derive(Debug)]
-pub struct SyncIncompleteError {
-    outcome: SyncOutcome,
-}
-
-impl SyncIncompleteError {
-    const fn new(outcome: SyncOutcome) -> Self {
-        Self { outcome }
-    }
-
-    #[must_use]
-    pub fn into_outcome(self) -> SyncOutcome {
-        self.outcome
-    }
-}
-
-impl fmt::Display for SyncIncompleteError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "sync outcome left unreconciled paths behind")
-    }
-}
-
-impl std::error::Error for SyncIncompleteError {}
-
-pub fn recover_incomplete(
-    result: Result<SyncOutcome, SyncError>,
-) -> Result<SyncOutcome, SyncError> {
-    match result {
-        Ok(outcome) => Ok(outcome),
-        Err(SyncError::Incomplete(incomplete)) => Ok(incomplete.into_outcome()),
-        Err(error) => Err(error),
     }
 }
 
@@ -187,7 +130,6 @@ pub fn sync(
             rematerialize: request.rematerialize,
             fetched,
             shallow: false,
-            hook_mode: false,
         },
         progress,
     )
@@ -235,7 +177,6 @@ pub fn pull_with_desired_operation(
             rematerialize: false,
             fetched: fetched.fetched,
             shallow: fetched.shallow,
-            hook_mode: false,
         },
         progress,
     )
@@ -247,7 +188,6 @@ pub fn sync_with_operation(
     request: SyncRequest,
     fetched: usize,
     shallow: bool,
-    hook_mode: bool,
     progress: &dyn ProgressReporter,
 ) -> Result<SyncOutcome, SyncError> {
     let ResolvedSelection { selection, scope } =
@@ -271,7 +211,6 @@ pub fn sync_with_operation(
             rematerialize: request.rematerialize,
             fetched,
             shallow,
-            hook_mode,
         },
         progress,
     )
@@ -315,7 +254,6 @@ pub fn hook(
             rematerialize: false,
             fetched,
             shallow: false,
-            hook_mode: true,
         },
         progress,
     )
@@ -403,7 +341,6 @@ struct ReconciliationRequest<'a> {
     rematerialize: bool,
     fetched: usize,
     shallow: bool,
-    hook_mode: bool,
 }
 
 fn sync_with_operation_impl(
@@ -478,8 +415,7 @@ fn sync_with_operation_impl(
         outcome = run_sync_pass(operation, &options, progress)?;
     }
 
-    let completion = SyncCompletionStatus::from_outcome(&outcome, request.hook_mode);
-    let result = SyncOutcome {
+    Ok(SyncOutcome {
         scope: request.scope,
         outcome,
         fetched: request.fetched,
@@ -487,13 +423,7 @@ fn sync_with_operation_impl(
         repair_failures,
         reshaped,
         shallow: request.shallow,
-        completion,
-    };
-    if result.completion.is_clean() {
-        Ok(result)
-    } else {
-        Err(Box::new(SyncIncompleteError::new(result)).into())
-    }
+    })
 }
 
 fn run_sync_pass(
@@ -535,18 +465,6 @@ mod tests {
         assert_eq!(
             resolve_validation(&config, false, false),
             Validation::TrustState
-        );
-    }
-
-    #[test]
-    fn hook_completion_never_escalates_recoverable_path_conditions() {
-        let outcome = EngineSyncOutcome {
-            conflicts: vec![gat_core::lexical_path::GatPath::parse_canonical("a.bin").unwrap()],
-            ..Default::default()
-        };
-        assert_eq!(
-            SyncCompletionStatus::from_outcome(&outcome, true),
-            SyncCompletionStatus::Clean
         );
     }
 }

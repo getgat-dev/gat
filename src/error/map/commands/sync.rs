@@ -11,14 +11,6 @@ impl From<gat_command::SyncError> for Failure {
             gat_command::SyncError::DesiredRevision(source) => source.into(),
             gat_command::SyncError::Reconciliation(source) => source.into(),
             gat_command::SyncError::Fetch(source) => (*source).into(),
-            gat_command::SyncError::Incomplete(source) => {
-                let outcome = source.into_outcome();
-                super::super::app::sync_completion_conflict(
-                    outcome.outcome.conflicts.len(),
-                    outcome.outcome.missing.len(),
-                    outcome.outcome.corrupted.len(),
-                )
-            }
         }
     }
 }

@@ -790,16 +790,14 @@ pub fn run(cli: Cli, context: &Context, progress: &dyn ProgressReporter) -> Resu
                 selection,
                 remote,
                 history,
-            } => Ok(Outcome::Pulled(gat_command::recover_incomplete(
-                gat_command::pull(
-                    repo,
-                    PullRequest {
-                        selection: resolve_default_selection(repo, &selection)?,
-                        remote: remote.map(RemoteName::from_string),
-                        history: resolve_history_selection(history)?,
-                    },
-                    progress,
-                ),
+            } => Ok(Outcome::Pulled(gat_command::pull(
+                repo,
+                PullRequest {
+                    selection: resolve_default_selection(repo, &selection)?,
+                    remote: remote.map(RemoteName::from_string),
+                    history: resolve_history_selection(history)?,
+                },
+                progress,
             )?)),
             Command::Sync {
                 selection,
@@ -812,21 +810,19 @@ pub fn run(cli: Cli, context: &Context, progress: &dyn ProgressReporter) -> Resu
                 rematerialize,
             } => {
                 reject_dry_run_conflicts(dry_run, fetch, repair)?;
-                Ok(Outcome::Synced(gat_command::recover_incomplete(
-                    gat_command::sync(
-                        repo,
-                        SyncRequest {
-                            selection: resolve_default_selection(repo, &selection)?,
-                            force,
-                            dry_run,
-                            trust_state,
-                            fetch,
-                            repair,
-                            remote: remote.map(RemoteName::from_string),
-                            rematerialize,
-                        },
-                        progress,
-                    ),
+                Ok(Outcome::Synced(gat_command::sync(
+                    repo,
+                    SyncRequest {
+                        selection: resolve_default_selection(repo, &selection)?,
+                        force,
+                        dry_run,
+                        trust_state,
+                        fetch,
+                        repair,
+                        remote: remote.map(RemoteName::from_string),
+                        rematerialize,
+                    },
+                    progress,
                 )?))
             }
             Command::System { action } => Ok(Outcome::System(
@@ -842,8 +838,10 @@ pub fn run(cli: Cli, context: &Context, progress: &dyn ProgressReporter) -> Resu
                     let mut discard = Vec::new();
                     let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut discard);
                 }
-                Ok(Outcome::Hooked(gat_command::recover_incomplete(
-                    gat_command::hook(repo, HookRequest, &NoopProgress),
+                Ok(Outcome::Hooked(gat_command::hook(
+                    repo,
+                    HookRequest,
+                    &NoopProgress,
                 )?))
             }
             Command::MergeDriver {
@@ -918,13 +916,12 @@ pub fn run(cli: Cli, context: &Context, progress: &dyn ProgressReporter) -> Resu
 
 /// Exit status for a completed report, independent of diagnostic rendering.
 /// An incomplete outcome has already supplied its own explanation; it must not
-/// be turned into a second fatal diagnostic after rendering.
+/// be turned into a second fatal diagnostic after rendering. Hooks tolerate
+/// unresolved paths while preserving them in the report.
 #[must_use]
 pub fn exit_code(outcome: &Outcome) -> u8 {
     match outcome {
-        Outcome::Pulled(outcome) | Outcome::Synced(outcome) | Outcome::Hooked(outcome) => {
-            u8::from(!outcome.completion.is_clean())
-        }
+        Outcome::Pulled(outcome) | Outcome::Synced(outcome) => u8::from(!outcome.is_clean()),
         _ => 0,
     }
 }
@@ -1548,31 +1545,56 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_outcomes_exit_unsuccessfully_without_a_second_diagnostic() {
-        let outcome = Outcome::Synced(gat_command::SyncOutcome {
-            scope: gat_command::SelectionScope::Unrestricted,
-            outcome: gat_engine::SyncOutcome::default(),
-            fetched: 0,
-            repaired: 0,
-            repair_failures: Vec::new(),
-            reshaped: None,
-            shallow: false,
-            completion: gat_command::SyncCompletionStatus::Incomplete {
-                conflicts: 2,
-                missing: 3,
-                corrupted: 4,
+    fn unresolved_paths_fail_sync_and_pull_but_are_tolerated_by_hooks() {
+        use gat_core::{lexical_path::GatPath, oid::Oid};
+        let path = GatPath::parse_canonical("local.bin").unwrap();
+        let oid = Oid::from_bytes([0xaa; 32]);
+        for problems in [
+            gat_engine::SyncOutcome {
+                conflicts: vec![path.clone()],
+                ..Default::default()
             },
-        });
-        assert_eq!(exit_code(&outcome), 1);
-        let Outcome::Synced(sync) = outcome else {
-            unreachable!()
-        };
-        let pulled = Outcome::Pulled(sync);
-        assert_eq!(exit_code(&pulled), 1);
-        let Outcome::Pulled(sync) = pulled else {
-            unreachable!()
-        };
-        assert_eq!(exit_code(&Outcome::Hooked(sync)), 1);
+            gat_engine::SyncOutcome {
+                missing: vec![(path.clone(), oid)],
+                ..Default::default()
+            },
+            gat_engine::SyncOutcome {
+                corrupted: vec![(path, oid)],
+                ..Default::default()
+            },
+        ] {
+            for dry_run in [false, true] {
+                let report = gat_command::SyncOutcome {
+                    scope: gat_command::SelectionScope::Unrestricted,
+                    outcome: gat_engine::SyncOutcome {
+                        dry_run,
+                        ..problems.clone()
+                    },
+                    fetched: 0,
+                    repaired: 0,
+                    repair_failures: Vec::new(),
+                    reshaped: None,
+                    shallow: false,
+                };
+                assert!(!report.is_clean());
+                let synced = Outcome::Synced(report);
+                assert_eq!(exit_code(&synced), 1);
+                let Outcome::Synced(report) = synced else {
+                    unreachable!()
+                };
+                let pulled = Outcome::Pulled(report);
+                assert_eq!(exit_code(&pulled), 1);
+                let Outcome::Pulled(report) = pulled else {
+                    unreachable!()
+                };
+                let hooked = Outcome::Hooked(report);
+                assert_eq!(exit_code(&hooked), 0);
+                let Outcome::Hooked(report) = hooked else {
+                    unreachable!()
+                };
+                assert!(!report.is_clean());
+            }
+        }
     }
 
     #[test]
@@ -1585,7 +1607,6 @@ mod tests {
             repair_failures: Vec::new(),
             reshaped: None,
             shallow: false,
-            completion: gat_command::SyncCompletionStatus::Clean,
         });
         assert_eq!(exit_code(&outcome), 0);
     }

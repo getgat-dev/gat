@@ -500,4 +500,10 @@ fn incomplete_sync_has_one_completion_report_and_a_nonzero_exit() {
         assert!(!text.contains("✗ error:"), "{text}");
         assert!(result.stdout.is_empty());
     }
+    let result = gat(dir, &["hook", "post-checkout"]);
+    assert_ok(&result, "hook tolerates unresolved paths");
+    let text = stderr(&result);
+    assert_eq!(text.matches("Sync incomplete").count(), 1, "{text}");
+    assert!(text.contains("Conflicts: 1"), "{text}");
+    assert!(!text.contains("Sync complete"), "{text}");
 }
