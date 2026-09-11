@@ -555,6 +555,25 @@ mod tests {
     use gat_core::lock::Lock;
     use gat_io::StateStore;
 
+    #[test]
+    fn characterize_legacy_execution_without_state_store() {
+        let tmp = git_repo();
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap().repository_at(tmp.path().to_path_buf());
+        track(&repo, "nested/file.bin", b"original");
+        sync(&repo, &SyncOptions::default()).unwrap();
+        let before = materialized_row(&repo, "nested/file.bin");
+        let plan = SyncPlan {
+            actions: vec![SyncAction::Remove(GatPath::parse_canonical("nested/file.bin").unwrap())],
+            validated_state_mutations: Vec::new(),
+        };
+        let outcome = apply_actions(&repo, &repo.resolved_cache_root().unwrap().open_client(),
+            &Default::default(), None, &plan, false, true).unwrap();
+        assert_eq!(outcome.removed, 1);
+        assert!(!tmp.path().join("nested").exists());
+        assert_eq!(materialized_row(&repo, "nested/file.bin"), before);
+    }
+
     fn ingest(repo: &Repo, content: impl std::io::Read) -> gat_io::Ingested {
         repo.resolved_cache_root()
             .unwrap()
