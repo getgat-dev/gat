@@ -95,10 +95,8 @@ pub enum Validation {
 
 /// Bundles [`Validation`] with whether this reconciliation run should
 /// rematerialize already-correct paths, so [`plan::plan_into_sink`]/
-/// [`plan::plan_with_store`]/[`plan::merge_desired_with_prior`] (already
-/// at seven parameters -- see their doc comments on `TargetCtx`/
-/// `DesiredSource` for the same reasoning) don't need an eighth bare
-/// argument. Constructed once per sync run from
+/// [`plan::plan_with_store`]/[`plan::merge_desired_with_prior`] receive
+/// one reconciliation policy. Constructed once per sync run from
 /// [`SyncOptions`]; the read-only [`plan`] API never builds one with
 /// `rematerialize: true` -- only `gat sync --rematerialize`'s mutating
 /// and dry-run paths do.
@@ -559,13 +557,7 @@ fn execute_mutating_sync(
                     };
                     set_phase(progress, ProgressActivity::ApplyingChanges);
                     let chunk_outcome = execute::apply_actions(
-                        repo,
-                        cache,
-                        mode,
-                        Some(&mut store),
-                        &chunk_plan,
-                        opts.force,
-                        true,
+                        repo, cache, mode, &mut store, chunk_plan, opts.force,
                     )?;
                     outcome.merge(chunk_outcome);
                 }
@@ -600,7 +592,7 @@ fn execute_mutating_sync(
     // Bounded plan/apply: the merge streams each classified
     // action straight into `ExecutePlanSink`, which applies it to the
     // working tree and persists its materialized-state delta in the same
-    // bounded batches `apply_actions` itself flushes by -- unlike the
+    // bounded batches used for collected plans -- unlike the
     // dry-run path above, this never collects a complete `SyncPlan` in
     // memory first. The sink writes through its own, separately opened
     // `StateStore` connection (SQLite WAL already lets one writer
@@ -612,13 +604,8 @@ fn execute_mutating_sync(
     let mut outcome = session
         .cache_session_mut()
         .sync_scoped_cache(cache_root, |cache| {
-            let mut sink = execute::ExecutePlanSink::new(
-                repo,
-                cache,
-                mode.clone(),
-                &mut write_store,
-                opts.force,
-            );
+            let mut sink =
+                execute::ExecutePlanSink::new(repo, cache, mode, &mut write_store, opts.force);
             plan::plan_into_sink(
                 repo,
                 cache,

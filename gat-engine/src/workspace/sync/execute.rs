@@ -4,12 +4,11 @@
 //! [`super::SyncOutcome`], updating materialized state, and refreshing
 //! Gat-managed excludes.
 //!
-//! `--dry-run` is threaded through as `apply_to_disk = false`: state and
-//! outcome counters are still built up exactly as a real run would, but
-//! nothing is written to the working tree, excludes, or materialized
-//! state.
+//! Preview and execution use separate sinks. They share decision resolution
+//! and outcome accounting; only the execution sink owns worktree and state
+//! persistence capabilities.
 
-use super::{Result, SyncAction, SyncError, SyncOutcome, SyncPlan};
+use super::{PlanSink, Result, SyncAction, SyncError, SyncOutcome, SyncPlan};
 use crate::repository::Repository as Repo;
 use gat_core::lexical_path::GatPath;
 use gat_core::lock::Entry;
@@ -77,10 +76,6 @@ impl PendingBatch {
 
     fn push_mutation(&mut self, mutation: StateMutation) {
         self.ops.push(mutation);
-    }
-
-    fn push_upsert(&mut self, mutation: StateMutation) {
-        self.push_mutation(mutation);
     }
 
     /// Records the logical state removal and, when a file was unlinked, the
@@ -183,127 +178,32 @@ fn do_remove(worktree: WorktreeClient<'_>, path: &GatPath) -> Result<Option<Remo
     Ok(worktree.remove(path)?)
 }
 
-/// Apply (or, for a plan-only tally, just count) one action, recursing into
-/// a `Conflict`'s `resolution` when `force` overrides it. `apply_to_disk` is
-/// false for `--dry-run`: the outcome is still tallied so the reported plan
-/// matches exactly what a real run would do, but nothing is written to the
-/// working tree or the materialized-state database.
-///
-/// Returns the confined absolute path this one action *actually* unlinked
-/// from disk, if any -- `Some` only for a real (`apply_to_disk`), applied
-/// `Remove` (directly or via a force-applied `Conflict`) whose
-/// `remove_file` call actually succeeded rather than finding the path
-/// already gone. Callers use this to know exactly which paths are
-/// eligible for ancestor-directory pruning, without re-deriving it.
-///
-/// When `pending` is `Some` (a real, non-dry-run execution), this only
-/// records that *this one action's* filesystem mutation succeeded --
-/// [`PendingBatch::push_upsert`]/[`PendingBatch::push_remove`] -- without
-/// itself opening a transaction. The caller ([`apply_actions`]) flushes
-/// the batch to `SQLite` in bounded groups, and always flushes whatever has
-/// accumulated so far before propagating an error, so a filesystem
-/// mutation this function performs is never left unrecorded on a
-/// successful return, and state never claims a mutation succeeded before
-/// it actually did.
-/// Bundles the worktree capability, the operation-scoped cache client, and
-/// configured materialization mode used by each physical apply step.
-pub(crate) struct TargetCtx<'a> {
-    pub(crate) worktree: WorktreeClient<'a>,
-    pub(crate) cache: &'a CacheClient,
-    pub(crate) mode: &'a gat_core::config::MaterializationStrategy,
+/// Resolve force-overridden conflicts without changing the decision or touching I/O.
+fn resolve_action(mut action: &SyncAction, force: bool) -> &SyncAction {
+    if force {
+        while let SyncAction::Conflict { resolution, .. } = action {
+            action = resolution;
+        }
+    }
+    action
 }
 
-fn apply(
-    target: Option<&TargetCtx<'_>>,
-    action: &SyncAction,
-    force: bool,
-    apply_to_disk: bool,
-    outcome: &mut SyncOutcome,
-    pending: Option<&mut PendingBatch>,
-) -> Result<Option<RemovalReceipt>> {
+/// Account for a resolved decision after its mutation succeeds, or immediately
+/// for preview. Unresolved paths are retained; mutations only increment counters.
+fn record_action(outcome: &mut SyncOutcome, action: &SyncAction) {
     match action {
-        SyncAction::Materialize(e) => {
-            if apply_to_disk {
-                let target = target.expect("disk application requires a target");
-                let mutation = do_materialize(target.worktree, target.cache, target.mode, e)?;
-                if let Some(pending) = pending {
-                    pending.push_upsert(mutation);
-                }
-            }
-            outcome.materialized += 1;
-            Ok(None)
-        }
-        SyncAction::Replace(e) => {
-            if apply_to_disk {
-                let target = target.expect("disk application requires a target");
-                let mutation = do_replace(target.worktree, target.cache, target.mode, e)?;
-                if let Some(pending) = pending {
-                    pending.push_upsert(mutation);
-                }
-            }
-            outcome.replaced += 1;
-            Ok(None)
-        }
-        SyncAction::Rematerialize(e) => {
-            if apply_to_disk {
-                let target = target.expect("disk application requires a target");
-                let mutation = do_rematerialize(target.worktree, target.cache, target.mode, e)?;
-                if let Some(pending) = pending {
-                    pending.push_upsert(mutation);
-                }
-            }
-            outcome.rematerialized += 1;
-            Ok(None)
-        }
-        SyncAction::Remove(path) => {
-            let resolved = if apply_to_disk {
-                let target = target.expect("disk application requires a target");
-                let resolved = do_remove(target.worktree, path)?;
-                if let Some(pending) = pending {
-                    pending.push_remove(path.clone(), resolved);
-                    None
-                } else {
-                    resolved
-                }
-            } else {
-                None
-            };
-            outcome.removed += 1;
-            Ok(resolved)
-        }
-        SyncAction::MissingObject { path, oid } => {
-            outcome.missing.push((path.clone(), *oid));
-            Ok(None)
-        }
-        SyncAction::Corrupted { path, oid } => {
-            outcome.corrupted.push((path.clone(), *oid));
-            Ok(None)
-        }
-        SyncAction::Conflict { path, resolution } => {
-            if force {
-                apply(target, resolution, force, apply_to_disk, outcome, pending)
-            } else {
-                outcome.conflicts.push(path.clone());
-                Ok(None)
-            }
-        }
+        SyncAction::Materialize(_) => outcome.materialized += 1,
+        SyncAction::Replace(_) => outcome.replaced += 1,
+        SyncAction::Rematerialize(_) => outcome.rematerialized += 1,
+        SyncAction::Remove(_) => outcome.removed += 1,
+        SyncAction::MissingObject { path, oid } => outcome.missing.push((path.clone(), *oid)),
+        SyncAction::Corrupted { path, oid } => outcome.corrupted.push((path.clone(), *oid)),
+        SyncAction::Conflict { path, .. } => outcome.conflicts.push(path.clone()),
     }
 }
 
-/// [`super::PlanSink`] for `--dry-run`: tallies
-/// each classified action directly into a [`SyncOutcome`] as it streams
-/// past, via the same [`apply`] helper the mutating path uses with
-/// `apply_to_disk: false`, instead of first collecting every action into
-/// a complete [`SyncPlan`] (`plan::CollectPlanSink`) and only then
-/// tallying it. `--rematerialize --dry-run` on a large, entirely clean
-/// repository classifies (almost) every selected path as
-/// `SyncAction::Rematerialize`; retaining all of them in one `Vec` before
-/// tallying would grow memory `O(selected paths)` purely to report a
-/// dry-run summary, defeating the same boundedness the mutating path
-/// already has via [`ExecutePlanSink`]. Only the handful of per-path
-/// values a dry-run report must actually show the user --
-/// conflicts/missing/corrupted paths -- are retained; every other action
-/// is folded into a counter and dropped.
+/// Preview sink with no worktree or persistence capabilities. Actions are tallied
+/// as they stream past, retaining only the unresolved paths needed by the report.
 pub(crate) struct DryRunPlanSink {
     force: bool,
     outcome: SyncOutcome,
@@ -332,32 +232,23 @@ impl DryRunPlanSink {
 
 impl super::PlanSink for DryRunPlanSink {
     fn action(&mut self, action: SyncAction) -> Result<()> {
-        apply(None, &action, self.force, false, &mut self.outcome, None).map(|_| ())
+        record_action(&mut self.outcome, resolve_action(&action, self.force));
+        Ok(())
     }
 
     fn state_mutation(&mut self, _mutation: StateMutation) -> Result<()> {
-        // Dry-run never persists a stat refresh -- nothing to do but
-        // discard it, exactly as `apply_actions(.., apply_to_disk: false)`
-        // did (only `apply_to_disk` gated whether `plan.validated_state_mutations`
-        // was ever applied).
+        // Preview does not persist validated stat proofs.
         Ok(())
     }
 }
 
-/// [`super::PlanSink`] that applies each action (and persists each stat
-/// refresh) as it arrives, in the same bounded [`PendingBatch`] groups
-/// [`apply_actions`] itself flushes by -- the mutating, non-dry-run
-/// `Validation::Validate` sync path's bounded plan/apply shape,
-/// matching the bounded batches `Validation::TrustState`'s dirty-row fast
-/// path already applies via [`apply_actions`]. `--dry-run` instead uses
-/// [`DryRunPlanSink`], which tallies without ever collecting a complete
-/// [`SyncPlan`] or opening any materialized-state batch: only a real,
-/// mutating sync has any already-applied filesystem state that needs its
-/// materialized-state commit bounded this way.
+/// Execution boundary for both streamed decisions and collected plans. Successful
+/// mutations and stat refreshes share one ordered, bounded persistence batch.
+/// Call [`Self::finish`] after the final decision to flush the remaining batch.
 pub(crate) struct ExecutePlanSink<'a> {
     worktree: WorktreeClient<'a>,
     cache: &'a CacheClient,
-    mode: gat_core::config::MaterializationStrategy,
+    mode: &'a gat_core::config::MaterializationStrategy,
     force: bool,
     store: &'a mut StateStore,
     pending: PendingBatch,
@@ -368,7 +259,7 @@ impl<'a> ExecutePlanSink<'a> {
     pub(crate) fn new(
         repo: &'a Repo,
         cache: &'a CacheClient,
-        mode: gat_core::config::MaterializationStrategy,
+        mode: &'a gat_core::config::MaterializationStrategy,
         store: &'a mut StateStore,
         force: bool,
     ) -> Self {
@@ -392,35 +283,35 @@ impl<'a> ExecutePlanSink<'a> {
     }
 }
 
-impl super::PlanSink for ExecutePlanSink<'_> {
-    fn action(&mut self, action: SyncAction) -> Result<()> {
-        let target = TargetCtx {
-            worktree: self.worktree,
-            cache: self.cache,
-            mode: &self.mode,
-        };
-        let result = apply(
-            Some(&target),
-            &action,
-            self.force,
-            true,
-            &mut self.outcome,
-            Some(&mut self.pending),
-        );
-        if let Err(e) = result {
-            return Err(flush_after_failure(
-                e,
-                self.pending.flush(self.store, self.worktree),
-            ));
+impl ExecutePlanSink<'_> {
+    fn apply_action(&mut self, action: &SyncAction) -> Result<()> {
+        let action = resolve_action(action, self.force);
+        match action {
+            SyncAction::Materialize(entry) => {
+                let mutation = do_materialize(self.worktree, self.cache, self.mode, entry)?;
+                self.pending.push_mutation(mutation);
+            }
+            SyncAction::Replace(entry) => {
+                let mutation = do_replace(self.worktree, self.cache, self.mode, entry)?;
+                self.pending.push_mutation(mutation);
+            }
+            SyncAction::Rematerialize(entry) => {
+                let mutation = do_rematerialize(self.worktree, self.cache, self.mode, entry)?;
+                self.pending.push_mutation(mutation);
+            }
+            SyncAction::Remove(path) => {
+                let receipt = do_remove(self.worktree, path)?;
+                self.pending.push_remove(path.clone(), receipt);
+            }
+            SyncAction::MissingObject { .. }
+            | SyncAction::Corrupted { .. }
+            | SyncAction::Conflict { .. } => {}
         }
-        if self.pending.is_full() {
-            self.pending.flush(self.store, self.worktree)?;
-        }
+        record_action(&mut self.outcome, action);
         Ok(())
     }
 
-    fn state_mutation(&mut self, mutation: StateMutation) -> Result<()> {
-        self.pending.push_mutation(mutation);
+    fn flush_if_full(&mut self) -> Result<()> {
         if self.pending.is_full() {
             self.pending.flush(self.store, self.worktree)?;
         }
@@ -428,95 +319,42 @@ impl super::PlanSink for ExecutePlanSink<'_> {
     }
 }
 
-/// Apply every action in `plan` -- materializing/replacing/removing
-/// working-tree files and updating materialized state -- without
-/// touching `.git/info/exclude` at all. Split out so the mutating,
-/// non-dry-run `Validation::TrustState` dirty-row fast path
-/// (`crate::workspace::sync::sync`) can apply dirty-row actions and decide
-/// separately, via an exclude-fingerprint check, whether exclude
-/// regeneration (which needs the full desired lock) is even necessary.
-///
-/// Materialized-state changes for `plan.actions` are accumulated in a
-/// [`PendingBatch`] and flushed in bounded groups (every [`BATCH_SIZE`]
-/// mutations, plus once more at the end) rather than one transaction per
-/// action -- see [`PendingBatch`] for the durability invariant this
-/// preserves. If an action fails partway through, whatever has already
-/// accumulated is flushed before the error is returned, so already-
-/// successful filesystem mutations are never left unrecorded.
+impl super::PlanSink for ExecutePlanSink<'_> {
+    fn action(&mut self, action: SyncAction) -> Result<()> {
+        if let Err(primary) = self.apply_action(&action) {
+            return Err(flush_after_failure(
+                primary,
+                self.pending.flush(self.store, self.worktree),
+            ));
+        }
+        self.flush_if_full()
+    }
+
+    fn state_mutation(&mut self, mutation: StateMutation) -> Result<()> {
+        self.pending.push_mutation(mutation);
+        self.flush_if_full()
+    }
+}
+
+/// Feed a collected plan through the same execution boundary as streaming plans.
+/// Actions precede validated stat refreshes, preserving the collected plan's
+/// mutation order. Excludes are reconciled separately by the caller.
 pub(crate) fn apply_actions(
     repo: &Repo,
     cache: &CacheClient,
     mode: &gat_core::config::MaterializationStrategy,
-    store: Option<&mut StateStore>,
-    plan: &SyncPlan,
+    store: &mut StateStore,
+    plan: SyncPlan,
     force: bool,
-    apply_to_disk: bool,
 ) -> Result<SyncOutcome> {
-    let target = TargetCtx {
-        worktree: repo.worktree_client(),
-        cache,
-        mode,
-    };
-    let mut outcome = SyncOutcome {
-        dry_run: !apply_to_disk,
-        ..Default::default()
-    };
-    if let Some(store) = store {
-        let mut pending = PendingBatch::default();
-        for action in &plan.actions {
-            let result = apply(
-                Some(&target),
-                action,
-                force,
-                apply_to_disk,
-                &mut outcome,
-                Some(&mut pending),
-            );
-            if let Err(e) = result {
-                return Err(flush_after_failure(
-                    e,
-                    pending.flush(store, target.worktree),
-                ));
-            }
-            if pending.is_full() {
-                pending.flush(store, target.worktree)?;
-            }
-        }
-        if apply_to_disk {
-            for mutation in &plan.validated_state_mutations {
-                pending.push_mutation(mutation.clone());
-                if pending.is_full() {
-                    pending.flush(store, target.worktree)?;
-                }
-            }
-        }
-        pending.flush(store, target.worktree)?;
-    } else {
-        // No materialized store to batch against, but a real
-        // (non-dry-run) remove still needs its emptied ancestors
-        // pruned. `apply`'s return value is already exactly the
-        // resolved path it actually unlinked (or `None` if nothing
-        // was), so no re-derivation or second confinement pass is
-        // needed here.
-        let mut removals = Vec::new();
-        for action in &plan.actions {
-            let resolved = apply(
-                Some(&target),
-                action,
-                force,
-                apply_to_disk,
-                &mut outcome,
-                None,
-            )?;
-            if let Some(resolved) = resolved {
-                removals.push(resolved);
-            }
-        }
-        if !removals.is_empty() {
-            target.worktree.prune(&removals)?;
-        }
+    let mut sink = ExecutePlanSink::new(repo, cache, mode, store, force);
+    for action in plan.actions {
+        sink.action(action)?;
     }
-    Ok(outcome)
+    for mutation in plan.validated_state_mutations {
+        sink.state_mutation(mutation)?;
+    }
+    sink.finish()
 }
 
 /// Test-only instrumentation: counts actual [`do_rematerialize`]
@@ -556,22 +394,135 @@ mod tests {
     use gat_io::StateStore;
 
     #[test]
-    fn characterize_legacy_execution_without_state_store() {
-        let tmp = git_repo();
-        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
-            .unwrap().repository_at(tmp.path().to_path_buf());
-        track(&repo, "nested/file.bin", b"original");
-        sync(&repo, &SyncOptions::default()).unwrap();
-        let before = materialized_row(&repo, "nested/file.bin");
-        let plan = SyncPlan {
-            actions: vec![SyncAction::Remove(GatPath::parse_canonical("nested/file.bin").unwrap())],
-            validated_state_mutations: Vec::new(),
-        };
-        let outcome = apply_actions(&repo, &repo.resolved_cache_root().unwrap().open_client(),
-            &Default::default(), None, &plan, false, true).unwrap();
-        assert_eq!(outcome.removed, 1);
-        assert!(!tmp.path().join("nested").exists());
-        assert_eq!(materialized_row(&repo, "nested/file.bin"), before);
+    fn preview_and_execution_account_for_every_action_with_and_without_force() {
+        for force in [false, true] {
+            let tmp = git_repo();
+            let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+                .unwrap()
+                .repository_at(tmp.path().to_path_buf());
+            set_strategy(&repo, "copy");
+            track(&repo, "replace.bin", b"old");
+            let rematerialize = track(&repo, "rematerialize.bin", b"unchanged");
+            let remove = track(&repo, "remove.bin", b"remove");
+            track(&repo, "conflict.bin", b"local");
+            sync(&repo, &SyncOptions::default()).unwrap();
+            let create = track(&repo, "create.bin", b"created");
+            let replace = track(&repo, "replace.bin", b"new");
+            let conflict = track(&repo, "conflict.bin", b"desired");
+            let actions = vec![
+                SyncAction::Materialize(create),
+                SyncAction::Replace(replace),
+                SyncAction::Rematerialize(rematerialize),
+                SyncAction::Remove(remove.path.clone()),
+                SyncAction::MissingObject {
+                    path: GatPath::parse_canonical("missing.bin").unwrap(),
+                    oid: remove.oid,
+                },
+                SyncAction::Corrupted {
+                    path: GatPath::parse_canonical("corrupted.bin").unwrap(),
+                    oid: remove.oid,
+                },
+                SyncAction::Conflict {
+                    path: conflict.path.clone(),
+                    resolution: Box::new(SyncAction::Conflict {
+                        path: conflict.path.clone(),
+                        resolution: Box::new(SyncAction::Replace(conflict)),
+                    }),
+                },
+            ];
+            let mut preview = DryRunPlanSink::new(force);
+            for action in &actions {
+                preview.action(action.clone()).unwrap();
+            }
+            preview
+                .state_mutation(StateMutation::remove_exact(remove.path.clone()))
+                .unwrap();
+            let preview = preview.finish();
+            assert!(preview.dry_run);
+            assert!(!tmp.path().join("create.bin").exists());
+            assert_eq!(
+                std::fs::read(tmp.path().join("replace.bin")).unwrap(),
+                b"old"
+            );
+            assert!(tmp.path().join("remove.bin").exists());
+            assert!(materialized_row(&repo, "remove.bin").is_some());
+
+            let mut store = StateStore::open(repo.layout()).unwrap();
+            let executed = apply_actions(
+                &repo,
+                &repo.resolved_cache_root().unwrap().open_client(),
+                &"copy".parse().unwrap(),
+                &mut store,
+                SyncPlan {
+                    actions,
+                    validated_state_mutations: Vec::new(),
+                },
+                force,
+            )
+            .unwrap();
+            assert!(!executed.dry_run);
+            assert_eq!(preview.materialized, executed.materialized);
+            assert_eq!(preview.replaced, executed.replaced);
+            assert_eq!(preview.rematerialized, executed.rematerialized);
+            assert_eq!(preview.removed, executed.removed);
+            assert_eq!(preview.conflicts, executed.conflicts);
+            assert_eq!(preview.missing, executed.missing);
+            assert_eq!(preview.corrupted, executed.corrupted);
+            assert_eq!(executed.materialized, 1);
+            assert_eq!(executed.replaced, 1 + usize::from(force));
+            assert_eq!(executed.rematerialized, 1);
+            assert_eq!(executed.removed, 1);
+            assert_eq!(executed.conflicts.len(), usize::from(!force));
+            assert_eq!(executed.missing.len(), 1);
+            assert_eq!(executed.corrupted.len(), 1);
+            assert_eq!(
+                std::fs::read(tmp.path().join("conflict.bin")).unwrap(),
+                if force {
+                    b"desired".as_slice()
+                } else {
+                    b"local".as_slice()
+                }
+            );
+            assert!(materialized_row(&repo, "remove.bin").is_none());
+        }
+    }
+
+    #[test]
+    fn actions_and_state_refreshes_share_the_batch_limit_and_finish_flushes_the_tail() {
+        for last_is_action in [false, true] {
+            let tmp = git_repo();
+            let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+                .unwrap()
+                .repository_at(tmp.path().to_path_buf());
+            let first = track(&repo, "first.bin", b"first");
+            let tail = track(&repo, "tail.bin", b"tail");
+            let cache = repo.resolved_cache_root().unwrap().open_client();
+            let mode = "copy".parse().unwrap();
+            let mut store = StateStore::open(repo.layout()).unwrap();
+            let mut sink = ExecutePlanSink::new(&repo, &cache, &mode, &mut store, false);
+            // No-op state removals fill the batch without extra filesystem work.
+            let refresh =
+                StateMutation::remove_exact(GatPath::parse_canonical("absent.bin").unwrap());
+            for _ in 0..BATCH_SIZE - 2 {
+                sink.state_mutation(refresh.clone()).unwrap();
+            }
+            assert_eq!(sink.pending.len(), BATCH_SIZE - 2);
+            if last_is_action {
+                sink.state_mutation(refresh).unwrap();
+                sink.action(SyncAction::Materialize(first)).unwrap();
+            } else {
+                sink.action(SyncAction::Materialize(first)).unwrap();
+                assert!(materialized_row(&repo, "first.bin").is_none());
+                sink.state_mutation(refresh).unwrap();
+            }
+            assert_eq!(sink.pending.len(), 0);
+            assert!(materialized_row(&repo, "first.bin").is_some());
+            sink.action(SyncAction::Materialize(tail)).unwrap();
+            assert_eq!(sink.pending.len(), 1);
+            assert!(materialized_row(&repo, "tail.bin").is_none());
+            assert_eq!(sink.finish().unwrap().materialized, 2);
+            assert!(materialized_row(&repo, "tail.bin").is_some());
+        }
     }
 
     fn ingest(repo: &Repo, content: impl std::io::Read) -> gat_io::Ingested {
@@ -1380,10 +1331,9 @@ mod tests {
             &repo,
             &repo.resolved_cache_root().unwrap().open_client(),
             &Default::default(),
-            Some(&mut store),
-            &plan,
+            &mut store,
+            plan,
             false,
-            true,
         )
         .unwrap_err();
         assert_eq!(
@@ -1449,10 +1399,9 @@ mod tests {
             &repo,
             &repo.resolved_cache_root().unwrap().open_client(),
             &Default::default(),
-            Some(&mut store),
-            &plan,
+            &mut store,
+            plan,
             false,
-            true,
         )
         .unwrap_err();
         drop(store);
@@ -1500,10 +1449,9 @@ mod tests {
             &repo,
             &repo.resolved_cache_root().unwrap().open_client(),
             &Default::default(),
-            Some(&mut store),
-            &setup_plan,
+            &mut store,
+            setup_plan,
             false,
-            true,
         )
         .unwrap();
         drop(store);
@@ -1521,10 +1469,9 @@ mod tests {
             &repo,
             &repo.resolved_cache_root().unwrap().open_client(),
             &Default::default(),
-            Some(&mut store),
-            &plan,
+            &mut store,
+            plan,
             false,
-            true,
         )
         .unwrap();
         drop(store);
@@ -1564,10 +1511,9 @@ mod tests {
             &repo,
             &repo.resolved_cache_root().unwrap().open_client(),
             &Default::default(),
-            Some(&mut store),
-            &setup_plan,
+            &mut store,
+            setup_plan,
             false,
-            true,
         )
         .unwrap();
         drop(store);
@@ -1587,10 +1533,9 @@ mod tests {
             &repo,
             &repo.resolved_cache_root().unwrap().open_client(),
             &Default::default(),
-            Some(&mut store),
-            &plan,
+            &mut store,
+            plan,
             false,
-            true,
         )
         .unwrap();
         drop(store);
@@ -1778,10 +1723,9 @@ mod tests {
             &repo,
             &repo.resolved_cache_root().unwrap().open_client(),
             &Default::default(),
-            Some(&mut store),
-            &plan,
+            &mut store,
+            plan,
             false,
-            true,
         );
         assert!(
             result.is_err(),
