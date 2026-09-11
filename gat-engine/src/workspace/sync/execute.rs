@@ -179,13 +179,11 @@ fn do_remove(worktree: WorktreeClient<'_>, path: &GatPath) -> Result<Option<Remo
 }
 
 /// Resolve force-overridden conflicts without changing the decision or touching I/O.
-fn resolve_action(mut action: &SyncAction, force: bool) -> &SyncAction {
-    if force {
-        while let SyncAction::Conflict { resolution, .. } = action {
-            action = resolution;
-        }
+fn resolve_action(action: SyncAction, force: bool) -> SyncAction {
+    match action {
+        SyncAction::Conflict(resolution) if force => resolution.into_action(),
+        other => other,
     }
-    action
 }
 
 /// Account for a resolved decision after its mutation succeeds, or immediately
@@ -198,7 +196,7 @@ fn record_action(outcome: &mut SyncOutcome, action: &SyncAction) {
         SyncAction::Remove(_) => outcome.removed += 1,
         SyncAction::MissingObject { path, oid } => outcome.missing.push((path.clone(), *oid)),
         SyncAction::Corrupted { path, oid } => outcome.corrupted.push((path.clone(), *oid)),
-        SyncAction::Conflict { path, .. } => outcome.conflicts.push(path.clone()),
+        SyncAction::Conflict(resolution) => outcome.conflicts.push(resolution.path().clone()),
     }
 }
 
@@ -232,7 +230,7 @@ impl DryRunPlanSink {
 
 impl super::PlanSink for DryRunPlanSink {
     fn action(&mut self, action: SyncAction) -> Result<()> {
-        record_action(&mut self.outcome, resolve_action(&action, self.force));
+        record_action(&mut self.outcome, &resolve_action(action, self.force));
         Ok(())
     }
 
@@ -284,9 +282,9 @@ impl<'a> ExecutePlanSink<'a> {
 }
 
 impl ExecutePlanSink<'_> {
-    fn apply_action(&mut self, action: &SyncAction) -> Result<()> {
+    fn apply_action(&mut self, action: SyncAction) -> Result<()> {
         let action = resolve_action(action, self.force);
-        match action {
+        match &action {
             SyncAction::Materialize(entry) => {
                 let mutation = do_materialize(self.worktree, self.cache, self.mode, entry)?;
                 self.pending.push_mutation(mutation);
@@ -305,9 +303,9 @@ impl ExecutePlanSink<'_> {
             }
             SyncAction::MissingObject { .. }
             | SyncAction::Corrupted { .. }
-            | SyncAction::Conflict { .. } => {}
+            | SyncAction::Conflict(_) => {}
         }
-        record_action(&mut self.outcome, action);
+        record_action(&mut self.outcome, &action);
         Ok(())
     }
 
@@ -321,7 +319,7 @@ impl ExecutePlanSink<'_> {
 
 impl super::PlanSink for ExecutePlanSink<'_> {
     fn action(&mut self, action: SyncAction) -> Result<()> {
-        if let Err(primary) = self.apply_action(&action) {
+        if let Err(primary) = self.apply_action(action) {
             return Err(flush_after_failure(
                 primary,
                 self.pending.flush(self.store, self.worktree),
@@ -393,6 +391,122 @@ mod tests {
     use gat_core::lock::Lock;
     use gat_io::StateStore;
 
+    /// Decision precedence must agree between preview and streaming execution.
+    /// Removal never needs cache bytes, even if its former object is unusable.
+    #[test]
+    fn conflict_precedence_across_intents_cache_states_and_force() {
+        for intent in ["replace", "rematerialize", "remove"] {
+            for cache_state in ["valid", "missing", "corrupt"] {
+                for force in [false, true] {
+                    for dry_run in [false, true] {
+                        let tmp = git_repo();
+                        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+                            .unwrap()
+                            .repository_at(tmp.path().to_path_buf());
+                        set_strategy(&repo, "copy");
+                        let prior = track(&repo, "a.bin", b"prior");
+                        sync(&repo, &SyncOptions::default()).unwrap();
+                        std::fs::write(tmp.path().join("a.bin"), b"local").unwrap();
+                        let entry = match intent {
+                            "replace" => track(&repo, "a.bin", b"desired"),
+                            "remove" => {
+                                repo.save_lock(&Lock::default()).unwrap();
+                                prior
+                            }
+                            _ => prior,
+                        };
+                        let cache = repo.resolved_cache_root().unwrap();
+                        let object = cache.object_path_for_test(&entry.oid);
+                        match cache_state {
+                            "missing" => std::fs::remove_file(object).unwrap(),
+                            "corrupt" => {
+                                cache.make_object_writable_for_test(&entry.oid).unwrap();
+                                std::fs::write(object, b"broken").unwrap();
+                            }
+                            _ => {}
+                        }
+                        let outcome = sync(
+                            &repo,
+                            &SyncOptions {
+                                force,
+                                dry_run,
+                                rematerialize: intent == "rematerialize",
+                                validation: Validation::Validate,
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap();
+                        let corrupted = intent != "remove" && cache_state == "corrupt";
+                        let conflict = !force && !corrupted;
+                        let missing = force && intent != "remove" && cache_state == "missing";
+                        let changed = !corrupted && !conflict && !missing;
+                        let context =
+                            format!("{intent}/{cache_state}/force={force}/dry_run={dry_run}");
+                        assert_eq!(
+                            outcome.conflicts,
+                            if conflict {
+                                vec![entry.path.clone()]
+                            } else {
+                                vec![]
+                            },
+                            "{context}"
+                        );
+                        assert_eq!(
+                            outcome.missing,
+                            if missing {
+                                vec![(entry.path.clone(), entry.oid)]
+                            } else {
+                                vec![]
+                            },
+                            "{context}"
+                        );
+                        assert_eq!(
+                            outcome.corrupted,
+                            if corrupted {
+                                vec![(entry.path.clone(), entry.oid)]
+                            } else {
+                                vec![]
+                            },
+                            "{context}"
+                        );
+                        assert_eq!(outcome.materialized, 0, "{context}");
+                        assert_eq!(
+                            outcome.replaced,
+                            usize::from(changed && intent == "replace"),
+                            "{context}"
+                        );
+                        assert_eq!(
+                            outcome.rematerialized,
+                            usize::from(changed && intent == "rematerialize"),
+                            "{context}"
+                        );
+                        assert_eq!(
+                            outcome.removed,
+                            usize::from(changed && intent == "remove"),
+                            "{context}"
+                        );
+                        if changed && !dry_run && intent == "remove" {
+                            assert!(!tmp.path().join("a.bin").exists(), "{context}");
+                        } else {
+                            let expected: &[u8] = if !changed || dry_run {
+                                b"local"
+                            } else if intent == "replace" {
+                                b"desired"
+                            } else {
+                                b"prior"
+                            };
+                            assert_eq!(
+                                std::fs::read(tmp.path().join("a.bin")).unwrap(),
+                                expected,
+                                "{context}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn preview_and_execution_account_for_every_action_with_and_without_force() {
         for force in [false, true] {
@@ -422,13 +536,7 @@ mod tests {
                     path: GatPath::parse_canonical("corrupted.bin").unwrap(),
                     oid: remove.oid,
                 },
-                SyncAction::Conflict {
-                    path: conflict.path.clone(),
-                    resolution: Box::new(SyncAction::Conflict {
-                        path: conflict.path.clone(),
-                        resolution: Box::new(SyncAction::Replace(conflict)),
-                    }),
-                },
+                SyncAction::Conflict(super::super::ConflictResolution::Replace(conflict)),
             ];
             let mut preview = DryRunPlanSink::new(force);
             for action in &actions {

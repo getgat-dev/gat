@@ -144,6 +144,38 @@ pub struct SyncOptions {
     pub rematerialize: bool,
 }
 
+/// A finite resolution for a locally modified path. The payload is the sole
+/// source of path identity; corruption cannot be overridden by force.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConflictResolution {
+    Replace(Entry),
+    Rematerialize(Entry),
+    Remove(gat_core::lexical_path::GatPath),
+    /// Force exposes the missing object without modifying the working file.
+    MissingObject(Entry),
+}
+
+impl ConflictResolution {
+    #[must_use]
+    pub const fn path(&self) -> &gat_core::lexical_path::GatPath {
+        match self {
+            Self::Replace(entry) | Self::Rematerialize(entry) | Self::MissingObject(entry) => {
+                &entry.path
+            }
+            Self::Remove(path) => path,
+        }
+    }
+
+    fn into_action(self) -> SyncAction {
+        match self {
+            Self::Replace(entry) => SyncAction::Replace(entry),
+            Self::Rematerialize(entry) => SyncAction::Rematerialize(entry),
+            Self::Remove(path) => SyncAction::Remove(path),
+            Self::MissingObject(Entry { path, oid }) => SyncAction::MissingObject { path, oid },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncAction {
     /// Path has no working-tree file yet (or it was deleted); materialize
@@ -164,10 +196,7 @@ pub enum SyncAction {
     /// The working-tree file differs from what Gat last materialized
     /// there, so acting on it (`resolution`) would discard a local edit.
     /// Left untouched unless `SyncOptions::force` is set.
-    Conflict {
-        path: gat_core::lexical_path::GatPath,
-        resolution: Box<Self>,
-    },
+    Conflict(ConflictResolution),
     /// Desired object isn't in the local cache; the working-tree file (if
     /// any) is left exactly as-is.
     MissingObject {
