@@ -195,10 +195,18 @@ impl RemoteExecutor {
     pub(crate) fn forget_transfer_waiter(&self, id: RemoteId) {
         self.transfer.forget_waiter(id);
     }
+    #[cfg(test)]
     pub(crate) fn new(limits: RemoteLimits) -> Self {
+        Self::with_cancellation(limits, TransferCancellation::default())
+    }
+
+    pub(crate) fn with_cancellation(
+        limits: RemoteLimits,
+        cancellation: TransferCancellation,
+    ) -> Self {
         let operation_limit = std::cmp::max(limits.presence.global, limits.transfer.global);
         Self {
-            cancellation: TransferCancellation::default(),
+            cancellation,
             presence: RemoteBudget::new(limits.presence),
             transfer: admission::Admission::new(limits.transfer),
             local: Arc::new(Semaphore::new(8)),

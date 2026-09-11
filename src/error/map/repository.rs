@@ -24,6 +24,10 @@ const fn scope_word(scope: ConfigScope) -> &'static str {
 impl From<RepositoryError> for Failure {
     fn from(err: RepositoryError) -> Self {
         match &err {
+            RepositoryError::Cancelled => Self::expected(Diagnostic::new(
+                ErrorCode::Interrupted,
+                "Operation cancelled",
+            )),
             RepositoryError::PendingMountRecovery(source) => Self::infrastructure(
                 super::mount::recovery_diagnostic(source.recovery_failure_kind()),
                 err,

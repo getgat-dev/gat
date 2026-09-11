@@ -844,6 +844,36 @@ mod tests {
     }
 
     #[test]
+    fn saving_omits_redundant_resource_defaults_but_preserves_explicit_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gat.yaml");
+        for (input, expected) in [
+            (
+                "selections:\n  all:\n    path: .\n    include: []\n    exclude: []\n  models:\n    path: models\n    include: ['*.bin']\n    exclude: []\n",
+                "selections:\n  all: {}\n  models:\n    path: models\n    include: ['*.bin']\n",
+            ),
+            (
+                "remotes:\n  origin:\n    url: file:///storage\nroutes:\n  models:\n    path: models\n    remote: origin\nmounts:\n  models:\n    url: ../source\n    target: models\n    path: .\n    include: []\n    exclude: []\n",
+                "remotes:\n  origin:\n    url: file:///storage\nroutes:\n  models:\n    path: models\n    remote: origin\nmounts:\n  models:\n    url: ../source\n    target: models\n",
+            ),
+            (
+                "sync:\n  auto_fetch: false\nlock:\n  shard_levels: 0\ngit:\n  ignore_patterns: []\n",
+                "sync:\n  auto_fetch: false\nlock:\n  shard_levels: 0\ngit:\n  ignore_patterns: []\n",
+            ),
+        ] {
+            std::fs::write(&path, input).unwrap();
+            let config = ConfigStore::load_file(&path).unwrap();
+            ConfigStore::save_file(&path, &config).unwrap();
+            let saved: yaml_serde::Value =
+                yaml_serde::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let expected: yaml_serde::Value =
+                yaml_serde::from_str(&format!("version: {CONFIG_VERSION}\n{expected}")).unwrap();
+            assert_eq!(saved, expected);
+            assert_eq!(ConfigStore::load_file(&path).unwrap(), config);
+        }
+    }
+
+    #[test]
     fn save_file_creates_missing_parent_directories() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("dir").join("gat.yaml");

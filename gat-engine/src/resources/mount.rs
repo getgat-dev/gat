@@ -283,7 +283,7 @@ pub fn mount(
                     .map_err(|error| source_error(error, location.clone(), revision.clone()))?,
             };
             let prepared = parsed
-                .prepare(revision.as_ref(), progress)
+                .prepare(revision.as_ref(), progress, &repo.cancellation)
                 .map_err(|error| source_error(error, location.clone(), revision.clone()))?;
 
             repo.mounts()
@@ -471,6 +471,7 @@ fn update_mount(
             provisional_location,
             provisional_revision.as_ref(),
             progress,
+            &repo.cancellation,
         )?,
     ));
 
@@ -586,7 +587,12 @@ fn update_mount(
         match attempt {
             Attempt::Applied(outcome) => return Ok(*outcome),
             Attempt::Reprepare { location, revision } => {
-                let source = prepare_source(location.clone(), revision.as_ref(), progress)?;
+                let source = prepare_source(
+                    location.clone(),
+                    revision.as_ref(),
+                    progress,
+                    &repo.cancellation,
+                )?;
                 prepared = Some((location, revision, source));
             }
         }
@@ -605,10 +611,11 @@ fn prepare_source(
     location: GitLocationSpec,
     revision: Option<&GitRevisionSpec>,
     progress: &dyn ProgressReporter,
+    cancellation: &crate::TransferCancellation,
 ) -> Result<PreparedMountSource> {
     let parsed = parse_source(location.clone(), revision.cloned())?;
     parsed
-        .prepare(revision, progress)
+        .prepare(revision, progress, cancellation)
         .map_err(|error| source_error(error, location, revision.cloned()))
 }
 

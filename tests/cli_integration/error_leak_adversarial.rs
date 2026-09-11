@@ -65,9 +65,37 @@ fn unreachable_file_remote_failure_leaks_no_low_level_vocabulary() {
     assert_no_low_level_error_leak(&out, &[]);
 }
 
-/// Pushing to a remote URL carrying a credential-bearing query parameter
-/// must never leak that credential verbatim into stdout/stderr, even
-/// when the push itself fails (unreachable backend).
+/// Remote creation must redact credential-bearing URLs when validation fails.
+#[test]
+fn remote_add_failure_never_leaks_a_credential_bearing_remote_url() {
+    let tmp = init_repo();
+    let secret_token = "SECRET_TOKEN_a8f42e97";
+    let unreachable = tempfile::tempdir().unwrap();
+    let blocking_file = unreachable.path().join("not_a_directory");
+    std::fs::write(&blocking_file, b"blocker").unwrap();
+    let bogus_root = blocking_file.join("remote_root");
+    let mut configured = url::Url::parse(&remote_url(&bogus_root)).unwrap();
+    configured
+        .query_pairs_mut()
+        .append_pair("root", bogus_root.join(secret_token).to_str().unwrap());
+
+    let out = gat(
+        tmp.path(),
+        &["remote", "add", "origin", configured.as_str()],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("Remote operation failed"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(stderr(&out).contains("root=REDACTED"), "{}", stderr(&out));
+    assert_no_secret_leak(&out, &[secret_token]);
+    assert_no_low_level_error_leak(&out, &[]);
+}
+
+/// Configure a valid credential-bearing remote, then make its backing path
+/// unusable so push must reach remote opening and fail there.
 #[test]
 fn push_failure_never_leaks_a_credential_bearing_remote_url() {
     let tmp = init_repo();
@@ -76,34 +104,32 @@ fn push_failure_never_leaks_a_credential_bearing_remote_url() {
     assert_ok(&gat(dir, &["add", "asset.bin"]), "gat add");
     commit_all(dir, "add asset.bin");
 
-    // A distinctive fake token that would only appear in output if the
-    // raw configured remote URL (rather than a redacted form) leaked.
     let secret_token = "SECRET_TOKEN_a8f42e97";
-    let unreachable = tempfile::tempdir().unwrap();
-    let blocking_file = unreachable.path().join("not_a_directory");
-    std::fs::write(&blocking_file, b"blocker").unwrap();
-    let bogus_root = blocking_file.join("remote_root");
-    let base_url = remote_url(&bogus_root);
-    let mut configured = url::Url::parse(&base_url).unwrap();
+    let remote = tempfile::tempdir().unwrap();
+    let root = remote.path().join("storage");
+    std::fs::create_dir_all(root.join(secret_token)).unwrap();
+    let mut configured = url::Url::parse(&remote_url(&root)).unwrap();
     configured
         .query_pairs_mut()
-        .append_pair("root", bogus_root.join(secret_token).to_str().unwrap());
-    let url_with_secret = configured.to_string();
-
-    let out_add = gat(dir, &["remote", "add", "origin", &url_with_secret]);
-    // `remote add` may itself eagerly reject/validate the unreachable
-    // file path (its URL is already redacted either way); assert
-    // no-secret-leak on this step regardless of whether it succeeds.
-    assert_no_secret_leak(&out_add, &[secret_token]);
-    assert_no_low_level_error_leak(&out_add, &[]);
-    if !out_add.status.success() {
-        return;
-    }
-    let out = gat(dir, &["push"]);
-    assert!(
-        !out.status.success(),
-        "push to an unreachable remote must fail"
+        .append_pair("root", root.join(secret_token).to_str().unwrap());
+    assert_ok(
+        &gat(dir, &["remote", "add", "origin", configured.as_str()]),
+        "gat remote add",
     );
+    assert_ok(
+        &gat(dir, &["remote", "default", "origin"]),
+        "choose default remote",
+    );
+
+    // A file in place of the directory cannot be recreated by the backend.
+    std::fs::remove_dir_all(&root).unwrap();
+    std::fs::write(&root, b"blocker").unwrap();
+
+    let out = gat(dir, &["push"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("Could not open remote `origin`"), "{err}");
+    assert!(err.contains("asset.bin"), "{err}");
     assert_no_secret_leak(&out, &[secret_token]);
     assert_no_low_level_error_leak(&out, &[]);
 }
@@ -133,16 +159,9 @@ fn corrupt_lock_file_failure_leaks_no_low_level_vocabulary() {
     assert_no_low_level_error_leak(&out, &[sentinel]);
 }
 
-/// A repository path that Gat's own hierarchy treats as infrastructure
-/// (`.git`) is refused with typed wording, not a raw filesystem/gix
-/// internal error, when passed directly to `add`.
-/// A `sync --repair` attempt whose remote object was itself deleted out
-/// from under it (so the re-fetch genuinely fails, not just the initial
-/// corruption detection) must report the repair-failure row without any
-/// low-level opendal/backend vocabulary -- exercises
-/// `commands::sync::repair_failure_rows`/
-/// `error::map::problem::repair_problem`, the mapping this session moved
-/// out of `RepairError::safe_summary()`.
+/// When a corrupt cache object cannot be fetched again because the remote
+/// object is missing, `sync --repair` must report the repair failure without
+/// exposing low-level backend vocabulary.
 #[test]
 fn repair_failure_row_leaks_no_low_level_vocabulary_when_the_remote_object_is_missing() {
     use gat_io::{LockStore, RepositoryLayout};

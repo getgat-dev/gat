@@ -145,8 +145,8 @@ fn resolve_selection_request(
             name: name.into(),
             definition: gat_core::config::SelectionConfig {
                 path: GatSubpath::normalize(selection.path_arg())?,
-                include: Some(selection_globs(selection.include_globs())?),
-                exclude: Some(selection_globs(selection.exclude_globs())?),
+                include: selection_globs(selection.include_globs())?,
+                exclude: selection_globs(selection.exclude_globs())?,
             },
             scope: scope.resolve(),
         },

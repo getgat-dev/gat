@@ -2,9 +2,9 @@
 //! shards, and managed Git exclusions. These accelerators use the same
 //! metadata comparison and coherent-observation rules.
 //!
-//! This module owns neither `gat.lock` nor any `SQLite` schema -- it is a
-//! pure, dependency-light building block. The target rule it implements
-//! is: **hash to establish identity, stat to preserve identity, re-hash
+//! This module observes filesystem metadata but owns neither `gat.lock`
+//! nor any `SQLite` schema. The target rule it implements is:
+//! **hash to establish identity, stat to preserve identity, re-hash
 //! only when the preservation proof is untrustworthy.**
 //!
 //! [`StatProof`] is intentionally small and cross-platform: exact byte

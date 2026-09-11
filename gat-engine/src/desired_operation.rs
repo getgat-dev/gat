@@ -94,6 +94,7 @@ impl<'repo> DesiredOperation<'repo> {
             limits,
             repo.inputs.templates(),
             snapshot.config().network.resolve(),
+            repo.cancellation.clone(),
         );
         let operation = Operation::new(repo, snapshot, session);
         Ok(Self::new(operation, desired))

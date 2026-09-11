@@ -113,6 +113,8 @@ impl GcRepositoryIssue {
 
 #[derive(Debug, thiserror::Error)]
 pub enum GcError {
+    #[error("garbage collection cancelled")]
+    Cancelled,
     #[error("could not initialize remote for garbage collection")]
     RemoteOpen {
         remote_name: RemoteName,
@@ -166,6 +168,15 @@ enum MarkError {
 
 fn failure(kind: GcFailureKind, source: impl std::error::Error + Send + Sync + 'static) -> GcError {
     GcFailure::new(kind, source).into()
+}
+
+fn local_remote_failure(source: crate::remote_executor::LocalTransferError) -> GcError {
+    match source {
+        crate::remote_executor::LocalTransferError::Cancelled => GcError::Cancelled,
+        source @ crate::remote_executor::LocalTransferError::Task(_) => {
+            failure(GcFailureKind::Remote, source)
+        }
+    }
 }
 
 /// Reuse the larger table and avoid reserving space for already-shared OIDs.
@@ -229,6 +240,7 @@ fn inspect_additional_repository(
     location: &GitLocationSpec,
     progress: &ProgressHandle,
     selection: &HistorySelection,
+    cancellation: &crate::TransferCancellation,
 ) -> std::result::Result<HashSet<Oid>, GcRepositoryIssue> {
     let parsed = gat_io::parse_location(location).map_err(|error| {
         GcRepositoryIssue::new(
@@ -240,13 +252,15 @@ fn inspect_additional_repository(
     progress.set_activity(ProgressActivity::CloningSource {
         location: location.clone(),
     });
-    let prepared = gat_io::prepare_bare_repository(&parsed).map_err(|error| {
-        GcRepositoryIssue::new(
-            location.clone(),
-            GcRepositoryFailureKind::CloneFailed,
-            error,
-        )
-    })?;
+    let prepared = gat_io::prepare_bare_repository(&parsed, cancellation.git_interrupt()).map_err(
+        |error| {
+            GcRepositoryIssue::new(
+                location.clone(),
+                GcRepositoryFailureKind::CloneFailed,
+                error,
+            )
+        },
+    )?;
     complete_repository_inspection(location.clone(), mark_bare_repository(&prepared, selection))
 }
 
@@ -295,6 +309,7 @@ fn additional_repositories(
     keep: &mut HashSet<Oid>,
     progress: &ProgressHandle,
     limits: GcLimits,
+    cancellation: &crate::TransferCancellation,
 ) -> Vec<GcRepositoryIssue> {
     let mut issues = Vec::new();
     let tips = HistorySelection {
@@ -312,7 +327,7 @@ fn additional_repositories(
     inspect_in_bounded_batches(
         &candidates,
         limits.repository_concurrency,
-        |location| inspect_additional_repository(location, progress, selection),
+        |location| inspect_additional_repository(location, progress, selection, cancellation),
         |index, result| match result {
             Ok(marked) => merge_keep_set(keep, marked),
             Err(issue) => issues.push((index, issue)),
@@ -329,12 +344,19 @@ fn compute_keep_set(
     limits: GcLimits,
     scope: &'static str,
 ) -> Result<(HashSet<Oid>, bool, usize)> {
+    if repo.cancellation.is_cancelled() {
+        return Err(GcError::Cancelled);
+    }
     let (mut keep, shallow) = mark_repository(repo, options.history)
         .map_err(|source| failure(GcFailureKind::KeepSet, source))?;
     if shallow && !options.dry_run && !options.unsafe_override {
         return Err(GcError::ShallowHistory { scope });
     }
-    let issues = additional_repositories(options, &mut keep, progress, limits);
+    let issues = additional_repositories(options, &mut keep, progress, limits, &repo.cancellation);
+    // Even an unsafe override must never sweep from an interrupted keep set.
+    if repo.cancellation.is_cancelled() {
+        return Err(GcError::Cancelled);
+    }
     let incomplete = issues.len();
     if incomplete != 0 && !options.dry_run && !options.unsafe_override {
         return Err(GcError::IncompleteKeepSet { scope, issues });
@@ -364,6 +386,9 @@ fn gc_local(
     ));
     let stats = cache
         .sweep(options.dry_run, |oid| -> Result<CacheSweepDecision> {
+            if repo.cancellation.is_cancelled() {
+                return Err(GcError::Cancelled);
+            }
             task.inc(1);
             if keep.contains(&oid) {
                 return Ok(CacheSweepDecision::Keep);
@@ -424,7 +449,7 @@ fn visit_remote_oids(
                     let batch = scan.next_batch();
                     (scan, batch)
                 }))
-                .map_err(|source| failure(GcFailureKind::Remote, source))?;
+                .map_err(local_remote_failure)?;
             scan = returned;
             let Some(batch) = batch.map_err(|source| failure(GcFailureKind::Remote, source))?
             else {
@@ -437,9 +462,13 @@ fn visit_remote_oids(
         }
     } else {
         let mut lister = runtime
-            .block_on(remote.enumerate_objects())
+            .block_on(executor.cancellable(remote.enumerate_objects()))
+            .map_err(|()| GcError::Cancelled)?
             .map_err(|source| failure(GcFailureKind::Remote, source))?;
-        while let Some(entry) = runtime.block_on(lister.next()) {
+        while let Some(entry) = runtime
+            .block_on(executor.cancellable(lister.next()))
+            .map_err(|()| GcError::Cancelled)?
+        {
             record(
                 entry
                     .map_err(|source| failure(GcFailureKind::Remote, source))?
@@ -490,8 +519,9 @@ fn gc_remote_with_limits(
         remote_name: catalog.remote_name(remote_id),
         source,
     })?;
-    let executor = crate::remote_executor::RemoteExecutor::new(
+    let executor = crate::remote_executor::RemoteExecutor::with_cancellation(
         crate::limits::ExecutionLimits::default().remote,
+        repo.cancellation.clone(),
     );
     let candidates = collect_remote_candidates(&keep, |record| {
         visit_remote_oids(&remote, &executor, &listing.handle(), record)
@@ -544,12 +574,16 @@ fn delete_remote_candidates(
     let result = (|| {
         let mut window = Vec::with_capacity(window_size.get());
         let mut delete = |window: &[Oid]| {
+            // Finish each started deletion batch, then stop before the next one.
+            if executor.is_cancelled() {
+                return Err(GcError::Cancelled);
+            }
             progress.set_activity(ProgressActivity::DeletingRemoteObjects);
             if let Some(file_gc) = &file_gc {
                 for prepared in file_gc.deletion_batches(window) {
                     let outcome = runtime
                         .block_on(executor.local_transfer(move || prepared.delete()))
-                        .map_err(|source| failure(GcFailureKind::Remote, source))?;
+                        .map_err(local_remote_failure)?;
                     deleted += outcome.confirmed;
                     progress.inc(outcome.confirmed as u64);
                     if let Some(source) = outcome.error {
@@ -727,6 +761,65 @@ mod tests {
             assert!(candidates.oids.is_empty());
             assert_eq!(candidates.listed, values.len());
         }
+    }
+
+    #[test]
+    fn cancelled_file_listing_admits_no_workers_or_deletion_candidates() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _entered = runtime.enter();
+        let (_root, handles) =
+            crate::remote_session::test_support::open_handles_on_current_runtime(&["remote"]);
+        let executor = crate::remote_executor::RemoteExecutor::new(
+            crate::limits::ExecutionLimits::default().remote,
+        );
+        executor.cancellation().cancel();
+        let progress = Arc::new(DeletionProgress(AtomicUsize::new(0)));
+        let task = gat_core::progress::ProgressTask::from_backend(progress.clone());
+        let result = collect_remote_candidates(&HashSet::new(), |record| {
+            visit_remote_oids(handles[0].client(), &executor, &task.handle(), record)
+        });
+        assert!(matches!(result, Err(GcError::Cancelled)));
+        assert_eq!(executor.local_submissions(), 0);
+        assert_eq!(progress.0.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn cancellation_before_local_deletion_admission_is_not_a_remote_failure() {
+        struct CancelBeforeAdmission(crate::TransferCancellation);
+        impl gat_core::progress::ActivityBackend for CancelBeforeAdmission {
+            fn inc(&self, _: u64) {
+                panic!("no deletion should complete");
+            }
+            fn set_activity(&self, _: &ProgressActivity) {
+                self.0.cancel();
+            }
+            fn finish(&self) {}
+        }
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _entered = runtime.enter();
+        let (root, handles) =
+            crate::remote_session::test_support::open_handles_on_current_runtime(&["remote"]);
+        let candidate = oid(1);
+        let path = root.path().join(gat_io::object_key_oid(&candidate));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"preserve").unwrap();
+        let executor = crate::remote_executor::RemoteExecutor::new(
+            crate::limits::ExecutionLimits::default().remote,
+        );
+        let task = gat_core::progress::ProgressTask::from_backend(Arc::new(CancelBeforeAdmission(
+            executor.cancellation(),
+        )));
+        let result = delete_remote_candidates(
+            handles[0].client(),
+            &executor,
+            [candidate],
+            &task.handle(),
+            NonZeroUsize::new(1).unwrap(),
+        );
+        assert!(matches!(result, Err(GcError::Cancelled)));
+        assert_eq!(executor.local_submissions(), 0);
+        assert_eq!(std::fs::read(path).unwrap(), b"preserve");
     }
 
     #[test]
@@ -982,6 +1075,7 @@ mod tests {
             &location,
             &progress.handle(),
             &HistorySelection::conservative_default(),
+            &crate::TransferCancellation::default(),
         ) else {
             panic!("missing remote clone should fail")
         };
@@ -1013,6 +1107,7 @@ mod tests {
             &location,
             &progress.handle(),
             &HistorySelection::conservative_default(),
+            &crate::TransferCancellation::default(),
         )
         .unwrap();
 

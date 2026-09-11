@@ -23,10 +23,10 @@ pub fn presence_stream(
             let _lease = lease;
             (
                 index,
-                client
-                    .contains_object(&oid)
-                    .await
-                    .map_err(PresenceProbeError::Remote),
+                match executor.cancellable(client.contains_object(&oid)).await {
+                    Ok(result) => result.map_err(PresenceProbeError::Remote),
+                    Err(()) => Err(PresenceProbeError::Cancelled),
+                },
             )
         }
         .into_stream()

@@ -16,6 +16,11 @@ use crate::output::{Output, Stream, WriteFailure};
 use crate::presentation::UserLine;
 use gat_command::{DiffOutcome, DiffTarget};
 
+/// Final interruption notice, emitted only after owned command work has drained.
+pub fn interrupted(output: &mut Output<'_>) -> Result<(), WriteFailure> {
+    ui::caution(output, &UserLine::authored("Interrupted"))
+}
+
 /// Composes `<count> <suffix>` (e.g. `24 file(s)`) as a [`UserLine`],
 /// the shared shape for every count-style summary/footer/heading,
 /// avoiding each call site hand-rolling
@@ -301,7 +306,7 @@ fn selection_fields(record: &gat_command::SelectionRecord) -> Vec<(UserLine, Use
         ("Include", &record.definition.include),
         ("Exclude", &record.definition.exclude),
     ] {
-        for pattern in patterns.as_deref().unwrap_or_default() {
+        for pattern in patterns {
             fields.push((
                 UserLine::authored(label),
                 UserLine::identifier(pattern.as_str()),
@@ -767,6 +772,7 @@ fn render_sync_group(
 fn render_sync(
     output: &mut Output<'_>,
     outcome: &gat_command::SyncOutcome,
+    command: &'static str,
 ) -> Result<(), WriteFailure> {
     let sync = &outcome.outcome;
     let repair_failures = repair_failure_rows(&outcome.repair_failures);
@@ -906,17 +912,22 @@ fn render_sync(
         UserLine::compose(joined)
     };
     let (kind, label) = if !outcome.completion.is_clean() {
-        (rows::MessageKind::Caution, "Sync incomplete (")
+        (rows::MessageKind::Caution, " incomplete (")
     } else if sync.dry_run {
-        (rows::MessageKind::Action, "Sync preview (")
+        (rows::MessageKind::Action, " preview (")
     } else {
-        (rows::MessageKind::Success, "Sync complete (")
+        (rows::MessageKind::Success, " complete (")
     };
     render_message(
         output,
         &rows::Message::new(
             kind,
-            UserLine::compose([UserLine::authored(label), summary, UserLine::authored(")")]),
+            UserLine::compose([
+                UserLine::authored(command),
+                UserLine::authored(label),
+                summary,
+                UserLine::authored(")"),
+            ]),
         ),
     )?;
     render_hints(
@@ -1639,8 +1650,11 @@ pub fn render(output: &mut Output<'_>, outcome: Outcome) -> Result<(), WriteFail
             )?;
             render_shallow_caution(output, *shallow)?;
         }
-        Outcome::Pulled(outcome) | Outcome::Synced(outcome) | Outcome::Hooked(outcome) => {
-            render_sync(output, outcome)?;
+        Outcome::Pulled(outcome) => {
+            render_sync(output, outcome, "Pull")?;
+        }
+        Outcome::Synced(outcome) | Outcome::Hooked(outcome) => {
+            render_sync(output, outcome, "Sync")?;
         }
         Outcome::System(_) => unreachable!("handled above via early return"),
         // Deliberately silent: a clean semantic merge should produce no
@@ -2486,7 +2500,7 @@ mod outcome_tests {
             let mut stderr = Vec::new();
             let mut output = Output::new(&mut stdout, &mut stderr);
             output.set_full_output(full);
-            render_sync(&mut output, &outcome).unwrap();
+            render_sync(&mut output, &outcome, "Sync").unwrap();
             let text = crate::output::strip_ansi(&String::from_utf8(stderr).unwrap());
             assert!(text.ends_with("\n\n✓ Sync complete (no changes)\n"));
             assert!(!text.contains("\n\n\n"));
@@ -2694,7 +2708,12 @@ mod outcome_tests {
             },
         };
         let mut stderr = Vec::new();
-        render_sync(&mut Output::new(&mut Vec::new(), &mut stderr), &outcome).unwrap();
+        render_sync(
+            &mut Output::new(&mut Vec::new(), &mut stderr),
+            &outcome,
+            "Sync",
+        )
+        .unwrap();
         let plain = crate::output::strip_ansi(&String::from_utf8(stderr).unwrap());
         assert!(plain.starts_with("! Missing objects: 1\n\n!  data.bin"));
         for heading in ["Conflicts", "Corrupted objects"] {
@@ -2887,7 +2906,12 @@ mod outcome_tests {
             },
         };
         let mut stderr = Vec::new();
-        render_sync(&mut Output::new(&mut Vec::new(), &mut stderr), &outcome).unwrap();
+        render_sync(
+            &mut Output::new(&mut Vec::new(), &mut stderr),
+            &outcome,
+            "Sync",
+        )
+        .unwrap();
         let text = crate::output::strip_ansi(&String::from_utf8(stderr).unwrap());
         assert_eq!(
             text.lines().filter(|line| line.starts_with("!  ")).count(),
@@ -3127,7 +3151,11 @@ mod outcome_tests {
                 assert_eq!(lines[1], "");
                 assert_eq!(
                     crate::output::strip_ansi(lines[0]),
-                    "✓ Sync complete (no changes)"
+                    if pull {
+                        "✓ Pull complete (no changes)"
+                    } else {
+                        "✓ Sync complete (no changes)"
+                    }
                 );
                 assert_eq!(
                     lines[2..].join("\n"),
@@ -3141,45 +3169,59 @@ mod outcome_tests {
     #[test]
     fn sync_summaries_distinguish_completion_preview_and_incomplete_outcomes() {
         use gat_command::SyncCompletionStatus;
-        for (dry_run, completion, expected) in [
-            (
-                false,
-                SyncCompletionStatus::Clean,
-                "✓ Sync complete (no changes)\n",
-            ),
-            (
-                true,
-                SyncCompletionStatus::Clean,
-                "→ Sync preview (no changes)\n",
-            ),
-            (
-                false,
-                SyncCompletionStatus::Incomplete {
-                    conflicts: 1,
-                    missing: 0,
-                    corrupted: 0,
-                },
-                "! Sync incomplete (no changes)\n",
-            ),
-        ] {
-            let outcome = gat_command::SyncOutcome {
-                scope: gat_command::SelectionScope::Unrestricted,
-                outcome: gat_engine::SyncOutcome {
-                    dry_run,
-                    ..Default::default()
-                },
-                fetched: 0,
-                repaired: 0,
-                repair_failures: Vec::new(),
-                reshaped: None,
-                shallow: false,
-                completion,
-            };
-            let mut stderr = Vec::new();
-            render_sync(&mut Output::new(&mut Vec::new(), &mut stderr), &outcome).unwrap();
-            let styled = String::from_utf8(stderr).unwrap();
-            assert!(!styled.contains("\x1b[2m"));
-            assert_eq!(crate::output::strip_ansi(&styled), expected);
+        for pull in [false, true] {
+            for (dry_run, completion, expected) in [
+                (
+                    false,
+                    SyncCompletionStatus::Clean,
+                    "✓ Sync complete (no changes)\n",
+                ),
+                (
+                    true,
+                    SyncCompletionStatus::Clean,
+                    "→ Sync preview (no changes)\n",
+                ),
+                (
+                    false,
+                    SyncCompletionStatus::Incomplete {
+                        conflicts: 1,
+                        missing: 0,
+                        corrupted: 0,
+                    },
+                    "! Sync incomplete (no changes)\n",
+                ),
+            ] {
+                let outcome = gat_command::SyncOutcome {
+                    scope: gat_command::SelectionScope::Unrestricted,
+                    outcome: gat_engine::SyncOutcome {
+                        dry_run,
+                        ..Default::default()
+                    },
+                    fetched: 0,
+                    repaired: 0,
+                    repair_failures: Vec::new(),
+                    reshaped: None,
+                    shallow: false,
+                    completion,
+                };
+                let mut stderr = Vec::new();
+                let outcome = if pull {
+                    Outcome::Pulled(outcome)
+                } else {
+                    Outcome::Synced(outcome)
+                };
+                render(&mut Output::new(&mut Vec::new(), &mut stderr), outcome).unwrap();
+                let styled = String::from_utf8(stderr).unwrap();
+                assert!(!styled.contains("\x1b[2m"));
+                assert_eq!(
+                    crate::output::strip_ansi(&styled),
+                    if pull {
+                        expected.replace("Sync", "Pull")
+                    } else {
+                        expected.to_owned()
+                    }
+                );
+            }
         }
     }
 

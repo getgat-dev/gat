@@ -24,12 +24,12 @@ tasks:
   fmt:check:
     desc: Check formatting without writing changes
     cmds:
-      - cargo fmt --all -- --check
+      - cargo fmt --quiet --all -- --check
 
   lint:
     desc: Lint with clippy, warnings as errors
     cmds:
-      - cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - cargo clippy --workspace --all-targets --all-features --locked --quiet -- -D warnings
 
   lint:architecture:
     desc: Check workspace dependencies and source ownership
@@ -44,7 +44,7 @@ tasks:
   test:checks:
     desc: Test the repository policy checker
     cmds:
-      - cargo test --locked -p gat-check
+      - cargo test --locked --quiet -p gat-check
 
   test:
     desc: Run the test suite (nextest, or cargo test if unavailable)
@@ -65,15 +65,17 @@ tasks:
         platforms: [windows]
 
   test:doc:
-    desc: |
+    desc: Run doctests, including compile-fail API boundary checks
+    summary: |
       Run doctests (cargo-nextest does not run these): includes the
       compile_fail doctests that enforce presentation and workspace
       API boundaries.
     cmds:
-      - cargo test --doc --all-features --locked
+      - cargo test --doc --all-features --locked --quiet
 
   test:stress:
-    desc: |
+    desc: Repeat concurrency and isolation regression tests
+    summary: |
       Repeatedly (a fixed, finite number of times -- not retries baked
       into the ordinary test result) re-run the tests historically
       associated with timing, environment, cache-state, locking, or
@@ -105,14 +107,24 @@ tasks:
     cmds:
       - cargo llvm-cov nextest --summary-only
 
-  check:
-    desc: Run formatting, lint, architecture, installer, unit, integration, and doc checks
+  check:hygiene:
+    desc: Check all repository architecture and test isolation policies
     cmds:
+      - cargo run --quiet --locked -p gat-check -- all
+
+  check:
+    desc: Run formatting, lint, architecture, unit, integration, and doc checks (excludes installer scripts)
+    summary: |
+      Run formatting, lint, architecture, unit, integration, and doc checks concurrently.
+      Installer script checks are excluded; run `task test:install` separately.
+    # Dependencies run concurrently; keep every required check in this list.
+    # Cargo shares target/ and serializes build phases with its build lock,
+    # so parallel tasks can overlap execution without duplicating build caches.
+    deps:
       - task: fmt:check
       - task: lint
       - task: test:checks
-      - cargo run --quiet --locked -p gat-check -- all
-      - task: test:install
+      - task: check:hygiene
       - task: test
       - task: test:doc
 
@@ -140,9 +152,20 @@ tasks:
 
   docs:validate:
     desc: Validate generated docs are current and the Mintlify site is valid
+    # Rust and site validation are independent; each branch preserves command order.
+    deps:
+      - task: docs:validate:generated
+      - task: docs:validate:site
+
+  docs:validate:generated:
+    desc: Test the documentation generator and check generated docs are current
     cmds:
       - cargo test --locked -p gat-docs --bin generate-docs
       - cargo run --quiet --locked -p gat-docs --bin generate-docs -- --check
+
+  docs:validate:site:
+    desc: Install documentation dependencies and validate the Mintlify site
+    cmds:
       - npm --prefix docs ci
       - npm --prefix docs run check
 

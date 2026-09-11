@@ -131,8 +131,33 @@ https://getgat.dev/mcp
       </Step>
     </Steps>
 
+    <Info>For [Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers),
+    register the server with `copilot mcp add --transport http gat https://getgat.dev/mcp`.
+    Use `copilot mcp list` to list configured servers.</Info>
+
     See [VS Code's MCP documentation](https://code.visualstudio.com/docs/agent-customization/mcp-servers)
     for server controls and troubleshooting.
+
+  </Tab>
+  <Tab title="Gemini CLI">
+    <Steps>
+      <Step title="Register the server">
+        Run this in your terminal to make the server available across projects:
+
+        ```bash
+        gemini mcp add --transport http --scope user gat https://getgat.dev/mcp
+        ```
+
+        Use `--scope project` instead to save it for the current project only.
+      </Step>
+      <Step title="Check the connection">
+        Run `gemini mcp list` to check the connection, then start Gemini CLI
+        and ask it to search the gat documentation.
+      </Step>
+    </Steps>
+
+    See [Gemini CLI's MCP documentation](https://geminicli.com/docs/tools/mcp-server/)
+    for configuration and server management.
   </Tab>
 </Tabs>
 

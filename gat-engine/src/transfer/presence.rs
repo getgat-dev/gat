@@ -35,7 +35,7 @@ pub(crate) enum PresenceProbeError {
     #[error("presence batch omitted an admitted result")]
     Incomplete,
     #[error("file presence check failed")]
-    File(#[source] std::io::Error),
+    File(#[from] std::io::Error),
     #[error("remote presence check failed")]
     Remote(#[source] gat_io::RemoteError),
 }
@@ -59,6 +59,8 @@ pub struct RemotePresenceResult {
 /// Everything a bounded remote-presence probe can fail with.
 #[derive(Debug, thiserror::Error)]
 pub enum RemotePresenceError {
+    #[error("presence check cancelled")]
+    Cancelled,
     #[error("could not open remote `{remote_name}` for `{path}`")]
     RemoteOpen {
         remote_name: Arc<str>,
@@ -100,15 +102,18 @@ impl RemotePresenceError {
         catalog: &RemoteCatalog,
         policy: &EffectivePathPolicy,
         obligation: &T,
-        source: Box<dyn Error + Send + Sync>,
+        source: PresenceProbeError,
     ) -> Self {
+        if matches!(source, PresenceProbeError::Cancelled) {
+            return Self::Cancelled;
+        }
         let (remote_name, route_name, route) = diagnostic_remote(catalog, policy, obligation);
         Self::PresenceCheck {
             remote_name,
             route_name,
             route,
             path: obligation.representative_path().clone(),
-            source,
+            source: Box::new(source),
         }
     }
 }
@@ -280,24 +285,24 @@ async fn drive_presence_groups<'a, T, F, E>(
     capacity: usize,
     launch: F,
     mut on_result: impl FnMut(RemotePresenceResult),
-) -> Result<(), (usize, Box<dyn Error + Send + Sync>)>
+) -> Result<(), (usize, PresenceProbeError)>
 where
     T: RemotePresenceObligation,
     F: Fn(&RemoteHandle, Vec<batch::AdmittedPresence>) -> BoxStream<'a, (usize, Result<bool, E>)>,
-    E: Error + Send + Sync + 'static,
+    E: Into<PresenceProbeError> + Send + 'static,
 {
     let mut pending: VecDeque<_> = pending.into();
     let mut active = SelectAll::new();
     let mut active_entries = 0;
-    let mut errors: Vec<(usize, Box<dyn Error + Send + Sync>)> = Vec::new();
+    let mut first_error = None;
     while !pending.is_empty() || active_entries > 0 {
         if executor.is_cancelled()
             && let Some(index) = pending.iter().min().copied()
         {
-            errors.push((index, Box::new(PresenceProbeError::Cancelled)));
+            retain_first_error(&mut first_error, index, PresenceProbeError::Cancelled);
             pending.clear();
         }
-        if errors.is_empty() {
+        if first_error.is_none() {
             let mut groups = BTreeMap::<RemoteId, Vec<batch::AdmittedPresence>>::new();
             // Preserve fair request order when reserving logical entries. Group
             // only what fits now; no waits to fill a batch, no tasks for pending OIDs.
@@ -335,7 +340,9 @@ where
                             vec![(index, obligations[index].oid(), lease)],
                         ));
                     }
-                    Err(()) => errors.push((index, Box::new(PresenceProbeError::Cancelled))),
+                    Err(()) => {
+                        retain_first_error(&mut first_error, index, PresenceProbeError::Cancelled);
+                    }
                 }
             }
         } else {
@@ -356,7 +363,7 @@ where
                     request_index,
                     present,
                 }),
-                Err(source) => errors.push((request_index, Box::new(source))),
+                Err(source) => retain_first_error(&mut first_error, request_index, source.into()),
             }
             // Drain ready notifications before refilling. A completed batch
             // must not become a run of singleton refills while its results sit
@@ -365,9 +372,21 @@ where
         }
     }
     // Batch streams drain their worker before emitting their final result.
-    match errors.into_iter().min_by_key(|(index, _)| *index) {
+    match first_error {
         Some(error) => Err(error),
         None => Ok(()),
+    }
+}
+
+// Only the lowest input index is observable; release other errors while
+// draining owned work instead of accumulating an error per admitted request.
+fn retain_first_error(
+    first: &mut Option<(usize, PresenceProbeError)>,
+    index: usize,
+    error: PresenceProbeError,
+) {
+    if first.as_ref().is_none_or(|(earliest, _)| index < *earliest) {
+        *first = Some((index, error));
     }
 }
 
@@ -380,12 +399,12 @@ async fn drive_presence_scheduler<T, F, Fut, E>(
     capacity: usize,
     check: F,
     on_result: impl FnMut(RemotePresenceResult),
-) -> Result<(), (usize, Box<dyn Error + Send + Sync>)>
+) -> Result<(), (usize, PresenceProbeError)>
 where
     T: RemotePresenceObligation,
     F: Fn(&RemoteHandle, &T) -> Fut,
     Fut: Future<Output = Result<bool, E>> + Send,
-    E: Error + Send + Sync + 'static,
+    E: Into<PresenceProbeError> + Send + 'static,
 {
     drive_presence_groups(
         executor,

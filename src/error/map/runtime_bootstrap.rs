@@ -20,3 +20,37 @@ pub fn runtime_start_failed(source: impl std::error::Error + Send + Sync + 'stat
         source,
     )
 }
+
+/// Signal registration failed before command execution.
+#[must_use]
+pub fn signal_start_failed(source: std::io::Error) -> Failure {
+    Failure::infrastructure(
+        Diagnostic::new(
+            ErrorCode::Internal,
+            "Gat could not install its interrupt handler",
+        ),
+        source,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signal_registration_failure_keeps_os_details_out_of_output() {
+        let secret = "SIGNAL_REGISTRATION_SECRET";
+        let failure = signal_start_failed(std::io::Error::other(secret));
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        crate::output::error::render(
+            &mut crate::output::Output::new(&mut stdout, &mut stderr),
+            failure.diagnostic(),
+        )
+        .unwrap();
+        assert!(stdout.is_empty());
+        let rendered = String::from_utf8(stderr).unwrap();
+        assert!(rendered.contains("interrupt handler"));
+        assert!(!rendered.contains(secret));
+    }
+}

@@ -60,6 +60,7 @@ pub enum ExcludesFailureKind {
 /// Semantic mutation-authority failure classes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MutationAuthorityFailureKind {
+    Cancelled,
     Lock(LockFailureKind),
     RepositoryLocked,
     Filesystem(FilesystemFailureKind),
@@ -306,6 +307,7 @@ fn classify_repository(
     use crate::repository::RepositoryError;
 
     match source {
+        RepositoryError::Cancelled => MutationAuthorityFailureKind::Cancelled,
         RepositoryError::SettingLock { source } => classify_atomic(source),
         RepositoryError::ConfigurationChanged { scope }
         | RepositoryError::ConfigLoad { scope, .. }

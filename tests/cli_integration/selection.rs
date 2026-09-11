@@ -358,6 +358,9 @@ fn selection_updates_preserve_omitted_fields_and_clear_lists_explicitly() {
             .count(),
         3
     );
+    let saved = std::fs::read_to_string(repo.path().join("gat.yaml")).unwrap();
+    assert!(!saved.contains("include:"), "{saved}");
+    assert!(!saved.contains("exclude:"), "{saved}");
     assert!(stdout(&gat(repo.path(), &["selection", "default"])).contains("none"));
 }
 
@@ -384,6 +387,10 @@ fn unrestricted_selection_is_explicit_persistent_and_visible() {
             .status
             .success()
     );
+    let saved = std::fs::read_to_string(repo.path().join("gat.yaml")).unwrap();
+    assert!(saved.contains("path: models"), "{saved}");
+    assert!(!saved.contains("include:"), "{saved}");
+    assert!(!saved.contains("exclude:"), "{saved}");
     let before = std::fs::read(repo.path().join("gat.yaml")).unwrap();
     for args in [
         vec!["selection", "add", "accidental"],

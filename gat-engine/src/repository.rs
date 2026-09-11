@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 /// fields (e.g. [`Self::ConfigLoad`], [`Self::InvalidEffectiveMounts`]).
 #[derive(Debug, thiserror::Error)]
 pub enum RepositoryError {
+    #[error("operation cancelled")]
+    Cancelled,
     #[error("could not recover pending mount changes before editing configuration")]
     PendingMountRecovery(#[source] Box<crate::MountWorkflowError>),
     #[error("configuration changed since it was read")]
@@ -200,6 +202,7 @@ impl From<gat_io::LayoutError> for RepositoryError {
 pub struct Repository {
     layout: gat_io::RepositoryLayout,
     pub(crate) inputs: std::sync::Arc<gat_io::InvocationInputs>,
+    pub(crate) cancellation: crate::TransferCancellation,
 }
 
 /// Publication capability tied to the repository whose configuration locks it owns.
@@ -218,6 +221,7 @@ impl ConfigurationEdit<'_> {
     ) -> Result<(), RepositoryError> {
         self.repo
             .validate_config_candidate(layers, candidate, scope)?;
+        self.repo.check_cancelled()?;
         self.repo.save_config_scoped(candidate, scope)
     }
 }
@@ -387,8 +391,13 @@ impl Repository {
     pub(crate) const fn from_layout(
         layout: gat_io::RepositoryLayout,
         inputs: std::sync::Arc<gat_io::InvocationInputs>,
+        cancellation: crate::TransferCancellation,
     ) -> Self {
-        Self { layout, inputs }
+        Self {
+            layout,
+            inputs,
+            cancellation,
+        }
     }
 
     /// Open one unlocked, refreshed repository-state service for add
@@ -452,6 +461,14 @@ impl Repository {
         RepoLock::acquire_configuration(self.layout(), self.global_config_dir().as_deref())
     }
 
+    pub(crate) fn check_cancelled(&self) -> Result<(), RepositoryError> {
+        if self.cancellation.is_cancelled() {
+            Err(RepositoryError::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+
     pub(crate) fn begin_configuration_edit(
         &self,
     ) -> Result<ConfigurationEdit<'_>, RepositoryError> {
@@ -461,6 +478,7 @@ impl Repository {
         self.mounts()
             .recover_pending_locked(&guard, &gat_core::progress::NoopProgress)
             .map_err(|source| RepositoryError::PendingMountRecovery(Box::new(source)))?;
+        self.check_cancelled()?;
         Ok(ConfigurationEdit {
             repo: self,
             _guard: guard,
@@ -1340,9 +1358,7 @@ mod tests {
             .by_name
             .entry("runtime".into())
             .or_default()
-            .include = Some(vec![
-            gat_core::globs::GatGlobPattern::parse("global-target").unwrap(),
-        ]);
+            .include = vec![gat_core::globs::GatGlobPattern::parse("global-target").unwrap()];
         ConfigStore::save_scope(
             repo.layout(),
             ConfigScope::Global,
@@ -1365,9 +1381,7 @@ mod tests {
             .by_name
             .entry("runtime".into())
             .or_default()
-            .include = Some(vec![
-            gat_core::globs::GatGlobPattern::parse("local-target").unwrap(),
-        ]);
+            .include = vec![gat_core::globs::GatGlobPattern::parse("local-target").unwrap()];
         repo.save_config_scoped(&local_cfg, ConfigScope::Local)
             .unwrap();
 
@@ -1390,9 +1404,7 @@ mod tests {
         // selection does not affect inheritance.
         assert_eq!(
             merged.selections.by_name["runtime"].include,
-            Some(vec![
-                gat_core::globs::GatGlobPattern::parse("local-target").unwrap()
-            ])
+            vec![gat_core::globs::GatGlobPattern::parse("local-target").unwrap()]
         );
     }
 

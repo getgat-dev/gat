@@ -1,8 +1,13 @@
-Sync reconciles the working tree with the current `gat.lock`: it creates new
-or missing files, replaces changed desired content, and removes paths no longer
-tracked. It uses <Tooltip tip="Gat checks filesystem metadata first and hashes content only when metadata cannot establish whether a file matches the expected object.">lazy validation</Tooltip>
-to check working files. See [how sync plans changes](/concepts/how-gat-works#how-sync-decides-what-to-change)
-and [automatic sync and conflicts](/concepts/automatic-sync).
+Sync updates working files to match the current `gat.lock`, using the local
+cache. Preview updates, removals, conflicts, and missing objects before applying:
+
+```sh
+gat sync --dry-run
+```
+
+Sync preserves conflicting local edits unless you pass `--force`.
+See [how sync plans changes](/concepts/how-gat-works#how-sync-decides-what-to-change)
+and [resolving conflicts](/concepts/automatic-sync#local-changes-and-conflicts).
 
 | Option | Effect |
 | --- | --- |

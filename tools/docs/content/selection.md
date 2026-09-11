@@ -28,6 +28,10 @@ Exclusions win. Named and inline selectors cannot be combined.
   the complete entry of the same name. The default choice inherits separately,
   so a local default can use a shared project definition.
 
+  Saved definitions omit the root path (`.`) and empty include/exclude lists.
+  Clearing a filter removes its config key; it does not inherit that filter
+  from a lower-priority definition. An unrestricted selection is saved as `{}`.
+
   Use `add --local` with a complete definition to override a project selection.
   Updates require at least one path, pattern, or clear option. Updates and
   removals must target the defining scope. Removing an override can

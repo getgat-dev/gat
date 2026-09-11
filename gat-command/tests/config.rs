@@ -546,7 +546,7 @@ fn saved_selections_resolve_without_worktree_or_lock_and_keep_sparse_definitions
         (
             "none",
             SelectionConfig {
-                exclude: Some(vec![GatGlobPattern::parse("**").unwrap()]),
+                exclude: vec![GatGlobPattern::parse("**").unwrap()],
                 ..Default::default()
             },
             false,

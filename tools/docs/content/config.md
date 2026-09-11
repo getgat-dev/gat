@@ -8,7 +8,8 @@ writes affect one scope, with project as the default.
 | Save an empty list | Use `--clear` where allowed. |
 | Restore inheritance | Use `--unset`. |
 
-General settings control cache placement, automatic fetching, and Git exclusions.
+General settings control behavior such as cache placement, automatic fetching,
+Git exclusions, and network timeouts and concurrency.
 For <Tooltip tip="Named definitions with related fields, such as a remote URL or a mount's source and target. Their commands validate the definition and perform its associated operations." cta="Settings and resources" href="/concepts/config-inheritance#general-settings-and-managed-resources">managed resources</Tooltip>, use
 {{command:remote}}, {{command:route}}, {{command:mount}}, or {{command:selection}}.
 `gat config` does not read or write individual resource fields.

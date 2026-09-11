@@ -24,6 +24,10 @@ pub(super) fn acquisition_failure(
     err: impl std::error::Error + Send + Sync + 'static,
 ) -> Failure {
     match kind {
+        RepoSnapshotErrorKind::Cancelled => Failure::expected_with_source(
+            Diagnostic::new(ErrorCode::Interrupted, "Operation cancelled"),
+            err,
+        ),
         RepoSnapshotErrorKind::Repository => Failure::infrastructure(
             Diagnostic::new(
                 ErrorCode::RepositoryUnavailable,

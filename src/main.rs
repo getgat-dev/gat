@@ -1,3 +1,5 @@
+mod process_interrupts;
+
 use clap::Parser;
 use gat::cli::{self, Cli};
 use gat::error::Failure;
@@ -98,13 +100,38 @@ fn run(output: &mut output::Output<'_>) -> Result<u8, ProcessFailure> {
     gat_engine::initialize_backends();
 
     // The process bootstrap owns one explicitly sized Rayon pool and Tokio
-    // runtime. The runtime is only needed so opendal's blocking::Operator
-    // (used by push/fetch) has an executor to hand work to; the rest of gat
-    // remains synchronous at the command boundary.
+    // runtime for remote I/O, owned blocking work, and OS signal delivery.
+    // Commands remain synchronous at the dispatch boundary.
     let rt = gat::process_resources::initialize()
         .map_err(gat::error::map::runtime_bootstrap::runtime_start_failed)?;
     let _guard = rt.enter();
 
+    let interrupts = process_interrupts::ProcessInterrupts::install(invocation.cancellation())
+        .map_err(gat::error::map::runtime_bootstrap::signal_start_failed)?;
+    let hook_mode = matches!(cli.command, cli::Command::Hook { .. });
+    let result = run_command(output, cli, &invocation, &interrupts);
+    if let Some(code) = interrupts.exit_code() {
+        // Command work has returned, including all owned cleanup. Preserve real
+        // errors but never report a successful outcome after interruption.
+        if let Err(ProcessFailure::Command(failure)) = result
+            && failure.diagnostic().code() != gat::error::ErrorCode::Interrupted
+        {
+            let _ = error_output::render(output, failure.diagnostic());
+        }
+        if !hook_mode {
+            let _ = output::render::interrupted(output);
+        }
+        return Ok(code);
+    }
+    result
+}
+
+fn run_command(
+    output: &mut output::Output<'_>,
+    cli: Cli,
+    invocation: &Invocation,
+    interrupts: &process_interrupts::ProcessInterrupts,
+) -> Result<u8, ProcessFailure> {
     let full_output = cli.full_output;
     output.set_full_output(full_output);
     let repo = invocation.discover().map_err(Failure::from)?;
@@ -128,6 +155,9 @@ fn run(output: &mut output::Output<'_>) -> Result<u8, ProcessFailure> {
     // A long operation may outlive a resize. Refresh after clearing progress so
     // notices, results, and command failures use the current per-stream widths.
     refresh_output_layouts(output, full_output);
+    if interrupts.exit_code().is_some() {
+        return result.map(|_| 0).map_err(ProcessFailure::Command);
+    }
     // Notices recorded into `context.lifecycle` (by CLI dispatch, `gat
     // config` read/write, or actual consumption of a persisted config
     // value) are emitted unconditionally, before the command's durable
