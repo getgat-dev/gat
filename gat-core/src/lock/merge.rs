@@ -51,6 +51,8 @@ pub struct Conflict {
 /// independently: a path added, removed, or modified on only one side (or
 /// identically on both) always merges cleanly, no matter what unrelated
 /// paths changed elsewhere in the same lock document.
+/// This resolves same-path conflicts only; the combined map can introduce
+/// file/directory-prefix conflicts even when all three inputs are valid.
 pub fn merge_three_way(ancestor: &Lock, ours: &Lock, theirs: &Lock) -> Result<Lock, Vec<Conflict>> {
     // One ordered union retains all three values without separate indexes or
     // a second collection of keys. Inputs need not already be path-sorted.
@@ -127,8 +129,7 @@ mod tests {
         let theirs = lock(&[("a.bin", OID_A), ("c.bin", OID_C), ("d.bin", OID_A)]);
 
         let merged = merge_three_way(&ancestor, &ours, &theirs).unwrap();
-        let mut paths: Vec<_> = merged.entries.iter().map(|e| e.path.as_str()).collect();
-        paths.sort_unstable();
+        let paths: Vec<_> = merged.entries.iter().map(|e| e.path.as_str()).collect();
         assert_eq!(paths, vec!["a.bin", "b.bin", "c.bin", "d.bin"]);
     }
 

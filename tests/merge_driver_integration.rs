@@ -68,15 +68,14 @@ fn independent_insertions_into_the_same_sorted_gap_merge_cleanly() {
     assert_ok(&merge, "merge feature-c into feature-b");
 
     let lock = read(dir, "gat.lock");
-    for path in ["a.bin", "b.bin", "c.bin", "d.bin"] {
-        assert!(
-            lock.contains(path),
-            "expected {path} in merged lock:\n{lock}"
-        );
-    }
-    assert!(
-        !lock.contains("<<<<<<<"),
-        "no conflict markers expected:\n{lock}"
+    let parsed = gat_core::lock::Lock::parse(&lock).expect("canonical merged lock");
+    assert_eq!(
+        parsed
+            .entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>(),
+        ["a.bin", "b.bin", "c.bin", "d.bin"]
     );
 }
 

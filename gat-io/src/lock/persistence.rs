@@ -1241,22 +1241,10 @@ pub fn set_load_missing_path_hook_for_test(hook: impl FnOnce() + 'static) {
     LOAD_MISSING_PATH_HOOK.with(|cell| *cell.borrow_mut() = Some(Box::new(hook)));
 }
 
-/// Render `entries` into one lock-format shard file exactly the same way
-/// every other writer in this module does: serialize with `Lock`'s
-/// normal display format, sorted by path. Keeping that "sorted, then
-/// rendered" step in one helper means the full-save path
-/// ([`save_sharded`]), the sparse touched-shard path
-/// ([`save_sparse_shards`]), and any caller computing a shard's content
-/// identity from the bytes it just wrote can all rely on one canonical
-/// byte representation.
-///
-/// Every sparse-publish caller already hands this an already-ordered
-/// per-shard row set (`desired_rows_by_shard_ids`'s `(shard_id, path)`
-/// order), so this checks that cheaply (`O(n)`, no allocation) and
-/// renders directly from the borrowed slice instead of always cloning
-/// into a fresh, resorted `Vec` -- the clone/sort only actually runs for
-/// a caller (e.g. [`save_sharded`]'s per-bucket render) that can't
-/// promise its input is already ordered.
+/// Render canonical digest-first rows in decoded-path order.
+/// Already-ordered entries are borrowed directly; unordered inputs sort a
+/// vector of references without cloning paths. Callers establish uniqueness
+/// and file/directory-prefix invariants before rendering.
 fn render_entries(entries: &[Entry]) -> String {
     let mut out = String::new();
     render_entries_into(entries, &mut out);

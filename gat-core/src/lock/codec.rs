@@ -1,4 +1,4 @@
-//! `gat.lock`'s pure semantic model: the row/TSV codec,
+//! `gat.lock`'s pure semantic model: the digest-first lock-v1 codec,
 //! canonical-path/OID row validation, strictly ordered row
 //! visitors, and the [`Entry`]/[`Lock`] value types themselves, together
 //! with every mutation ([`Lock::upsert`], [`Lock::remove_prefix`], ...)
@@ -270,23 +270,12 @@ pub fn visit_filtered_matching(
 }
 
 impl Lock {
-    /// Parse `gat.lock` text. Returns an error if the version line doesn't
-    /// match, if any entry row is malformed or non-canonical, if the same
-    /// path appears more than once, or if one path is both tracked and a
-    /// directory prefix of another tracked path -- refusing to silently
-    /// accept a usable subset of an untrusted file.
+    /// Parse and validate a complete lock-v1 file before materializing entries.
     ///
-    /// Invariants enforced on every entry row:
-    /// - Path is non-empty, root-relative, `/`-separated, and already in
-    ///   canonical form (no `..`, no leading `./`, no trailing `/`, no `\`).
-    /// - OID contains exactly 64 lower-case hex
-    ///   characters.
-    /// - No two rows share the same path.
-    /// - No row's path is a directory prefix of another row's path (a real
-    ///   tree cannot have a tracked file *and* tracked descendants under
-    ///   it at once, so parsing fails closed rather than silently trusting
-    ///   that a reader relying on this -- e.g. `LockSnapshot`'s exact-path
-    ///   shortcut -- won't miss a descendant).
+    /// Rows contain 64 lowercase hex digest bytes, TAB, and an unquoted path
+    /// with control-only `\xhh` escaping. LF and CRLF may be mixed; every line
+    /// requires a terminator. Decoded paths must be canonical and strictly
+    /// increasing, with no duplicates or file/directory-prefix conflicts.
     pub fn parse(text: &str) -> Result<Self> {
         let entries = Self::parse_filtered(text, |_| true)?;
         Ok(Self { entries })

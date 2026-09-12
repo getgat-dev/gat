@@ -53,8 +53,7 @@ pub enum LockDomainError {
     #[error("unrecognised lock-file version: expected {expected:?}, got {got:?}")]
     UnsupportedVersion { expected: String, got: String },
 
-    /// A row failed structural TSV parsing (wrong field count, missing
-    /// tab, an otherwise-malformed line).
+    /// A row has an invalid digest/path separator, missing LF, or unordered path.
     #[error("line {line}: {reason}")]
     MalformedRow {
         line: usize,
@@ -112,8 +111,8 @@ pub enum LockDomainError {
     },
 }
 
-/// Why [`LockDomainError::MalformedRow`] was raised: a structural
-/// TSV-parsing fact about a row, never a preformatted parser message.
+/// Why [`LockDomainError::MalformedRow`] was raised: a framing or ordering
+/// violation, never a preformatted parser message.
 #[derive(Debug, thiserror::Error)]
 pub enum MalformedRowReason {
     #[error("expected a TAB after exactly 64 hexadecimal bytes")]

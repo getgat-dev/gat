@@ -2060,9 +2060,9 @@ mod ownership_tests {
     fn history_lock_blob_with_invalid_utf8_is_reported_not_lossily_repaired() {
         let tmp = test_repo();
         let mut bytes = format!("{}\n", gat_core::lock::VERSION).into_bytes();
-        bytes.extend_from_slice(b"\"\xffbad.bin\"\tblake3:");
         bytes.extend_from_slice("a".repeat(64).as_bytes());
-        bytes.push(b'\n');
+        // Otherwise canonical digest-first framing isolates the UTF-8 error.
+        bytes.extend_from_slice(b"\t\xffbad.bin\n");
         std::fs::write(tmp.path().join("gat.lock"), bytes).unwrap();
         commit_all(tmp.path(), "invalid utf8 lock");
 

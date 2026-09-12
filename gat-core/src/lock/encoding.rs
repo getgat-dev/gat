@@ -12,7 +12,7 @@ pub fn write_header(out: &mut impl Write) -> io::Result<()> {
     out.write_all(b"\n")
 }
 
-/// Write one canonical row, without allocating or retaining it.
+/// Write `hex64<TAB>escaped-path<LF>`, without allocating or retaining the row.
 ///
 /// The caller establishes ordering and whole-lock invariants. Controls in the
 /// decoded path (including CR and LF) always use lowercase `\xhh` escapes.
