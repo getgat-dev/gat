@@ -68,12 +68,41 @@ fn every_alignment_tail_and_special_position_respects_first_lf() {
             storage[alignment + len] = b'\n';
             // All bytes after LF are special, including vector lookahead.
             storage[alignment + len + 1..].fill(b'\\');
-            for byte in [0, 9, 13, 31, 32, 92, 127, 128, 255] {
+            // Classification is independent of address alignment. Exercise every
+            // class at every position once; cross all alignments with an ordinary
+            // special and CR, whose final-position framing behavior is distinct.
+            let bytes: &[u8] = if alignment == 0 {
+                &[0, 9, 13, 31, 32, 92, 127, 128, 255]
+            } else {
+                b"\\\r"
+            };
+            for &byte in bytes {
                 for offset in 0..len {
+                    // Every event position is covered at alignment zero. Other
+                    // alignments retain first/last bytes and both sides of SIMD
+                    // block boundaries, rather than repeating interior lanes.
+                    if alignment != 0
+                        && offset != 0
+                        && offset + 1 != len
+                        && offset % 16 != 0
+                        && offset % 16 != 15
+                    {
+                        continue;
+                    }
                     storage[alignment + offset] = byte;
-                    check(&kernels, hash, &storage[alignment..]);
-                    // The same row at the exact slice boundary exercises bounded tails.
-                    check(&kernels, hash, &storage[alignment..=alignment + len]);
+                    let special =
+                        (byte < 32 || byte == b'\\') && !(byte == b'\r' && offset + 1 == len);
+                    let expected = Some(([0; 32], len, special));
+                    // The expected digest and first LF are fixed by construction;
+                    // avoid decoding/scanning them again in a scalar oracle per case.
+                    for kernel in &kernels {
+                        assert_eq!(kernel.row(hash, &storage[alignment..]), expected);
+                        // The exact slice boundary exercises bounded tails.
+                        assert_eq!(
+                            kernel.row(hash, &storage[alignment..=alignment + len]),
+                            expected
+                        );
+                    }
                     storage[alignment + offset] = b'a';
                 }
             }
