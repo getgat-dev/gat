@@ -196,8 +196,24 @@ fn init_installs_local_merge_config_and_attributes() {
     assert!(config.contains("driver = gat merge-driver %O %A %B"));
 
     let attrs = read(dir, ".git/info/attributes");
-    assert!(attrs.contains("/gat.lock merge=gat-lock"));
-    assert!(attrs.contains("/gat.lock/** merge=gat-lock"));
+    assert!(attrs.contains("/gat.lock merge=gat-lock text eol=lf"));
+    assert!(attrs.contains("/gat.lock/** merge=gat-lock text eol=lf"));
+    let checked = git(
+        dir,
+        &[
+            "check-attr",
+            "text",
+            "eol",
+            "--",
+            "gat.lock",
+            "gat.lock/shard.lock",
+        ],
+    );
+    assert_ok(&checked, "git check-attr");
+    assert_eq!(
+        stdout(&checked),
+        "gat.lock: text: set\ngat.lock: eol: lf\ngat.lock/shard.lock: text: set\ngat.lock/shard.lock: eol: lf\n"
+    );
 }
 
 /// `gat init --no-hooks` must still install the merge driver and

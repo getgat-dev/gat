@@ -6,7 +6,8 @@ use crate::RepositoryLayout;
 
 const ATTR_BEGIN: &str = "# >>> gat >>>";
 const ATTR_END: &str = "# <<< gat <<<";
-const ATTR_BODY: &str = "/gat.lock merge=gat-lock\n/gat.lock/** merge=gat-lock\n";
+const ATTR_BODY: &str =
+    "/gat.lock merge=gat-lock text eol=lf\n/gat.lock/** merge=gat-lock text eol=lf\n";
 const MERGE_DRIVER_HUMAN_NAME: &str = "gat.lock semantic merge driver";
 const MERGE_DRIVER_COMMAND: &str = "gat merge-driver %O %A %B";
 

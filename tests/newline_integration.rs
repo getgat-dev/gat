@@ -21,6 +21,13 @@ fn read(dir: &std::path::Path, rel: &str) -> String {
     std::fs::read_to_string(dir.join(rel)).unwrap()
 }
 
+fn allow_committed_crlf(dir: &std::path::Path) {
+    // These fixtures intentionally model historical, noncanonical Git blobs.
+    let mut attributes = read(dir, ".git/info/attributes");
+    attributes.push_str("/gat.lock -text\n");
+    std::fs::write(dir.join(".git/info/attributes"), attributes).unwrap();
+}
+
 /// Delegates to the shared `test-support` crate's `file_remote_url` --
 /// see `cli_integration.rs`'s identical wrapper for why each integration
 /// test file still needs its own thin `fn remote_url` (they're separate
@@ -30,10 +37,9 @@ fn remote_url(path: &std::path::Path) -> String {
     test_support::file_remote_url(path)
 }
 
-/// A clone checked out with `core.autocrlf true` converts every LF in a
-/// text-attributed tracked file to CRLF on checkout. `gat.lock` isn't
-/// marked `-text`/binary by gat itself, so a real clone onto a
-/// CRLF-converting checkout is a realistic way a working tree ends up
+/// Before `gat init` installs local LF attributes, a clone checked out
+/// with `core.autocrlf true` converts lock text to CRLF. A fresh clone
+/// onto a CRLF-converting checkout is a realistic way a working tree ends up
 /// with a CRLF `gat.lock` even though gat always *writes* canonical LF.
 /// `gat status`/`gat add` must still work against that CRLF file exactly
 /// as they would against the canonical LF one -- this is the concrete
@@ -180,6 +186,7 @@ fn mount_add_tolerates_a_crlf_gat_lock_from_the_source_repository() {
     // Rewrite the source's own committed gat.lock blob to CRLF, so the
     // object `gat mount add` reads is itself CRLF, not merely
     // checkout-converted.
+    allow_committed_crlf(source_dir);
     let crlf_lock = read(source_dir, "gat.lock").replace('\n', "\r\n");
     std::fs::write(source_dir.join("gat.lock"), &crlf_lock).unwrap();
     assert_ok(&git(source_dir, &["add", "gat.lock"]), "git add gat.lock");
@@ -224,6 +231,7 @@ fn diff_merge_walks_two_crlf_committed_lock_revisions_correctly() {
     std::fs::write(dir.join("a.bin"), b"a").unwrap();
     assert_ok(&gat(dir, &["add", "a.bin"]), "gat add a.bin");
     commit_all(dir, "base");
+    allow_committed_crlf(dir);
     let crlf_base = read(dir, "gat.lock").replace('\n', "\r\n");
     std::fs::write(dir.join("gat.lock"), &crlf_base).unwrap();
     assert_ok(&git(dir, &["add", "gat.lock"]), "git add gat.lock");
@@ -268,6 +276,7 @@ fn merge_driver_resolves_a_crlf_committed_lock_cleanly() {
 
     // Rewrite the just-committed gat.lock blob to CRLF and amend, so the
     // shared ancestor blob itself is CRLF (not merely checkout-converted).
+    allow_committed_crlf(dir);
     let crlf_lock = read(dir, "gat.lock").replace('\n', "\r\n");
     std::fs::write(dir.join("gat.lock"), &crlf_lock).unwrap();
     assert_ok(&git(dir, &["add", "gat.lock"]), "git add gat.lock");
