@@ -94,7 +94,7 @@ pub(super) const fn nibble(byte: u8) -> Option<u8> {
 /// Independent scalar oracle: decode pairs, then inspect exactly the current row.
 fn scalar(hash: &[u8; 64], path: &[u8]) -> DecodedRow {
     let mut oid = [0; 32];
-    for (byte, pair) in oid.iter_mut().zip(hash.chunks_exact(2)) {
+    for (byte, pair) in oid.iter_mut().zip(hash.as_chunks::<2>().0) {
         *byte = nibble(pair[0])? << 4 | nibble(pair[1])?;
     }
     let end = path.iter().position(|&b| b == b'\n')?;
