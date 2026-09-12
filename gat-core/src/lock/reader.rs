@@ -178,6 +178,16 @@ impl<'a> ValidatedLockFile<'a> {
         self.rows.iter().map(|row| (self.path(row), row.oid))
     }
 
+    /// Find an exact decoded path in logarithmic time after complete certification.
+    #[must_use]
+    pub fn find(&self, path: &str) -> Option<(&str, Oid)> {
+        let index = self
+            .rows
+            .binary_search_by(|row| self.path(row).cmp(path))
+            .ok()?;
+        self.row(index)
+    }
+
     /// Borrow a certified row by its zero-based index.
     #[must_use]
     pub fn row(&self, index: usize) -> Option<(&str, Oid)> {

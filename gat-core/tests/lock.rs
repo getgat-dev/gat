@@ -92,9 +92,9 @@ fn escaped_paths_roundtrip_in_decoded_order() {
     assert_eq!(Lock::parse(&text).unwrap(), lock);
     let mut cursor = FilteredRowCursor::new(&text, |_| true).unwrap();
     for expected in &lock.entries {
-        assert_eq!(cursor.next().unwrap().as_ref(), Some(expected));
+        assert_eq!(cursor.next().as_ref(), Some(expected));
     }
-    assert!(cursor.next().unwrap().is_none());
+    assert!(cursor.next().is_none());
     let reversed = format!(
         "{}\n{}\n",
         gat_core::lock::VERSION,
@@ -145,5 +145,50 @@ fn writer_sorts_paths_and_uses_only_the_new_v1_grammar() {
             oid('a'),
             oid('b')
         )
+    );
+}
+
+#[test]
+fn certified_lookup_uses_decoded_paths_and_handles_missing_keys() {
+    use gat_core::lock::validated::ValidatedLockFile;
+    let lock = Lock {
+        entries: [
+            "a\tfile",
+            "a\"file",
+            "a/file",
+            "z.bin",
+            "é.bin",
+            "ê.bin",
+            "日本語",
+        ]
+        .iter()
+        .map(|p| entry(p, 'a'))
+        .collect(),
+    };
+    let text = lock.to_string();
+    let view = ValidatedLockFile::parse(&text).unwrap();
+    for expected in &lock.entries {
+        assert_eq!(
+            view.find(expected.path.as_str()),
+            Some((expected.path.as_str(), expected.oid))
+        );
+    }
+    for missing in [
+        "",
+        "a",
+        r"a\x09file",
+        "b.bin",
+        "z.bin/child",
+        "ë.bin",
+        "日本語2",
+    ] {
+        assert!(view.find(missing).is_none(), "{missing:?}");
+    }
+    let empty = format!("{}\n", gat_core::lock::VERSION);
+    assert!(
+        ValidatedLockFile::parse(&empty)
+            .unwrap()
+            .find("a")
+            .is_none()
     );
 }

@@ -1150,18 +1150,24 @@ pub(crate) fn visit_lock_rows_validated(
         let view = gat_core::lock::validated::ValidatedLockFile::parse(&text)
             .map_err(|err| wrap_shard_parse_error(&shard.full_path, err))?;
         let levels = shard_levels_from_id(&shard.shard_id);
-        for (path, _) in view.rows() {
-            check_shard_placement(shard, levels, path)?;
+        if !levels.is_flat() {
+            for (path, _) in view.rows() {
+                check_shard_placement(shard, levels, path)?;
+            }
         }
-        let exact_found =
-            exact_path.is_some_and(|exact| view.rows().any(|(path, _)| path == exact));
-        #[cfg(any(test, feature = "test-support"))]
-        if exact_found {
+        if let Some((path, oid)) = exact_path.and_then(|exact| view.find(exact)) {
+            #[cfg(any(test, feature = "test-support"))]
             super::test_support::record_selected_shard_parse();
-        }
-        for (path, oid) in view.rows() {
-            if (!exact_found || exact_path == Some(path)) && keep(path) {
+            if keep(path) {
                 visit(&super::entry_from_validated_parts(path, oid))?;
+            }
+        } else {
+            // An absent exact path may name a directory selection, so preserve
+            // the full predicate walk in that case.
+            for (path, oid) in view.rows() {
+                if keep(path) {
+                    visit(&super::entry_from_validated_parts(path, oid))?;
+                }
             }
         }
         return Ok(());
@@ -3869,6 +3875,57 @@ mod tests {
             "a flat lock must be certified exactly once"
         );
         assert_eq!(kept, vec!["data/b.bin", "data/c.bin"]);
+    }
+
+    #[test]
+    fn exact_flat_lookup_preserves_selection_and_validation_timing() {
+        use std::cell::Cell;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut lock = Lock::default();
+        for path in ["data/a.bin", "data/b.bin", "other.bin"] {
+            insert(&mut lock, path, "a".repeat(64));
+        }
+        save(&lock, tmp.path(), LockShardLevels::FLAT).unwrap();
+        for (exact, accept, expected_calls, expected_rows) in [
+            ("other.bin", true, 1, vec!["other.bin"]),
+            ("other.bin", false, 1, vec![]),
+            ("data", true, 3, vec!["data/a.bin", "data/b.bin"]),
+        ] {
+            let calls = Cell::new(0);
+            let mut rows = Vec::new();
+            visit_lock_rows_validated(
+                tmp.path(),
+                Some(exact),
+                |path| {
+                    calls.set(calls.get() + 1);
+                    accept && path.starts_with(exact)
+                },
+                |entry| {
+                    rows.push(entry.path.to_string());
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(calls.get(), expected_calls);
+            assert_eq!(rows, expected_rows);
+        }
+        let corrupt = format!("{}{}\tz.bin\n", lock, "G".repeat(64));
+        std::fs::write(tmp.path().join("gat.lock"), corrupt).unwrap();
+        let calls = Cell::new(0);
+        let result = visit_lock_rows_validated(
+            tmp.path(),
+            Some("data/a.bin"),
+            |_| {
+                calls.set(calls.get() + 1);
+                true
+            },
+            |_| {
+                calls.set(calls.get() + 1);
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(calls.get(), 0);
     }
 
     #[test]

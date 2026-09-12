@@ -222,7 +222,7 @@ pub struct FilteredRowCursor<'a, F> {
 /// Whether `ancestor` is a directory prefix of `path`, i.e. `path` is
 /// exactly `ancestor` followed by `/` and at least one more character --
 /// the same relationship [`validate_no_path_directory_conflicts`]'s range
-/// query and [`FilteredRowCursor`]'s upper bound both encode.
+/// query and the cross-file ordered merge's upper bound both encode.
 #[must_use]
 pub fn is_directory_prefix(ancestor: &str, path: &str) -> bool {
     path.len() > ancestor.len()
@@ -234,7 +234,7 @@ pub fn is_directory_prefix(ancestor: &str, path: &str) -> bool {
 /// passed `ancestor`'s exclusive directory-descendant upper bound (see
 /// [`validate_no_path_directory_conflicts`]) -- computed by comparing
 /// bytes directly instead of allocating that bound as an owned `String`
-/// just to compare against it once. Used by both [`FilteredRowCursor`]
+/// just to compare against it once. Used by the cross-file ordered merge
 /// and `gat_io::StateStore`'s bulk
 /// directory-conflict merge-walk to retire an open candidate without a
 /// per-candidate allocation.
@@ -301,20 +301,20 @@ impl<'a, F: FnMut(&str) -> bool> FilteredRowCursor<'a, F> {
             keep,
         })
     }
+}
+
+impl<F: FnMut(&str) -> bool> Iterator for FilteredRowCursor<'_, F> {
+    type Item = Entry;
 
     /// Return the next selected row, allocating only its retained path.
-    #[allow(
-        clippy::should_implement_trait,
-        reason = "fallible semantic cursor API"
-    )]
-    pub fn next(&mut self) -> Result<Option<Entry>> {
+    fn next(&mut self) -> Option<Entry> {
         while let Some((path, oid)) = self.view.row(self.next) {
             self.next += 1;
             if (self.keep)(path) {
-                return Ok(Some(entry_from_validated_parts(path, oid)));
+                return Some(entry_from_validated_parts(path, oid));
             }
         }
-        Ok(None)
+        None
     }
 }
 

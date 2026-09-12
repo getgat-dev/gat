@@ -482,7 +482,7 @@ impl LockSnapshot {
         })?;
         let mut cursor = FilteredRowCursor::new(text, |path: &str| selection.matches_str(path))
             .map_err(|error| E::from(self.invalid(error)))?;
-        let mut pull = || cursor.next().map_err(|error| E::from(self.invalid(error)));
+        let mut pull = || Ok(cursor.next());
         body(&mut pull)
     }
 
