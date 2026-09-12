@@ -1784,11 +1784,16 @@ mod tests {
         // renaming it aside before calling storage::materialize (which removes
         // dest as cleanup between fallback modes), then restores it only if
         // every mode fails so the pre-existing file is never silently destroyed.
+        let tmp = git_repo();
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
+        let ingested = ingest(&repo, &b"desired content"[..]);
+        let mut lock = Lock::default();
+        // Each strategy gets a new unmaterialized path while sharing only the
+        // immutable desired object and already validated earlier rows.
         for link in ["hardlink", "symlink", "copy"] {
-            let tmp = git_repo();
-            let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
-                .unwrap()
-                .repository_at(tmp.path().to_path_buf());
+            let path = format!("{link}.bin");
             repo.save_config(&gat_core::config::Config {
                 cache: gat_core::config::CacheConfig {
                     materialization_strategy: Some(link.parse().unwrap()),
@@ -1797,13 +1802,11 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-            let mut lock = gat_io::LockStore::load_repository(repo.layout()).unwrap();
-            let ingested = ingest(&repo, &b"desired content"[..]);
-            lock.upsert(GatPath::parse_canonical("a.bin").unwrap(), ingested.oid);
+            lock.upsert(GatPath::parse_canonical(&path).unwrap(), ingested.oid);
             repo.save_lock(&lock).unwrap();
             // Write a pre-existing file at the destination (never synced/not
             // in materialized state) before running sync.
-            std::fs::write(tmp.path().join("a.bin"), b"pre-existing content").unwrap();
+            std::fs::write(tmp.path().join(&path), b"pre-existing content").unwrap();
 
             let outcome = sync(
                 &repo,
@@ -1826,7 +1829,7 @@ mod tests {
                 "link={link}: expected 1 materialized"
             );
             assert_eq!(
-                std::fs::read(tmp.path().join("a.bin")).unwrap(),
+                std::fs::read(tmp.path().join(&path)).unwrap(),
                 b"desired content",
                 "link={link}: file content should be updated to desired content"
             );

@@ -6,6 +6,12 @@ use std::time::Duration;
 
 #[test]
 fn interrupted_transfers_exit_with_signal_status_and_hooks_stay_quiet() {
+    let repo = init_repo();
+    repo.write("asset.bin", "payload");
+    assert_ok(&gat(repo.path(), &["add", "asset.bin"]), "add asset");
+    commit_all(repo.path(), "asset");
+    // Pushes stop at HEAD without changing local content. Run the hook last,
+    // since its fixture deliberately removes the local object and worktree file.
     for (args, signal, code, hook) in [
         (vec!["push"], "-INT", 130, false),
         (vec!["push"], "-TERM", 143, false),
@@ -16,10 +22,6 @@ fn interrupted_transfers_exit_with_signal_status_and_hooks_stay_quiet() {
             true,
         ),
     ] {
-        let repo = init_repo();
-        repo.write("asset.bin", "payload");
-        assert_ok(&gat(repo.path(), &["add", "asset.bin"]), "add asset");
-        commit_all(repo.path(), "asset");
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         let mut url = url::Url::parse("s3://fixture").unwrap();
         url.query_pairs_mut()
@@ -91,6 +93,9 @@ fn interrupted_transfers_exit_with_signal_status_and_hooks_stay_quiet() {
         );
         server.join().unwrap();
         assert_eq!(child.wait().unwrap().code(), Some(code));
+        if !hook {
+            assert_eq!(repo.read("asset.bin"), "payload");
+        }
         let mut stdout = String::new();
         child
             .take_stdout()

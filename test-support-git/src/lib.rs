@@ -135,12 +135,14 @@ impl GitCommand {
     ///
     /// # Panics
     /// Panics if Git cannot be started or its output cannot be collected.
-    pub fn output(self) -> Output {
-        let mut command = self.command;
-        let program = format!("{command:?}");
-        command
+    pub fn output(mut self) -> Output {
+        self.collect_output()
+    }
+
+    fn collect_output(&mut self) -> Output {
+        self.command
             .output()
-            .unwrap_or_else(|error| panic!("running {program}: {error}"))
+            .unwrap_or_else(|error| panic!("running {:?}: {error}", self.command))
     }
 
     #[allow(
@@ -150,12 +152,12 @@ impl GitCommand {
     ///
     /// # Panics
     /// Panics if Git cannot be run or exits unsuccessfully.
-    pub fn run(self) -> Output {
-        let program = format!("{:?}", self.command);
-        let output = self.output();
+    pub fn run(mut self) -> Output {
+        let output = self.collect_output();
         assert!(
             output.status.success(),
-            "{program} failed: stdout={} stderr={}",
+            "{:?} failed: stdout={} stderr={}",
+            self.command,
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
