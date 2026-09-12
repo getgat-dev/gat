@@ -1481,7 +1481,7 @@ mod tests {
     use super::*;
     use crate::repository_layout::RepositoryLayout as Repo;
 
-    fn git_repo() -> tempfile::TempDir {
+    fn state_directory() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
     }
 
@@ -1532,7 +1532,7 @@ mod tests {
 
     #[test]
     fn scoped_shard_identity_lookup_spans_bounded_sql_chunks() {
-        let tmp = git_repo();
+        let tmp = state_directory();
         let repo = Repo::at(tmp.path().to_path_buf());
         let store = StateStore::open(&repo).unwrap();
         let ids = (0..(u32::try_from(sql_chunk_size(1)).unwrap() + 3))
@@ -1557,7 +1557,7 @@ mod tests {
     /// path.
     #[test]
     fn find_directory_conflict_handles_an_exclude_set_larger_than_one_sql_chunk() {
-        let tmp = git_repo();
+        let tmp = state_directory();
         let repo = Repo::at(tmp.path().to_path_buf());
         let mut store = StateStore::open(&repo).unwrap();
 
@@ -1635,7 +1635,7 @@ mod tests {
     /// silently streaming every row.
     #[test]
     fn find_directory_conflict_does_not_scan_unrelated_rows_for_a_small_changed_set() {
-        let tmp = git_repo();
+        let tmp = state_directory();
         let repo = Repo::at(tmp.path().to_path_buf());
         let mut store = StateStore::open(&repo).unwrap();
 
@@ -1678,7 +1678,7 @@ mod tests {
     /// component) as the number of changed paths grows.
     #[test]
     fn find_directory_conflict_checks_a_large_changed_path_set_with_one_statement() {
-        let tmp = git_repo();
+        let tmp = state_directory();
         let repo = Repo::at(tmp.path().to_path_buf());
         let mut store = StateStore::open(&repo).unwrap();
 

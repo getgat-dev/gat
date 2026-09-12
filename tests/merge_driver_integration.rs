@@ -18,9 +18,8 @@ fn read(dir: &std::path::Path, rel: &str) -> String {
 /// `gat init` on `main`, with an initial commit tracking `a.bin` and
 /// `d.bin` via gat -- the shared ancestor every scenario branches from.
 fn setup() -> tempfile::TempDir {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_support_git::empty_git_repo();
     let dir = tmp.path();
-    assert_ok(&git(dir, &["init", "-q", "-b", "main"]), "git init");
     assert_ok(&gat(dir, &["init"]), "gat init");
     std::fs::write(dir.join("a.bin"), b"a").unwrap();
     std::fs::write(dir.join("d.bin"), b"d").unwrap();
@@ -83,9 +82,8 @@ fn independent_insertions_into_the_same_sorted_gap_merge_cleanly() {
 /// replacing `%A`, even though each input is a valid lock document.
 #[test]
 fn single_file_prefix_conflict_exits_nonzero_without_changing_ours() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_support_git::empty_git_repo();
     let dir = tmp.path();
-    assert_ok(&git(dir, &["init", "-q", "-b", "main"]), "git init");
     let header = gat_core::lock::VERSION;
     let digest = "a".repeat(64);
     std::fs::write(dir.join("O"), format!("{header}\n")).unwrap();
@@ -206,9 +204,8 @@ fn init_installs_local_merge_config_and_attributes() {
 /// attributes -- only the actual Git hooks are skipped.
 #[test]
 fn init_no_hooks_still_installs_merge_driver_and_attributes() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_support_git::empty_git_repo();
     let dir = tmp.path();
-    assert_ok(&git(dir, &["init", "-q", "-b", "main"]), "git init");
     assert_ok(&gat(dir, &["init", "--no-hooks"]), "gat init --no-hooks");
 
     assert!(!dir.join(".git/hooks/post-checkout").exists());
@@ -222,9 +219,8 @@ fn init_no_hooks_still_installs_merge_driver_and_attributes() {
 /// driver and attributes entirely.
 #[test]
 fn init_no_merge_driver_still_installs_hooks_but_skips_merge_integration() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_support_git::empty_git_repo();
     let dir = tmp.path();
-    assert_ok(&git(dir, &["init", "-q", "-b", "main"]), "git init");
     assert_ok(
         &gat(dir, &["init", "--no-merge-driver"]),
         "gat init --no-merge-driver",
@@ -241,9 +237,8 @@ fn init_no_merge_driver_still_installs_hooks_but_skips_merge_integration() {
 /// ran `gat init` at all -- now just plain `gat init`.
 #[test]
 fn init_installs_the_complete_integration_from_scratch() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_support_git::empty_git_repo();
     let dir = tmp.path();
-    assert_ok(&git(dir, &["init", "-q", "-b", "main"]), "git init");
 
     assert_ok(&gat(dir, &["init"]), "gat init");
 
@@ -258,9 +253,8 @@ fn init_installs_the_complete_integration_from_scratch() {
 /// the merge driver and attributes absent.
 #[test]
 fn init_no_merge_driver_only_installs_hooks() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_support_git::empty_git_repo();
     let dir = tmp.path();
-    assert_ok(&git(dir, &["init", "-q", "-b", "main"]), "git init");
 
     assert_ok(
         &gat(dir, &["init", "--no-merge-driver"]),
@@ -333,9 +327,8 @@ fn reinstalling_does_not_duplicate_config_or_attributes() {
 /// gat never owned survive both install and removal untouched.
 #[test]
 fn unrelated_config_and_attributes_content_is_preserved_across_install_and_removal() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_support_git::empty_git_repo();
     let dir = tmp.path();
-    assert_ok(&git(dir, &["init", "-q", "-b", "main"]), "git init");
     assert_ok(
         &git(dir, &["config", "user.name", "Preexisting User"]),
         "seed unrelated config",
@@ -462,9 +455,8 @@ fn no_merge_driver_disabled_state_leaves_a_real_conflict_for_git_to_resolve() {
 /// case above.
 #[test]
 fn sharded_lock_shards_merge_through_the_same_driver() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_support_git::empty_git_repo();
     let dir = tmp.path();
-    assert_ok(&git(dir, &["init", "-q", "-b", "main"]), "git init");
     assert_ok(&gat(dir, &["init"]), "gat init");
     assert_ok(
         &gat(dir, &["config", "lock.shard_levels", "1"]),

@@ -4072,6 +4072,9 @@ dependencies = [
 [[package]]
 name = "test-support-git"
 version = "0.0.0"
+dependencies = [
+ "tempfile",
+]
 
 [[package]]
 name = "thiserror"

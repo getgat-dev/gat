@@ -12,8 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub fn repository() -> (tempfile::TempDir, Repository) {
-    let temp = tempfile::tempdir().unwrap();
-    test_support_git::run_git(temp.path(), &["init", "-q", "-b", "main"]);
+    let temp = test_support_git::empty_git_repo();
     test_support_git::run_git(
         temp.path(),
         &["commit", "-q", "--allow-empty", "-m", "initial"],

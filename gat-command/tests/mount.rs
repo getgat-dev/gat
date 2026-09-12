@@ -28,8 +28,7 @@ fn mount_config(target: &str) -> MountConfig {
 }
 
 fn git_repo() -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    run_git(dir.path(), &["init", "-q", "-b", "main"]);
+    let dir = test_support_git::empty_git_repo();
     std::fs::write(dir.path().join("README"), "fixture").unwrap();
     commit_all(dir.path(), "initial");
     dir

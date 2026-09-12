@@ -574,8 +574,7 @@ mod ownership_tests {
     }
 
     fn test_repo() -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().unwrap();
-        git(tmp.path(), &["init", "-q"]);
+        let tmp = test_support_git::empty_git_repo();
         git(tmp.path(), &["config", "user.name", "Test"]);
         git(
             tmp.path(),

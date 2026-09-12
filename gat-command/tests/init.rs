@@ -12,9 +12,7 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 fn git_repo() -> tempfile::TempDir {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    git(tmp.path(), &["init", "-q", "-b", "main"]);
-    tmp
+    test_support_git::empty_git_repo()
 }
 
 fn converge(repo: &Repository, request: InitRequest) -> InitOutcome {

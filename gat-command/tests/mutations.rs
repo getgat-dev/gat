@@ -5,8 +5,7 @@ use gat_core::progress::NoopProgress;
 use gat_engine::Repository;
 
 fn repository() -> (tempfile::TempDir, Repository) {
-    let tmp = tempfile::tempdir().unwrap();
-    test_support_git::run_git(tmp.path(), &["init", "-q"]);
+    let tmp = test_support_git::empty_git_repo();
     let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
         .unwrap()
         .repository_at(tmp.path().to_path_buf());
@@ -350,8 +349,7 @@ fn add_infrastructure_is_unconditional_but_nested_basenames_are_allowed() {
 #[test]
 fn tiny_windows_bound_explicit_and_directory_preparation() {
     for explicit in [false, true] {
-        let tmp = tempfile::tempdir().unwrap();
-        test_support_git::run_git(tmp.path(), &["init", "-q"]);
+        let tmp = test_support_git::empty_git_repo();
         std::fs::create_dir(tmp.path().join("data")).unwrap();
         let paths: Vec<_> = (0..13)
             .map(|index| {

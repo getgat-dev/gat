@@ -578,11 +578,11 @@ mod tests {
             ("tail\r", true),
             ("tail", false),
         ] {
-            let output = std::process::Command::new("git")
-                .current_dir(tmp.path())
-                .args(["check-ignore", "--no-index", "--", path])
-                .output()
-                .unwrap();
+            let output = test_support_git::GitCommand::new(
+                tmp.path(),
+                &["check-ignore", "--no-index", "--", path],
+            )
+            .output();
             assert_eq!(output.status.code(), Some(i32::from(!ignored)), "{path:?}");
         }
     }

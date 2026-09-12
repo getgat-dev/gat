@@ -12,9 +12,7 @@ fn git(root: &std::path::Path, args: &[&str]) {
 }
 
 fn repository() -> tempfile::TempDir {
-    let temp = tempfile::tempdir().unwrap();
-    git(temp.path(), &["init", "-q"]);
-    temp
+    test_support_git::empty_git_repo()
 }
 
 fn layout(root: &std::path::Path) -> RepositoryLayout {
