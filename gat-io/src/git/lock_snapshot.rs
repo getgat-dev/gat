@@ -5,9 +5,7 @@ use gat_core::git::GitRevisionSpec;
 use gat_core::lock::Entry;
 #[cfg(any(test, feature = "test-support"))]
 use gat_core::lock::Lock;
-use gat_core::lock::validated::{
-    FilteredRowCursor, is_path_ordered, visit_filtered_matching, visit_filtered_unordered,
-};
+use gat_core::lock::validated::{FilteredRowCursor, visit_filtered_matching};
 use gat_core::lock::{LockShardId, LockShardLevels};
 use gat_core::selection::Selection;
 
@@ -482,27 +480,10 @@ impl LockSnapshot {
                 source,
             ))
         })?;
-        if is_path_ordered(text) {
-            let mut cursor = FilteredRowCursor::new(text, |path: &str| selection.matches_str(path))
-                .map_err(|error| E::from(self.invalid(error)))?;
-            let mut pull = || cursor.next().map_err(|error| E::from(self.invalid(error)));
-            body(&mut pull)
-        } else {
-            let mut rows = Vec::new();
-            visit_filtered_unordered(
-                text,
-                |path| selection.matches_str(path),
-                |entry| {
-                    rows.push(entry);
-                    Ok(())
-                },
-            )
+        let mut cursor = FilteredRowCursor::new(text, |path: &str| selection.matches_str(path))
             .map_err(|error| E::from(self.invalid(error)))?;
-            rows.sort_by(|left, right| left.path.cmp(&right.path));
-            let mut rows = rows.into_iter();
-            let mut pull = || Ok(rows.next());
-            body(&mut pull)
-        }
+        let mut pull = || cursor.next().map_err(|error| E::from(self.invalid(error)));
+        body(&mut pull)
     }
 
     pub fn rows_sorted(&self, selection: &Selection) -> Result<Vec<Entry>, LockSnapshotError> {
@@ -704,21 +685,13 @@ mod ownership_tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("00.tsv"),
-            format!(
-                "{}\n\"foo\"\tblake3:{}\n",
-                gat_core::lock::VERSION,
-                "a".repeat(64)
-            ),
+            format!("{0}\n{1}\tfoo\n", gat_core::lock::VERSION, "a".repeat(64)),
         )
         .unwrap();
         std::fs::create_dir_all(dir.join("11")).unwrap();
         std::fs::write(
             dir.join("11").join("22.tsv"),
-            format!(
-                "{}\n\"bar\"\tblake3:{}\n",
-                gat_core::lock::VERSION,
-                "b".repeat(64)
-            ),
+            format!("{0}\n{1}\tbar\n", gat_core::lock::VERSION, "b".repeat(64)),
         )
         .unwrap();
         git(&root, &["add", "-A"]);
@@ -742,21 +715,13 @@ mod ownership_tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("00.tsv"),
-            format!(
-                "{}\n\"foo\"\tblake3:{}\n",
-                gat_core::lock::VERSION,
-                "a".repeat(64)
-            ),
+            format!("{0}\n{1}\tfoo\n", gat_core::lock::VERSION, "a".repeat(64)),
         )
         .unwrap();
         std::fs::create_dir_all(dir.join("11")).unwrap();
         std::fs::write(
             dir.join("11").join("22.tsv"),
-            format!(
-                "{}\n\"bar\"\tblake3:{}\n",
-                gat_core::lock::VERSION,
-                "b".repeat(64)
-            ),
+            format!("{0}\n{1}\tbar\n", gat_core::lock::VERSION, "b".repeat(64)),
         )
         .unwrap();
         git(&root, &["add", "-A"]);
@@ -793,15 +758,9 @@ mod ownership_tests {
         assert_eq!(selected, full);
     }
 
-    /// A scoped flat read (`shard_rows_selected`, and by extension
-    /// `exact_scope_rows`) over an already canonically `path`-ordered
-    /// shard must take the bounded, ordered `FilteredRowCursor` fast
-    /// path, never the whole-shard `BTreeSet`-based validator
-    /// (`Lock::visit_filtered`) -- otherwise a one-row selection over a
-    /// huge flat lock would still hold one validation node per discarded
-    /// row.
+    /// Selection consumes one complete certification of the source blob.
     #[test]
-    fn scoped_flat_read_of_ordered_lock_uses_the_bounded_cursor_not_the_btreeset_validator() {
+    fn scoped_flat_read_certifies_the_file_once() {
         let (_tmp, gix_repo) = snapshot_repo(
             LockShardLevels::FLAT,
             &["a.bin", "data/b.bin", "data/c.bin", "z.bin"],
@@ -811,13 +770,12 @@ mod ownership_tests {
         let shard = snapshot.shards()[0].clone();
         let selection = scoped_selection(Path::new("data"));
 
-        let before = crate::lock::test_support::btree_validation_parses();
+        let before = crate::lock::test_support::file_validation_parses();
         let selected = snapshot.shard_rows_selected(&shard, &selection).unwrap();
         assert_eq!(
-            crate::lock::test_support::btree_validation_parses() - before,
-            0,
-            "a scoped read of an already path-ordered shard must never fall \
-                 back to the whole-shard BTreeSet validator"
+            crate::lock::test_support::file_validation_parses() - before,
+            1,
+            "a scoped read certifies the complete file exactly once"
         );
         let mut selected_paths: Vec<&str> = selected.iter().map(|e| e.path.as_str()).collect();
         selected_paths.sort_unstable();

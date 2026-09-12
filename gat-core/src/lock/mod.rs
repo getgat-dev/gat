@@ -10,9 +10,10 @@ mod codec;
 mod error;
 mod identity;
 mod merge;
+mod reader;
 mod shard;
 
-pub use codec::{Entry, Lock, QuotedPath, VERSION, path_matches_scope};
+pub use codec::{Entry, EscapedPath, Lock, VERSION, path_matches_scope};
 pub use error::{InvalidOidReason, LockDomainError, LockError, MalformedRowReason, Result};
 pub use identity::{
     CanonicalDesiredIdentity, LOCK_VERSION, ShardContentIdentity, ShardContentIdentityDecodeError,
@@ -34,10 +35,10 @@ pub use shard::{LockShardId, LockShardIdError, LockShardLevels, LockShardLevelsE
 pub mod validated {
     pub use super::codec::{
         FilteredRowCursor, check_ordered_row_conflict, entry_from_validated_parts,
-        exceeds_directory_upper_bound, is_directory_prefix, is_path_ordered, parse_row,
-        validate_no_path_directory_conflicts, visit_filtered_matching, visit_filtered_unordered,
-        visit_rows_validated,
+        exceeds_directory_upper_bound, is_directory_prefix, parse_row,
+        validate_no_path_directory_conflicts, visit_filtered_matching, visit_rows_validated,
     };
+    pub use super::reader::ValidatedLockFile;
 
     /// Compute the shard identity for row text whose canonical path form was
     /// already proven by this facade's parser/visitor contract.
@@ -52,4 +53,4 @@ pub mod validated {
 
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
-pub use codec::test_probes;
+pub use reader::test_probes;

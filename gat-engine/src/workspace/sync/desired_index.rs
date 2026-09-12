@@ -754,7 +754,7 @@ mod tests {
         std::fs::write(
             dir.join("48.tsv"),
             format!(
-                "{}\n\"shared.bin\"\tblake3:{}\n",
+                "{0}\n{1}\tshared.bin\n",
                 gat_core::lock::VERSION,
                 "a".repeat(64)
             ),
@@ -764,7 +764,7 @@ mod tests {
         std::fs::write(
             dir.join("48").join("dd.tsv"),
             format!(
-                "{}\n\"shared.bin\"\tblake3:{}\n",
+                "{0}\n{1}\tshared.bin\n",
                 gat_core::lock::VERSION,
                 "b".repeat(64)
             ),
@@ -805,7 +805,7 @@ mod tests {
         std::fs::write(
             dir.join("d5.tsv"),
             format!(
-                "{}\n\"existing.bin\"\tblake3:{}\n",
+                "{0}\n{1}\texisting.bin\n",
                 gat_core::lock::VERSION,
                 "a".repeat(64)
             ),
@@ -819,7 +819,7 @@ mod tests {
         std::fs::write(
             dir.join("d5").join("69.tsv"),
             format!(
-                "{}\n\"existing.bin\"\tblake3:{}\n",
+                "{0}\n{1}\texisting.bin\n",
                 gat_core::lock::VERSION,
                 "b".repeat(64)
             ),
@@ -849,7 +849,7 @@ mod tests {
         std::fs::write(
             dir.join("00.tsv"),
             format!(
-                "{}\n\"existing.bin\"\tblake3:{}\n",
+                "{0}\n{1}\texisting.bin\n",
                 gat_core::lock::VERSION,
                 "a".repeat(64)
             ),
@@ -882,17 +882,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("04.tsv"),
-            format!(
-                "{}\n\"foo\"\tblake3:{}\n",
-                gat_core::lock::VERSION,
-                "a".repeat(64)
-            ),
+            format!("{0}\n{1}\tfoo\n", gat_core::lock::VERSION, "a".repeat(64)),
         )
         .unwrap();
         std::fs::write(
             dir.join("2d.tsv"),
             format!(
-                "{}\n\"foo/bar\"\tblake3:{}\n",
+                "{0}\n{1}\tfoo/bar\n",
                 gat_core::lock::VERSION,
                 "b".repeat(64)
             ),
@@ -923,11 +919,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("04.tsv"),
-            format!(
-                "{}\n\"foo\"\tblake3:{}\n",
-                gat_core::lock::VERSION,
-                "a".repeat(64)
-            ),
+            format!("{0}\n{1}\tfoo\n", gat_core::lock::VERSION, "a".repeat(64)),
         )
         .unwrap();
         std::fs::write(dir.join("2d.tsv"), format!("{}\n", gat_core::lock::VERSION)).unwrap();
@@ -938,7 +930,7 @@ mod tests {
         std::fs::write(
             dir.join("2d.tsv"),
             format!(
-                "{}\n\"foo/bar\"\tblake3:{}\n",
+                "{0}\n{1}\tfoo/bar\n",
                 gat_core::lock::VERSION,
                 "b".repeat(64)
             ),
@@ -976,7 +968,7 @@ mod tests {
         std::fs::write(
             dir.join("04.tsv"),
             format!(
-                "{}\n\"foo/0100\"\tblake3:{}\n",
+                "{0}\n{1}\tfoo/0100\n",
                 gat_core::lock::VERSION,
                 "a".repeat(64)
             ),
@@ -985,7 +977,7 @@ mod tests {
         std::fs::write(
             dir.join("88.tsv"),
             format!(
-                "{}\n\"foo/0101\"\tblake3:{}\n",
+                "{0}\n{1}\tfoo/0101\n",
                 gat_core::lock::VERSION,
                 "b".repeat(64)
             ),
@@ -1000,11 +992,7 @@ mod tests {
         // with `foo/0101`, still owned by unchanged shard `88`.
         std::fs::write(
             dir.join("04.tsv"),
-            format!(
-                "{}\n\"foo\"\tblake3:{}\n",
-                gat_core::lock::VERSION,
-                "c".repeat(64)
-            ),
+            format!("{0}\n{1}\tfoo\n", gat_core::lock::VERSION, "c".repeat(64)),
         )
         .unwrap();
 

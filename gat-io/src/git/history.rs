@@ -729,19 +729,11 @@ mod tests {
     #[test]
     fn historical_lock_shape_comes_from_each_commit_tree() {
         let root = repository();
-        let first = format!(
-            "{}\n\"a.bin\"\tblake3:{}\n",
-            gat_core::lock::VERSION,
-            "a".repeat(64)
-        );
+        let first = format!("{0}\n{1}\ta.bin\n", gat_core::lock::VERSION, "a".repeat(64));
         commit(root.path(), "gat.lock", first.as_bytes(), "flat");
         std::fs::remove_file(root.path().join("gat.lock")).unwrap();
         std::fs::create_dir(root.path().join("gat.lock")).unwrap();
-        let second = format!(
-            "{}\n\"b.bin\"\tblake3:{}\n",
-            gat_core::lock::VERSION,
-            "b".repeat(64)
-        );
+        let second = format!("{0}\n{1}\tb.bin\n", gat_core::lock::VERSION, "b".repeat(64));
         commit(
             root.path(),
             "gat.lock/00.lock",
@@ -1978,7 +1970,7 @@ mod ownership_tests {
     }
 
     #[test]
-    fn ordered_history_blob_uses_the_bounded_cursor_not_the_btreeset_validator() {
+    fn history_blob_certifies_the_file_once() {
         let tmp = test_repo();
         let mut lock = gat_core::lock::Lock::default();
         lock.upsert(lock_path("a.bin"), lock_oid('a'));
@@ -1992,7 +1984,7 @@ mod ownership_tests {
         .unwrap();
         commit_all(tmp.path(), "persist lock");
 
-        let before = crate::lock::test_support::btree_validation_parses();
+        let before = crate::lock::test_support::file_validation_parses();
         let mut kept = Vec::new();
         let stats = visit_history_lock_entries::<Box<dyn std::error::Error>>(
             tmp.path(),
@@ -2007,9 +1999,9 @@ mod ownership_tests {
 
         assert_eq!(stats.visited, 1);
         assert_eq!(
-            crate::lock::test_support::btree_validation_parses() - before,
-            0,
-            "an ordered historical lock blob must take the bounded fast path"
+            crate::lock::test_support::file_validation_parses() - before,
+            1,
+            "a historical lock blob must be certified exactly once"
         );
         assert_eq!(kept, vec!["data/b.bin", "data/c.bin"]);
     }
@@ -2019,7 +2011,7 @@ mod ownership_tests {
         let cases = [
             (
                 format!(
-                    "{}\n\"shared.bin\"\tblake3:{}\n\"shared.bin\"\tblake3:{}\n",
+                    "{0}\n{1}\tshared.bin\n{2}\tshared.bin\n",
                     gat_core::lock::VERSION,
                     "a".repeat(64),
                     "b".repeat(64)
@@ -2028,7 +2020,7 @@ mod ownership_tests {
             ),
             (
                 format!(
-                    "{}\n\"foo\"\tblake3:{}\n\"foo/bar\"\tblake3:{}\n",
+                    "{0}\n{1}\tfoo\n{2}\tfoo/bar\n",
                     gat_core::lock::VERSION,
                     "a".repeat(64),
                     "b".repeat(64)
@@ -2041,7 +2033,7 @@ mod ownership_tests {
                     gat_core::lock::VERSION,
                     "a".repeat(64)
                 ),
-                "oid must start",
+                "expected a TAB",
             ),
         ];
 

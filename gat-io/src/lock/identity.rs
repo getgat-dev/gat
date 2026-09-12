@@ -378,7 +378,7 @@ mod tests {
     fn identical_shard_bytes_produce_the_identical_leaf_identity_from_every_path() {
         let tmp = tempfile::tempdir().unwrap();
         let oid = "a".repeat(64);
-        let bytes = format!("{}\n\"a.bin\"\tblake3:{oid}\n", crate::lock::VERSION);
+        let bytes = format!("{0}\n{oid}\ta.bin\n", crate::lock::VERSION);
         let path = tmp.path().join("gat.lock");
         std::fs::write(&path, &bytes).unwrap();
         // With no prior identity to compare against, this shard's proof

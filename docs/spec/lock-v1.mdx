@@ -19,9 +19,10 @@ Format identifier: `https://getgat.dev/spec/lock-v1`.
 The key words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY** in this
 document are normative when written in uppercase.
 
-This specification separates the <Tooltip tip="The meaning of the lock: which content ID belongs to each path. Different physical layouts can express the same mapping.">semantic model</Tooltip> from its <Tooltip tip="The prescribed way to write the map as bytes, including quoting, ordering, and line endings. Consistent output avoids textual differences that do not represent file-version changes.">canonical on-disk serialization</Tooltip>. Readers MAY accept the compatibility forms listed in
-[Line endings and canonical output](#line-endings-and-canonical-output). Writers
-SHOULD emit the canonical form.
+The semantic model defines which content ID belongs to each path. The canonical
+serialization below is mandatory for both readers and writers. There are no
+alternate row spellings or unordered-input fallback. Readers accept LF and CRLF
+record endings; writers emit LF.
 
 ## Semantic model
 
@@ -37,7 +38,8 @@ Each map entry identifies one tracked file.
 - Two or more paths MAY reference the same content ID.
 - Directories are not entries. A tracked directory is represented by the file entries
   beneath that path prefix.
-- Entry order is not semantically significant.
+- A tracked path MUST NOT also be the directory-prefix ancestor of another entry.
+- The logical model is a map; serialized rows MUST follow the canonical ordering below.
 - Flat and sharded representations of the same path-to-OID map are semantically
   equivalent.
 
@@ -54,8 +56,8 @@ Example, with illustrative digest values:
 
 ```text
 version https://getgat.dev/spec/lock-v1
-"assets/model.bin"	blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-"data/train.parquet"	blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa	assets/model.bin
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb	data/train.parquet
 ```
 
 A document containing only the version line represents an empty map. An absent
@@ -68,11 +70,11 @@ Canonical record grammar:
 ```text
 document = version LF *(entry LF)
 version  = "version https://getgat.dev/spec/lock-v1"
-entry    = quoted-path HTAB oid
-oid      = "blake3:" 64(lowercase-hex-digit)
+entry    = oid HTAB escaped-path
+oid      = 64(lowercase-hex-digit)
 ```
 
-`quoted-path` uses the encoding and decoded-path constraints in [Paths](#paths).
+`escaped-path` uses the encoding and decoded-path constraints in [Paths](#paths).
 <Tooltip tip="Line feed, U+000A; the canonical record terminator.">LF</Tooltip> and
 <Tooltip tip="Horizontal tab, U+0009; the separator between the two entry fields.">HTAB</Tooltip> denote single characters.
 
@@ -93,22 +95,24 @@ different. An incompatible future format must use a different version identifier
 
 ### Entry rows
 
-Every non-empty entry row has exactly two fields separated by one horizontal TAB
+Every entry row has exactly two fields separated by one horizontal TAB
 (`U+0009`):
 
 ```text
-<quoted-path><TAB>blake3:<digest>
+<digest64><TAB><escaped-path>
 ```
 
-The path field MUST use the [canonical quoting and escaping](#paths). There are no optional fields.
+The path field MUST use the [canonical escaping](#paths). There are no optional fields.
 
 A conforming reader MUST reject an entry row that:
 
-- has no TAB-separated OID field,
+- does not have a TAB immediately after exactly 64 lowercase hexadecimal bytes,
 - has more than two fields,
 - has an invalid path,
 - has an invalid OID, or
-- duplicates a path already present in the logical lock.
+- duplicates a path already present in the logical lock,
+- is not strictly ordered by decoded path bytes, or
+- tracks both a file and a descendant of that file.
 
 Comments are not part of lock-v1.
 
@@ -122,34 +126,29 @@ Canonical lock-v1 output:
 - contains no blank lines, and
 - sorts entry rows by `path` in ascending lexical order.
 
-Readers MAY accept CRLF line endings, a missing final LF, or empty lines after the
-version line as a compatibility leniency. Re-serializing such input SHOULD produce the
-canonical form above.
+Readers MUST accept LF and CRLF endings for the version line and entry rows,
+including mixed endings. A CR is framing only immediately before LF; raw CR
+elsewhere in a path is invalid. Writers MUST emit LF.
+Readers MUST reject missing final newlines and empty entry rows.
+The version line alone, including its newline, encodes an empty map.
 
 ## Paths
 
 The `path` field encodes the canonical repository-relative path of the tracked file.
-Every path MUST be encoded as a canonical JSON string following
-[RFC 8785 §3.2.2.2](https://www.rfc-editor.org/rfc/rfc8785.html#section-3.2.2.2),
-including the enclosing double quotes (`"`):
+Paths are unquoted UTF-8, using one canonical escape spelling:
 
-- U+0008, U+0009, U+000A, U+000C, and U+000D MUST use `\b`, `\t`, `\n`, `\f`,
-  and `\r`, respectively.
-- All other U+0000–U+001F controls MUST use `\u00hh` with lowercase hexadecimal
-  digits.
-- Double quote and backslash MUST use `\"` and `\\`, respectively.
-- All other Unicode scalar values MUST be written literally as UTF-8, including
-  `/`, U+007F, U+2028, and U+2029, without Unicode normalization.
+- U+0000–U+001F MUST be encoded as `\xhh`, with exactly two lowercase hexadecimal digits.
+- All other permitted Unicode scalar values MUST appear literally, including double
+  quotes, spaces, `/`, U+007F, U+2028, and U+2029. Leading and trailing spaces are data.
+- Backslash is only an escape introducer. Decoded backslashes are invalid.
 
-Readers MUST reject noncanonical encodings: unknown or incomplete escapes,
-uppercase hexadecimal digits, Unicode escapes for characters requiring short
-escapes or literal UTF-8, escaped `/`, unescaped quotes, raw U+0000–U+001F
-controls, and unquoted paths. Invalid Unicode, including lone surrogates, MUST
-be rejected. The decoded path MUST also satisfy the path rules below; in
-particular, backslash remains invalid in a decoded canonical path.
+Readers MUST reject raw controls, unknown or incomplete escapes, uppercase escape
+hexadecimal digits, and escapes for values outside U+0000–U+001F. Spellings such as
+`\t`, `\n`, `\u0009`, `\x2f`, and `\"` are invalid. Invalid UTF-8 MUST be rejected.
+A quote is an ordinary filename character and is never removed as framing.
 
-For example, `"data/fi\tle.bin"` encodes a path with an actual TAB inside its filename;
-`"data/fi\nle.bin"` encodes a path with an actual LF. Each remains one physical row.
+For example, `data/fi\x09le.bin` encodes a filename containing TAB and
+`data/fi\x0ale.bin` one containing LF. Both occupy one physical record.
 
 The following rules apply to the **decoded** path.
 
@@ -191,9 +190,9 @@ Examples:
 | `/data/model.bin` | No | Absolute path |
 | `data\model.bin` | No | Backslash separator |
 | `data/` | No | Directory/trailing slash |
-| `data/fi<TAB>le.bin` | Yes | TAB is encoded as `\t` inside the quoted field |
+| `data/fi<TAB>le.bin` | Yes | TAB is encoded as `\x09` |
 
-ASCII controls are valid decoded path characters and MUST be escaped in the quoted field.
+ASCII controls are valid decoded path characters and MUST be escaped in the path field.
 
 The stored UTF-8 path is the logical map key. No
 <Tooltip tip="Converting distinct Unicode sequences to a common representation. Lock-v1 preserves their original UTF-8 bytes as distinct keys.">Unicode normalization</Tooltip>
@@ -207,19 +206,10 @@ and MUST NOT allow a lock path to escape the repository root.
 
 ## Content IDs
 
-The second field is a BLAKE3 content identifier:
-
-```text
-blake3:<digest>
-```
-
-`<digest>` MUST be exactly 64 lowercase hexadecimal characters (`0-9`, `a-f`),
+The first field is exactly 64 lowercase hexadecimal characters (`0-9`, `a-f`),
 representing the 32-byte BLAKE3 digest of the file's raw content bytes.
-
-The `blake3:` algorithm prefix is mandatory in the lock document.
-
-For the semantic map, the content ID is the digest value. The prefix is part of the
-serialized field, not a separate lock property.
+The format version defines the algorithm: there is no per-row `blake3:` prefix.
+Base64, uppercase hexadecimal, whitespace, and additional fields are invalid.
 
 The digest:
 
@@ -233,8 +223,9 @@ Uppercase hexadecimal is non-canonical and invalid in lock-v1.
 
 ## Canonical ordering
 
-For a flat `gat.lock`, writers MUST sort rows by decoded path UTF-8 bytes.
-Quotes and escape sequences do not participate in ordering.
+For a flat `gat.lock`, rows MUST be strictly increasing by decoded path UTF-8 bytes.
+Readers MUST reject unordered input. Escape spellings and the digest do not
+participate in ordering; equal decoded paths are duplicates.
 
 Ordering does not change lock semantics. Consumers SHOULD treat the document as
 a map keyed by path; row position has no semantic meaning.
@@ -258,7 +249,7 @@ To enable sharding in Gat, see [Shard a very large Gat lock](/guides/improving-p
 
 For a canonical sharded lock at depth `N`, where `N >= 1`:
 
-1. Encode the decoded canonical `path` as its exact UTF-8 byte sequence, without quotes or escaping.
+1. Encode the decoded canonical `path` as its exact UTF-8 byte sequence, without escaping.
 2. Compute `BLAKE3(path_bytes)`.
 3. Take the first `N` digest bytes.
 4. Encode each selected byte as exactly two lowercase hexadecimal characters.
@@ -319,7 +310,6 @@ Different revisions may use different representations.
 Two lock-v1 representations are semantically equivalent when they define the same
 path-to-OID map, even if:
 
-- their rows appear in a different order,
 - one is flat and the other is sharded, or
 - they use a different valid shard depth.
 
@@ -344,7 +334,7 @@ theirs == ancestor  => take ours
 otherwise           => conflict
 ```
 
-A successful merged result SHOULD be serialized canonically. Row adjacency and
+A successful merged result MUST be serialized canonically. Row adjacency and
 shard placement do not affect the result.
 
 ## Invalid examples
@@ -353,7 +343,7 @@ shard placement do not affect the result.
   <Tab title="Extra field" id="extra-field">
 ```text
 version https://getgat.dev/spec/lock-v1
-"data/model.bin"	blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa	123456
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa	data/model.bin	123456
 ```
 
 Invalid: lock-v1 has no size field and entry rows have exactly two columns.
@@ -361,7 +351,7 @@ Invalid: lock-v1 has no size field and entry rows have exactly two columns.
   <Tab title="Uppercase OID" id="uppercase-oid">
 ```text
 version https://getgat.dev/spec/lock-v1
-"data/model.bin"	blake3:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA	data/model.bin
 ```
 
 Invalid: OID hex must be lowercase.
@@ -369,7 +359,7 @@ Invalid: OID hex must be lowercase.
   <Tab title="Non-canonical path" id="non-canonical-path">
 ```text
 version https://getgat.dev/spec/lock-v1
-"./data/model.bin"	blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa	./data/model.bin
 ```
 
 Invalid: the decoded path contains a leading `./`.
@@ -377,8 +367,8 @@ Invalid: the decoded path contains a leading `./`.
   <Tab title="Duplicate path" id="duplicate-path">
 ```text
 version https://getgat.dev/spec/lock-v1
-"data/model.bin"	blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-"data/model.bin"	blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa	data/model.bin
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb	data/model.bin
 ```
 
 Invalid: a path can map to only one OID in a logical lock.

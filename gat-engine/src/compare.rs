@@ -1553,14 +1553,9 @@ mod tests {
         );
     }
 
-    /// `Lock::parse` never required `path`-ordered rows -- only format,
-    /// path, oid, duplicate, and directory-conflict invariants -- so a
-    /// hand-edited but otherwise valid flat lock with rows out of order
-    /// must still compare correctly, both against another persisted
-    /// snapshot and against current state, rather than the streaming
-    /// fast path turning "not `path`-ordered" into a new hard failure.
+    /// Both persisted comparisons and current-state refresh enforce path order.
     #[test]
-    fn unsorted_flat_lock_compares_correctly_via_the_compatibility_fallback() {
+    fn unsorted_flat_lock_is_rejected_by_comparison_and_refresh() {
         use crate::test_harness::{commit_all, test_repo};
         use gat_core::lock::VERSION;
 
@@ -1574,7 +1569,7 @@ mod tests {
         std::fs::write(
             root.join("gat.lock"),
             format!(
-                "{VERSION}\n\"z.bin\"\tblake3:{}\n\"a.bin\"\tblake3:{}\n",
+                "{VERSION}\n{0}\tz.bin\n{1}\ta.bin\n",
                 "1".repeat(64),
                 "2".repeat(64)
             ),
@@ -1595,7 +1590,7 @@ mod tests {
         std::fs::write(
             root.join("gat.lock"),
             format!(
-                "{VERSION}\n\"z.bin\"\tblake3:{}\n\"a.bin\"\tblake3:{}\n",
+                "{VERSION}\n{0}\tz.bin\n{1}\ta.bin\n",
                 "3".repeat(64),
                 "2".repeat(64)
             ),
@@ -1608,44 +1603,10 @@ mod tests {
         )
         .unwrap();
 
-        let rows =
-            compare_snapshots(&committed, &changed, &Selection::root(), Unchanged::Drop).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].path, "z.bin");
         assert!(
-            matches!(&rows[0].change, RowChange::Modified { oid } if oid.eq_hex(&"3".repeat(64))),
-            "expected z.bin to be reported modified, got {:?}",
-            rows[0].change
+            compare_snapshots(&committed, &changed, &Selection::root(), Unchanged::Drop).is_err()
         );
-
-        // Persisted-vs-current: current state changes "z.bin" again but
-        // the on-disk lock stays unsorted.
-        std::fs::write(
-            root.join("gat.lock"),
-            format!(
-                "{VERSION}\n\"z.bin\"\tblake3:{}\n\"a.bin\"\tblake3:{}\n",
-                "4".repeat(64),
-                "2".repeat(64)
-            ),
-        )
-        .unwrap();
-        let store = refreshed_desired_store(&repo).unwrap();
-
-        let rows = compare_snapshot_with_current(
-            &committed,
-            &store,
-            committed.shard_levels(),
-            &Selection::root(),
-            Unchanged::Drop,
-        )
-        .unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].path, "z.bin");
-        assert!(
-            matches!(&rows[0].change, RowChange::Modified { oid } if oid.eq_hex(&"4".repeat(64))),
-            "expected z.bin to be reported modified, got {:?}",
-            rows[0].change
-        );
+        assert!(refreshed_desired_store(&repo).is_err());
     }
 }
 

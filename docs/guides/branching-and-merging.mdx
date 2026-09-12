@@ -139,7 +139,8 @@ Use `git status` as the source of truth for whether `gat.lock` is unresolved. A 
   <Step title="Produce the final semantic lock">
     Edit the lock to retain independent changes from both sides and resolve
     the conflicting paths. Keep the two-field [lock format](/spec/lock-v1):
-    quoted path, a tab, and content ID. Remove an entry to choose deletion.
+    64 lowercase hexadecimal digest characters, a tab, and an unquoted escaped path.
+    Keep rows sorted by decoded path, and end every row with LF. Remove an entry to choose deletion.
 
     <Warning>
     Do not delete `gat.lock` and try to recreate it from whichever files happen to be in your working tree. `gat.lock` is the authoritative versioned map; the working tree may represent only one side of the merge.

@@ -847,50 +847,9 @@ pub(crate) fn visit_lock_rows(
 /// validation contract of [`load_sharded`] while still filtering rows
 /// as each shard is parsed.
 ///
-/// `exact_path`, when present, is a caller-supplied *candidate* exact-file
-/// path (never a prefix or glob scope) -- this function verifies it
-/// itself, as part of the passes every shard already needs for full
-/// validation, rather than requiring the caller to have already proven it
-/// via a separate read of the same target shard. Only once `exact_path` is
-/// confirmed to actually be tracked as its own row does emission narrow to
-/// that one row; every shard is always parsed and validated regardless, so
-/// a corrupt `gat.lock/` tree is rejected exactly the same way a full
-/// sharded load would be.
-///
-/// Cross-shard invariants (a path tracked by more than one shard, or
-/// tracked directly and also as a directory prefix of another tracked
-/// path) are checked with working state bounded by live shard/merge state,
-/// not by a retained whole-lock path set: a single shard (the common flat
-/// case) has no cross-shard invariant to check at all, and a multi-shard
-/// tree whose shards are all path-ordered (the only form `save`
-/// ever writes) is checked via a bounded k-way merge-walk across the
-/// shards' own ordered cursors, mirroring
-/// [`crate::state::StateStore::find_directory_conflict`]'s
-/// merge-walk shape. A hand-edited, out-of-order shard falls back to the
-/// whole-lock `BTreeSet<String>` validation path.
-///
-/// The ordered path itself is two bounded streaming passes over the same
-/// shards (see [`validate_ordered_merge`]/[`emit_ordered_merge`]), not
-/// one: a validation pass proves the whole tree is ordered/conflict-free
-/// (and, if `exact_path` was given, whether it is really tracked) without
-/// ever calling `keep`/`visit`, and only once that succeeds does a second,
-/// fresh pass call `keep`/`visit` immediately per selected row. Two passes
-/// cost twice the shard
-/// opens of one in the common case, but neither pass retains more than
-/// the current row per shard plus the small conflict-ancestor stack --
-/// nothing proportional to how many rows the selection actually matches --
-/// and a `visit` is still never called until the whole tree is known
-/// valid, so a later shard turning out unordered can't leave a partial
-/// side effect behind from rows a single eager pass would already have
-/// emitted.
-/// One shard's rows, pulled one line at a time from a buffered file
-/// reader instead of the shard's full text being read into memory ahead
-/// of time -- the streaming counterpart of [`super::ValidatedRowCursor`]
-/// (which needs a resident `&str` to borrow from) used by
-/// [`visit_lock_rows_validated`]'s ordered k-way merge so a multi-shard
-/// validation pass never holds more than one pending row per shard
-/// resident at once, rather than every shard's complete text
-/// simultaneously.
+/// A bounded row decoder for the multi-shard merge. Complete validation happens
+/// in the merge's first pass; consumer callbacks run only in its second pass.
+/// Flat files use a retained certified view instead, so they are read and decoded once.
 struct ShardLineCursor {
     reader: std::io::BufReader<std::fs::File>,
     path: std::path::PathBuf,
@@ -908,11 +867,11 @@ impl ShardLineCursor {
         let mut header = String::new();
         std::io::BufRead::read_line(&mut reader, &mut header)
             .map_err(|source| LockError::io("reading", path, source))?;
-        let header = gat_core::newline::strip_terminator(&header);
-        if header != super::VERSION {
+        if !header.ends_with('\n') || gat_core::newline::strip_terminator(&header) != super::VERSION
+        {
             return Err(LockDomainError::UnsupportedVersion {
                 expected: super::VERSION.to_string(),
-                got: header.to_string(),
+                got: header,
             }
             .into());
         }
@@ -925,7 +884,7 @@ impl ShardLineCursor {
     }
 
     /// The next row as owned `(path, oid)`, or `None` at end of file.
-    /// Each row is validated exactly as [`super::ValidatedRowCursor`]
+    /// Each row is validated exactly as [`gat_core::lock::validated::ValidatedLockFile`]
     /// validates it, but ordering/duplicate/prefix bookkeeping across
     /// shards is the caller's job (it needs to merge-walk several of
     /// these cursors together), not this type's. `oid` is already the
@@ -933,20 +892,23 @@ impl ShardLineCursor {
     /// 32-byte `Copy` value, cheaper to carry through the merge heap
     /// than its 64-character hex text and never re-decoded downstream.
     fn next_row(&mut self) -> Result<Option<(String, gat_core::oid::Oid)>> {
-        loop {
-            self.line.clear();
-            let n = std::io::BufRead::read_line(&mut self.reader, &mut self.line)
-                .map_err(|source| LockError::io("reading", &self.path, source))?;
-            if n == 0 {
-                return Ok(None);
-            }
-            self.line_num += 1;
-            let line = gat_core::newline::strip_terminator(self.line.as_str());
-            let Some((path, oid)) = super::parse_row(line, self.line_num)? else {
-                continue;
-            };
-            return Ok(Some((path.into_owned(), oid)));
+        self.line.clear();
+        let n = std::io::BufRead::read_line(&mut self.reader, &mut self.line)
+            .map_err(|source| LockError::io("reading", &self.path, source))?;
+        if n == 0 {
+            return Ok(None);
         }
+        self.line_num += 1;
+        let line = self
+            .line
+            .strip_suffix('\n')
+            .ok_or(LockDomainError::MalformedRow {
+                line: self.line_num,
+                reason: gat_core::lock::MalformedRowReason::MissingLineFeed,
+            })?;
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let (path, oid) = super::parse_row(line, self.line_num)?;
+        Ok(Some((path.into_owned(), oid)))
     }
 }
 
@@ -1074,31 +1036,13 @@ fn check_shard_placement(
     Ok(())
 }
 
-/// The bounded validation pass behind [`visit_lock_rows_validated`]'s
-/// ordered fast path: merge-walks every shard's own streamed rows in
-/// lockstep via a `shards`-sized min-heap (never more than one pending
-/// row per shard resident at once), checking placement and catching
-/// cross-shard duplicate/directory-prefix conflicts with a small `open`
-/// candidate stack bounded by live nesting -- exactly the shape
-/// `StateStore::find_directory_conflict`'s bulk merge-walk uses.
-/// Never retains a kept row: only `exact_path`'s presence (if given)
-/// needs to survive the pass, so peak retained state here is bounded by
-/// directory-nesting depth, never by how many rows a selection matches.
-///
-/// `save`/`save_sparse_shards` always write path-ordered shards,
-/// so this succeeds without ever reading a shard's full text; only a
-/// hand-edited or externally-generated shard whose own rows are out of
-/// order returns `Ok(None)` (before any observable side effect, since
-/// this never calls `keep`/`visit`), and its caller falls back to the
-/// whole-lock `BTreeSet<String>` validator instead. `Ok(Some(exact_found))`
-/// means every shard was consumed without one, where `exact_found` is
-/// whether `exact_path` (when `narrow_enabled`) was seen tracked as its
-/// own row.
+/// Certify ordering, placement, uniqueness and directory conflicts across shards
+/// before the emission pass invokes consumer callbacks. Unordered input is invalid.
 fn validate_ordered_merge(
     shards: &[ShardFile],
     exact_path: Option<&str>,
     narrow_enabled: bool,
-) -> Result<Option<bool>> {
+) -> Result<bool> {
     let mut merge = ShardMerge::open(shards)?;
     let mut open: Vec<(String, usize)> = Vec::new();
     let mut last_path_per_shard: Vec<Option<String>> = vec![None; shards.len()];
@@ -1108,7 +1052,11 @@ fn validate_ordered_merge(
         if let Some(last) = &last_path_per_shard[shard_idx]
             && path.as_str() < last.as_str()
         {
-            return Ok(None);
+            return Err(LockDomainError::MalformedRow {
+                line: merge.line_num(shard_idx),
+                reason: gat_core::lock::MalformedRowReason::UnorderedPath { path },
+            }
+            .into());
         }
         last_path_per_shard[shard_idx] = Some(path.clone());
 
@@ -1153,7 +1101,7 @@ fn validate_ordered_merge(
         super::test_support::observe_retained_ordered_rows(open.len());
     }
 
-    Ok(Some(exact_found))
+    Ok(exact_found)
 }
 
 /// The emission pass behind [`visit_lock_rows_validated`]'s ordered fast
@@ -1191,6 +1139,34 @@ pub(crate) fn visit_lock_rows_validated(
     let mut shards = list_shard_files(root)?;
     shards.sort_by_key(|a| a.shard_id);
 
+    if let [shard] = shards.as_slice() {
+        let text = coherent_read_to_string(&shard.full_path, || {
+            std::fs::read_to_string(&shard.full_path)
+                .map_err(|source| LockError::io("reading", &shard.full_path, source))
+        })?
+        .value;
+        #[cfg(any(test, feature = "test-support"))]
+        super::test_support::record_shard_text_read();
+        let view = gat_core::lock::validated::ValidatedLockFile::parse(&text)
+            .map_err(|err| wrap_shard_parse_error(&shard.full_path, err))?;
+        let levels = shard_levels_from_id(&shard.shard_id);
+        for (path, _) in view.rows() {
+            check_shard_placement(shard, levels, path)?;
+        }
+        let exact_found =
+            exact_path.is_some_and(|exact| view.rows().any(|(path, _)| path == exact));
+        #[cfg(any(test, feature = "test-support"))]
+        if exact_found {
+            super::test_support::record_selected_shard_parse();
+        }
+        for (path, oid) in view.rows() {
+            if (!exact_found || exact_path == Some(path)) && keep(path) {
+                visit(&super::entry_from_validated_parts(path, oid))?;
+            }
+        }
+        return Ok(());
+    }
+
     // Narrowing to a single confirmed `exact_path` row is only
     // unambiguous when every shard shares one fan-out depth (so
     // `shard_id_for_path` predicts one consistent shard for it); a mixed
@@ -1204,66 +1180,14 @@ pub(crate) fn visit_lock_rows_validated(
             .len()
             == 1;
 
-    if let Some(exact_found) = validate_ordered_merge(&shards, exact_path, narrow_enabled)? {
-        let narrow_to_exact = narrow_enabled && exact_found;
-        #[cfg(any(test, feature = "test-support"))]
-        if narrow_to_exact {
-            super::test_support::record_selected_shard_parse();
-        }
-        emit_ordered_merge(&shards, exact_path, narrow_to_exact, &keep, &mut visit)?;
-    } else {
-        // At least one shard is out of order: the ordered attempt
-        // above never calls `keep`/`visit`, so nothing has been
-        // visited yet. Fall back to the whole-lock `BTreeSet<String>`
-        // validator, rather
-        // than risk the ordered merge-walk silently mis-validating
-        // unsorted input. This is the only path that reads a shard's
-        // full text into memory, and only for the rare hand-edited/
-        // externally-generated tree that reaches it.
-        let mut buffered: Vec<Entry> = Vec::new();
-        let mut exact_found_in_target_shard = false;
-        let mut seen_paths: BTreeSet<String> = BTreeSet::new();
-        for shard in &shards {
-            let text = std::fs::read_to_string(&shard.full_path)
-                .map_err(|source| LockError::io("reading", &shard.full_path, source))?;
-            #[cfg(any(test, feature = "test-support"))]
-            super::test_support::record_full_shard_text_read();
-            let levels = shard_levels_from_id(&shard.shard_id);
-            super::visit_rows_validated(
-                &text,
-                |path, _oid| {
-                    check_shard_placement(shard, levels, path)?;
-                    if !seen_paths.insert(path.to_string()) {
-                        return Err(LockDomainError::PathInMultipleShards {
-                            path: path.to_string(),
-                        }
-                        .into());
-                    }
-                    if narrow_enabled && exact_path == Some(path) {
-                        exact_found_in_target_shard = true;
-                    }
-                    Ok(keep(path))
-                },
-                |entry| {
-                    buffered.push(entry);
-                    Ok(())
-                },
-            )
-            .map_err(|err| wrap_shard_parse_error(&shard.full_path, err))?;
-        }
-        super::validate_no_path_directory_conflicts(&seen_paths)?;
-
-        let narrow_to_exact = narrow_enabled && exact_found_in_target_shard;
-        #[cfg(any(test, feature = "test-support"))]
-        if narrow_to_exact {
-            super::test_support::record_selected_shard_parse();
-        }
-        for entry in buffered {
-            if !narrow_to_exact || exact_path == Some(entry.path.as_str()) {
-                visit(&entry)?;
-            }
-        }
+    let exact_found = validate_ordered_merge(&shards, exact_path, narrow_enabled)?;
+    let narrow_to_exact = narrow_enabled && exact_found;
+    #[cfg(any(test, feature = "test-support"))]
+    if narrow_to_exact {
+        super::test_support::record_selected_shard_parse();
     }
+    emit_ordered_merge(&shards, exact_path, narrow_to_exact, &keep, &mut visit)?;
+
     Ok(())
 }
 
@@ -1559,12 +1483,7 @@ fn render_sorted_entries(entries: &[Entry]) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "{}", super::VERSION);
     for e in entries {
-        let _ = writeln!(
-            out,
-            "{}\tblake3:{}",
-            gat_core::lock::QuotedPath(&e.path),
-            e.oid
-        );
+        let _ = writeln!(out, "{}\t{}", e.oid, gat_core::lock::EscapedPath(&e.path));
     }
     out
 }
@@ -2007,7 +1926,7 @@ pub(super) fn read_file_if_present(path: &Path) -> Result<Option<String>> {
 /// [`save`]) and the materialized sync state, which must survive
 /// interruption.
 ///
-/// Paths are validated by `GatPath` and escaped by the shared quoted-path writer.
+/// Paths are validated by `GatPath` and escaped by the shared control-escape writer.
 ///
 /// Genuinely proof-agnostic: goes through
 /// [`publish_rendered_shard_content`] rather than
@@ -2269,9 +2188,9 @@ pub fn publish_flat_shard_streaming(
         while let Some(entry) = row {
             write_row(
                 format!(
-                    "{}\tblake3:{}\n",
-                    gat_core::lock::QuotedPath(&entry.path),
-                    entry.oid
+                    "{}\t{}\n",
+                    entry.oid,
+                    gat_core::lock::EscapedPath(&entry.path)
                 )
                 .as_bytes(),
             )?;
@@ -3920,7 +3839,7 @@ mod tests {
     }
 
     #[test]
-    fn ordered_visit_lock_rows_uses_the_bounded_cursor_not_the_btreeset_validator() {
+    fn flat_visit_certifies_the_file_once() {
         let tmp = tempfile::tempdir().unwrap();
         let mut lock = Lock::default();
         insert(&mut lock, "a.bin", "a".repeat(64));
@@ -3933,7 +3852,7 @@ mod tests {
         )
         .unwrap();
 
-        let before = crate::lock::test_support::btree_validation_parses();
+        let before = crate::lock::test_support::file_validation_parses();
         let mut kept = Vec::new();
         visit_lock_rows(
             tmp.path(),
@@ -3945,15 +3864,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            crate::lock::test_support::btree_validation_parses() - before,
-            0,
-            "an ordered on-disk lock read must take the bounded fast path"
+            crate::lock::test_support::file_validation_parses() - before,
+            1,
+            "a flat lock must be certified exactly once"
         );
         assert_eq!(kept, vec!["data/b.bin", "data/c.bin"]);
     }
 
     #[test]
-    fn ordered_visit_lock_rows_validated_uses_the_bounded_merge_walk_not_the_btreeset_validator() {
+    fn multi_shard_validation_retains_the_bounded_merge() {
         let tmp = tempfile::tempdir().unwrap();
         let mut lock = Lock::default();
         for i in 0..40 {
@@ -3966,7 +3885,7 @@ mod tests {
         )
         .unwrap();
 
-        let before = crate::lock::test_support::btree_validation_parses();
+        let before = crate::lock::test_support::file_validation_parses();
         let mut kept = Vec::new();
         visit_lock_rows_validated(
             tmp.path(),
@@ -3979,10 +3898,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            crate::lock::test_support::btree_validation_parses() - before,
+            crate::lock::test_support::file_validation_parses() - before,
             0,
-            "an ordered multi-shard lock must take the bounded merge-walk fast path, \
-             never falling back to the whole-lock BTreeSet validator"
+            "multi-shard validation retains the existing streaming merge"
         );
         assert_eq!(kept, vec!["data/f007.bin".to_string()]);
     }
@@ -4010,7 +3928,7 @@ mod tests {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(
                 path,
-                format!("{}\n\"shared.bin\"\tblake3:{oid}\n", super::super::VERSION),
+                format!("{0}\n{oid}\tshared.bin\n", super::super::VERSION),
             )
             .unwrap();
         }
@@ -4025,7 +3943,7 @@ mod tests {
     #[test]
     fn visit_lock_rows_validated_detects_a_same_shard_duplicate_path() {
         // A duplicate within one shard's own ordered rows must be reported
-        // the same way `ValidatedRowCursor`/`Lock::parse` always have --
+        // the same way `ValidatedLockFile`/`Lock::parse` always have --
         // "appears more than once" -- not misreported as a cross-shard
         // duplicate just because the merge walk's single global `open`
         // stack also happens to be where cross-shard duplicates are
@@ -4035,7 +3953,7 @@ mod tests {
         std::fs::write(
             tmp.path().join("gat.lock"),
             format!(
-                "{}\n\"shared.bin\"\tblake3:{oid}\n\"shared.bin\"\tblake3:{oid}\n",
+                "{0}\n{oid}\tshared.bin\n{oid}\tshared.bin\n",
                 super::super::VERSION
             ),
         )
@@ -4064,7 +3982,7 @@ mod tests {
         std::fs::write(
             tmp.path().join("gat.lock"),
             format!(
-                "{}\r\n\"a.bin\"\tblake3:{oid_a}\r\n\"data/b.bin\"\tblake3:{oid_b}\r\n",
+                "{}\r\n{oid_a}\ta.bin\r\n{oid_b}\tdata/b.bin\r\n",
                 super::super::VERSION
             ),
         )
@@ -4127,7 +4045,7 @@ mod tests {
     }
 
     #[test]
-    fn visit_lock_rows_validated_falls_back_to_the_btreeset_validator_for_an_unordered_shard() {
+    fn visit_lock_rows_validated_rejects_unordered_shards_before_callbacks() {
         let tmp = tempfile::tempdir().unwrap();
         let mut lock = Lock::default();
         for i in 0..20 {
@@ -4140,11 +4058,7 @@ mod tests {
         )
         .unwrap();
 
-        // Hand-edit one shard's rows out of order without changing which
-        // paths live in which shard file -- `Lock::parse` never required
-        // sorted input, only the streaming fast path does, and per-row
-        // placement must stay valid so this exercises the fallback path
-        // rather than a placement error.
+        // Keep placement valid but violate mandatory within-file ordering.
         let shard = list_shard_files(tmp.path())
             .unwrap()
             .into_iter()
@@ -4166,24 +4080,14 @@ mod tests {
         assert_ne!(reordered, text, "reversing rows must actually change order");
         std::fs::write(&shard.full_path, reordered).unwrap();
 
-        let before = crate::lock::test_support::btree_validation_parses();
-        let mut kept = Vec::new();
-        visit_lock_rows_validated(
+        let error = visit_lock_rows_validated(
             tmp.path(),
             None,
-            |_| true,
-            |entry| {
-                kept.push(entry.path.clone());
-                Ok(())
-            },
+            |_| panic!("selection before certification"),
+            |_| panic!("emission before certification"),
         )
-        .unwrap();
-        assert!(
-            crate::lock::test_support::btree_validation_parses() - before > 0,
-            "an out-of-order shard must fall back to the whole-lock BTreeSet validator \
-             instead of the merge-walk fast path silently mis-validating it"
-        );
-        assert_eq!(kept.len(), 20);
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("strictly increasing order"));
     }
 
     #[test]
@@ -4191,7 +4095,7 @@ mod tests {
         let cases = [
             (
                 format!(
-                    "{}\n\"shared.bin\"\tblake3:{}\n\"shared.bin\"\tblake3:{}\n",
+                    "{0}\n{1}\tshared.bin\n{2}\tshared.bin\n",
                     super::super::VERSION,
                     "a".repeat(64),
                     "b".repeat(64)
@@ -4200,7 +4104,7 @@ mod tests {
             ),
             (
                 format!(
-                    "{}\n\"foo\"\tblake3:{}\n\"foo/bar\"\tblake3:{}\n",
+                    "{0}\n{1}\tfoo\n{2}\tfoo/bar\n",
                     super::super::VERSION,
                     "a".repeat(64),
                     "b".repeat(64)
@@ -4213,7 +4117,7 @@ mod tests {
                     super::super::VERSION,
                     "a".repeat(64)
                 ),
-                "oid must start",
+                "expected a TAB",
             ),
         ];
 
@@ -4231,8 +4135,7 @@ mod tests {
     #[test]
     fn visit_lock_rows_validated_never_reads_a_whole_shard_text_on_the_ordered_fast_path() {
         // The ordered k-way merge must stream each shard one row at a
-        // time (bounded live buffering per shard), never falling back to
-        // `visit_lock_rows_validated`'s whole-lock `BTreeSet` validator
+        // time, with bounded live buffering per shard
         // path, which is the only one that reads a shard's complete text
         // into memory via `std::fs::read_to_string`.
         let tmp = tempfile::tempdir().unwrap();
@@ -4405,7 +4308,7 @@ mod tests {
             std::fs::read_to_string(tmp.path().join("gat.lock")).unwrap(),
             format!(
                 // hygiene-ok: fixed, human-readable spec-URL header compared byte-for-byte; never dereferenced as a network address.
-                "version https://getgat.dev/spec/lock-v1\n\"a.bin\"\tblake3:{}\n",
+                "version https://getgat.dev/spec/lock-v1\n{0}\ta.bin\n",
                 "d".repeat(64)
             )
         );
@@ -5397,7 +5300,7 @@ mod tests {
         std::fs::write(
             dir.join("00.tsv"),
             format!(
-                "{}\n\"shared.bin\"\tblake3:{}\n",
+                "{0}\n{1}\tshared.bin\n",
                 super::super::VERSION,
                 "a".repeat(64)
             ),
@@ -5406,7 +5309,7 @@ mod tests {
         std::fs::write(
             dir.join("01.tsv"),
             format!(
-                "{}\n\"shared.bin\"\tblake3:{}\n",
+                "{0}\n{1}\tshared.bin\n",
                 super::super::VERSION,
                 "b".repeat(64)
             ),
@@ -5438,11 +5341,7 @@ mod tests {
         assert_ne!(actual_shard, "gat.lock/00.tsv");
         std::fs::write(
             dir.join("00.tsv"),
-            format!(
-                "{}\n\"{path}\"\tblake3:{}\n",
-                super::super::VERSION,
-                "a".repeat(64)
-            ),
+            format!("{0}\n{1}\t{path}\n", super::super::VERSION, "a".repeat(64)),
         )
         .unwrap();
 
@@ -5480,12 +5379,12 @@ mod tests {
         );
         std::fs::write(
             dir.join(&foo_shard),
-            format!("{}\n\"foo\"\tblake3:{oid}\n", super::super::VERSION),
+            format!("{0}\n{oid}\tfoo\n", super::super::VERSION),
         )
         .unwrap();
         std::fs::write(
             dir.join(&foo_bar_shard),
-            format!("{}\n\"foo/bar\"\tblake3:{oid}\n", super::super::VERSION),
+            format!("{0}\n{oid}\tfoo/bar\n", super::super::VERSION),
         )
         .unwrap();
 

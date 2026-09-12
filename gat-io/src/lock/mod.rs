@@ -19,7 +19,7 @@ pub use error::{
 pub(crate) use gat_core::lock::validated::visit_filtered_matching;
 pub(crate) use gat_core::lock::validated::{
     check_ordered_row_conflict, entry_from_validated_parts, parse_row,
-    validate_no_path_directory_conflicts, visit_rows_validated,
+    validate_no_path_directory_conflicts,
 };
 pub(crate) use gat_core::lock::{Entry, Lock, VERSION};
 
@@ -293,11 +293,7 @@ impl LockStore {
     }
 }
 
-/// Test-only structural instrumentation: not a timing benchmark, but a
-/// counter a test can assert against to catch a regression back
-/// into the whole-shard `BTreeSet`-based validator for a scoped read that
-/// should be taking the bounded, ordered `FilteredRowCursor` fast path
-/// instead.
+/// Test-only instrumentation for source reads, certification and retained rows.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use std::cell::Cell;
@@ -364,8 +360,8 @@ pub mod test_support {
     }
 
     #[must_use]
-    pub fn btree_validation_parses() -> usize {
-        gat_core::lock::test_probes::btree_validation_parses()
+    pub fn file_validation_parses() -> usize {
+        gat_core::lock::test_probes::file_validation_parses()
     }
 
     pub fn record_selected_shard_parse() {
