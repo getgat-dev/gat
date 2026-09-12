@@ -8,9 +8,7 @@
 //! Flat/sharded persistence, crash-safe reshape, and stat-proven identity
 //! observation are owned by `gat-io`.
 
-use crate::lock::error::{
-    InvalidOidReason, LockDomainError, LockError, MalformedRowReason, Result,
-};
+use crate::lock::error::{LockDomainError, Result};
 pub const VERSION: &str = "version https://getgat.dev/spec/lock-v1";
 
 /// Canonical control-only escaping for an unquoted lock path.
@@ -172,46 +170,6 @@ where
     Ok(())
 }
 
-/// Validate one row without its LF; whole-file certification belongs to the view.
-pub fn parse_row(
-    line: &str,
-    line_num: usize,
-) -> Result<(std::borrow::Cow<'_, str>, crate::oid::Oid)> {
-    let Some((hash, field)) = line.split_once('\t') else {
-        return Err(LockDomainError::MalformedRow {
-            line: line_num,
-            reason: MalformedRowReason::InvalidSeparator,
-        }
-        .into());
-    };
-    let oid = crate::oid::Oid::from_hex(hash).map_err(|_| LockDomainError::InvalidOid {
-        line: line_num,
-        path: field.to_owned(),
-        reason: InvalidOidReason::NotHexBlake3,
-    })?;
-    let path = if field.contains('\\') {
-        let mut decoded = String::new();
-        super::reader::decode_escaped(field, &mut decoded).ok_or_else(|| {
-            LockDomainError::NonCanonicalPath {
-                line: line_num,
-                path: field.to_owned(),
-            }
-        })?;
-        std::borrow::Cow::Owned(decoded)
-    } else {
-        if field.bytes().any(|b| b < 32) {
-            return Err(LockDomainError::NonCanonicalPath {
-                line: line_num,
-                path: field.to_owned(),
-            }
-            .into());
-        }
-        std::borrow::Cow::Borrowed(field)
-    };
-    validate_path(&path, line_num)?;
-    Ok((path, oid))
-}
-
 /// Pull selected owned rows from a completely certified file.
 pub struct FilteredRowCursor<'a, F> {
     view: super::reader::ValidatedLockFile<'a>,
@@ -259,37 +217,6 @@ pub fn exceeds_directory_upper_bound(path: &str, ancestor: &str) -> bool {
         // own bytes already matched in full above.
         std::cmp::Ordering::Greater => p[a.len()] >= b'0',
     }
-}
-
-/// Duplicate and directory-prefix bookkeeping for the cross-shard sorted merge.
-/// The owner tag distinguishes same-file and cross-file duplicates. Single-file
-/// certification uses its own row-reference LCP stack in `reader`.
-pub fn check_ordered_row_conflict<P: AsRef<str>>(
-    open: &mut Vec<(P, usize)>,
-    path: &str,
-    owner: usize,
-    on_duplicate: impl FnOnce(&str, bool) -> LockError,
-    on_prefix_conflict: impl FnOnce(&str, &str) -> LockError,
-) -> Result<()> {
-    while let Some((ancestor, _)) = open.last() {
-        if exceeds_directory_upper_bound(path, ancestor.as_ref()) {
-            open.pop();
-        } else {
-            break;
-        }
-    }
-    if let Some((top, top_owner)) = open.last()
-        && top.as_ref() == path
-    {
-        return Err(on_duplicate(path, *top_owner == owner));
-    }
-    if let Some((ancestor, _)) = open
-        .iter()
-        .find(|(ancestor, _)| is_directory_prefix(ancestor.as_ref(), path))
-    {
-        return Err(on_prefix_conflict(path, ancestor.as_ref()));
-    }
-    Ok(())
 }
 
 impl<'a, F: FnMut(&str) -> bool> FilteredRowCursor<'a, F> {

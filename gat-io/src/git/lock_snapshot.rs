@@ -849,9 +849,8 @@ mod ownership_tests {
         let tmp = test_repo();
         let root = tmp.path().to_path_buf();
         let mut bytes = format!("{}\n", gat_core::lock::VERSION).into_bytes();
-        bytes.extend_from_slice(b"\"\xffbad.bin\"\tblake3:");
         bytes.extend_from_slice("a".repeat(64).as_bytes());
-        bytes.push(b'\n');
+        bytes.extend_from_slice(b"\t\xffbad.bin\n");
         std::fs::write(root.join("gat.lock"), &bytes).unwrap();
         git(&root, &["add", "-A"]);
         commit_all(&root, "invalid utf8 lock");

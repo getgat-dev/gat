@@ -32,13 +32,13 @@ pub use shard::{LockShardId, LockShardIdError, LockShardLevels, LockShardLevelsE
 /// Codec helpers are intentionally not flattened into [`crate::lock`]:
 ///
 /// ```compile_fail
-/// use gat_core::lock::parse_row;
+/// use gat_core::lock::FilteredRowCursor;
 /// ```
 pub mod validated {
     pub use super::codec::{
-        FilteredRowCursor, check_ordered_row_conflict, entry_from_validated_parts,
-        exceeds_directory_upper_bound, is_directory_prefix, parse_row,
-        validate_no_path_directory_conflicts, visit_filtered_matching, visit_rows_validated,
+        FilteredRowCursor, entry_from_validated_parts, exceeds_directory_upper_bound,
+        is_directory_prefix, validate_no_path_directory_conflicts, visit_filtered_matching,
+        visit_rows_validated,
     };
     pub use super::reader::ValidatedLockFile;
 

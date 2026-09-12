@@ -15,11 +15,8 @@ pub use error::{
     InvalidOidReason, LockDomainError, LockError, MalformedRowReason, PersistenceError, Result,
 };
 
-#[cfg(test)]
-pub(crate) use gat_core::lock::validated::visit_filtered_matching;
 pub(crate) use gat_core::lock::validated::{
-    check_ordered_row_conflict, entry_from_validated_parts, parse_row,
-    validate_no_path_directory_conflicts,
+    entry_from_validated_parts, validate_no_path_directory_conflicts,
 };
 pub(crate) use gat_core::lock::{Entry, Lock, VERSION};
 
@@ -293,7 +290,7 @@ impl LockStore {
     }
 }
 
-/// Test-only instrumentation for source reads, certification and retained rows.
+/// Test-only instrumentation for source reads, certification and merge work.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use std::cell::Cell;
@@ -326,10 +323,8 @@ pub mod test_support {
 
     thread_local! {
         static SELECTED_SHARD_PARSES: Cell<usize> = const { Cell::new(0) };
-        static SHARD_TEXT_READS: Cell<usize> = const { Cell::new(0) };
         static MERGE_HEAD_COMPARISONS: Cell<usize> = const { Cell::new(0) };
         static FULL_SHARD_TEXT_READS: Cell<usize> = const { Cell::new(0) };
-        static MAX_RETAINED_ORDERED_ROWS: Cell<usize> = const { Cell::new(0) };
         static RENDER_ENTRIES_CALLS: Cell<usize> = const { Cell::new(0) };
         static FULL_LOCK_EVIDENCE_SHARD_READS: Cell<usize> = const { Cell::new(0) };
         static RESHAPE_FULL_LOADS: Cell<usize> = const { Cell::new(0) };
@@ -372,14 +367,6 @@ pub mod test_support {
         SELECTED_SHARD_PARSES.with(Cell::get)
     }
 
-    pub fn record_shard_text_read() {
-        SHARD_TEXT_READS.with(|c| c.set(c.get() + 1));
-    }
-
-    pub fn shard_text_reads() -> usize {
-        SHARD_TEXT_READS.with(Cell::get)
-    }
-
     pub fn record_merge_head_comparison() {
         MERGE_HEAD_COMPARISONS.with(|c| c.set(c.get() + 1));
     }
@@ -394,22 +381,6 @@ pub mod test_support {
 
     pub fn full_shard_text_reads() -> usize {
         FULL_SHARD_TEXT_READS.with(Cell::get)
-    }
-
-    pub fn reset_max_retained_ordered_rows() {
-        MAX_RETAINED_ORDERED_ROWS.with(|c| c.set(0));
-    }
-
-    pub fn observe_retained_ordered_rows(count: usize) {
-        MAX_RETAINED_ORDERED_ROWS.with(|c| {
-            if count > c.get() {
-                c.set(count);
-            }
-        });
-    }
-
-    pub fn max_retained_ordered_rows() -> usize {
-        MAX_RETAINED_ORDERED_ROWS.with(Cell::get)
     }
 }
 
