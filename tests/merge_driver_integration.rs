@@ -85,6 +85,7 @@ fn independent_insertions_into_the_same_sorted_gap_merge_cleanly() {
 fn single_file_prefix_conflict_exits_nonzero_without_changing_ours() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
+    assert_ok(&git(dir, &["init", "-q", "-b", "main"]), "git init");
     let header = gat_core::lock::VERSION;
     let digest = "a".repeat(64);
     std::fs::write(dir.join("O"), format!("{header}\n")).unwrap();
