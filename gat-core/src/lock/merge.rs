@@ -120,6 +120,14 @@ fn directory_prefix_conflict(entries: &[Entry]) -> Option<(&str, &str)> {
     for (index, entry) in entries.iter().enumerate() {
         let path = entry.path.as_str();
         let remaining = &entries[index + 1..];
+        // All keys with this byte prefix are contiguous. If the immediate
+        // successor is outside that range, no later key can be a descendant.
+        if !remaining
+            .first()
+            .is_some_and(|next| next.path.as_str().starts_with(path))
+        {
+            continue;
+        }
         let next = remaining.partition_point(|candidate| {
             candidate
                 .path

@@ -57,12 +57,14 @@ fn read_stage(path: &Path, stage: MergeStage) -> Result<Lock, MergeDriverError> 
 }
 
 pub fn merge_driver(ancestor: &Path, ours: &Path, theirs: &Path) -> Result<(), MergeDriverError> {
-    let ancestor_lock = read_stage(ancestor, MergeStage::Ancestor)?;
-    let ours_lock = read_stage(ours, MergeStage::Ours)?;
-    let theirs_lock = read_stage(theirs, MergeStage::Theirs)?;
-
-    let merged = merge_three_way(&ancestor_lock, &ours_lock, &theirs_lock)
-        .map_err(MergeDriverError::SemanticConflict)?;
+    // Release all three input maps before allocating publication buffers.
+    let merged = {
+        let ancestor_lock = read_stage(ancestor, MergeStage::Ancestor)?;
+        let ours_lock = read_stage(ours, MergeStage::Ours)?;
+        let theirs_lock = read_stage(theirs, MergeStage::Theirs)?;
+        merge_three_way(&ancestor_lock, &ours_lock, &theirs_lock)
+            .map_err(MergeDriverError::SemanticConflict)?
+    };
     LockStore::publish_file_atomic(&merged, ours).map_err(|source| MergeDriverError::Publish {
         path: ours.to_path_buf(),
         source: Box::new(RepositoryAccessError::from_lock(source)),
