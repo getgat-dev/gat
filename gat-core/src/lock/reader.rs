@@ -37,6 +37,17 @@ impl<'a> ValidatedLockFile<'a> {
     }
 
     fn decode(source: Cow<'a, str>, kernel: kernels::Kernel) -> Result<Self> {
+        kernel.decode(source)
+    }
+
+    // Keep the row loop in the feature-enabled caller: ordinary inline hints
+    // leave this large body out of line and force a per-row SIMD call boundary.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    fn decode_with(
+        source: Cow<'a, str>,
+        row: impl Fn(&[u8; 64], &[u8]) -> Option<([u8; 32], usize, bool)>,
+    ) -> Result<Self> {
         if source.is_empty() {
             return Err(LockDomainError::Empty.into());
         }
@@ -66,7 +77,7 @@ impl<'a> ValidatedLockFile<'a> {
             }
             let hash: &[u8; 64] = bytes[pos..pos + 64].try_into().expect("fixed hash width");
             let start = pos + 65;
-            let Some((oid, len, special)) = kernel.row(hash, &bytes[start..]) else {
+            let Some((oid, len, has_special)) = row(hash, &bytes[start..]) else {
                 // Only the cold error path distinguishes digest errors from truncation.
                 if hash.iter().any(|&b| kernels::nibble(b).is_none()) {
                     return Err(LockDomainError::InvalidOid {
@@ -85,7 +96,7 @@ impl<'a> ValidatedLockFile<'a> {
             let field = &result.source[start..start + len];
             let field = field.strip_suffix('\r').unwrap_or(field);
             let arena_start = result.arena.len();
-            let arena = special && field.contains('\\');
+            let arena = has_special && field.contains('\\');
             let path = if arena {
                 decode_escaped(field, &mut result.arena).ok_or_else(|| {
                     LockDomainError::NonCanonicalPath {
@@ -97,7 +108,7 @@ impl<'a> ValidatedLockFile<'a> {
             } else {
                 field
             };
-            if !arena && special {
+            if !arena && has_special {
                 return Err(LockDomainError::NonCanonicalPath {
                     line,
                     path: path.to_owned(),
@@ -281,7 +292,7 @@ mod tests {
                 let expected = Lock::parse(&lf).unwrap();
                 for input in [&crlf, &mixed] {
                     let scalar =
-                        ValidatedLockFile::decode(Cow::Borrowed(input), kernels::Kernel::Scalar)
+                        ValidatedLockFile::decode(Cow::Borrowed(input), kernels::Kernel::scalar())
                             .unwrap();
                     let selected = ValidatedLockFile::parse(input).unwrap();
                     assert_eq!(
@@ -398,7 +409,7 @@ mod tests {
         for len in 1..100 {
             let text = document(&[&"x".repeat(len)]);
             let scalar =
-                ValidatedLockFile::decode(Cow::Borrowed(&text), kernels::Kernel::Scalar).unwrap();
+                ValidatedLockFile::decode(Cow::Borrowed(&text), kernels::Kernel::scalar()).unwrap();
             let selected = ValidatedLockFile::parse(&text).unwrap();
             assert_eq!(
                 scalar.rows().collect::<Vec<_>>(),
@@ -409,7 +420,7 @@ mod tests {
         for pos in 0..64 {
             for byte in 0..=255u8 {
                 hash[pos] = byte;
-                let scalar = kernels::Kernel::Scalar.row(&hash, b"path\n");
+                let scalar = kernels::Kernel::scalar().row(&hash, b"path\n");
                 let selected = kernels::Kernel::selected().row(&hash, b"path\n");
                 assert_eq!(scalar, selected, "position {pos}, byte {byte}");
                 assert_eq!(scalar.is_some(), kernels::nibble(byte).is_some());

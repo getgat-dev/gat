@@ -1,33 +1,84 @@
-//! Fixed-64 lowercase hex decoding interleaved with bounded path scanning.
+//! Bounded lowercase-hex decoding and first-LF scanning.
+//!
+//! The flag reports controls/backslashes before LF, except a single framing CR
+//! immediately before LF. It does not certify UTF-8 or canonical path segments.
+
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
+#[cfg(test)]
+mod tests;
+#[cfg(target_arch = "x86_64")]
+mod x86;
+
+use super::ValidatedLockFile;
+use crate::lock::Result;
+use std::borrow::Cow;
+
+type DecodedRow = Option<([u8; 32], usize, bool)>;
+
+/// Feature-checked capability. Only this module can construct a backend.
+#[derive(Clone, Copy)]
+pub(super) struct Kernel(Backend);
 
 #[derive(Clone, Copy)]
-pub(super) enum Kernel {
+enum Backend {
     Scalar,
     #[cfg(target_arch = "x86_64")]
     Sse2,
+    #[cfg(target_arch = "x86_64")]
+    Avx2,
+    #[cfg(target_arch = "aarch64")]
+    Neon,
 }
 
 impl Kernel {
     pub(super) fn selected() -> Self {
         #[cfg(target_arch = "x86_64")]
         {
+            if std::is_x86_feature_detected!("avx2") {
+                return Self(Backend::Avx2);
+            }
             if std::is_x86_feature_detected!("sse2") {
-                Self::Sse2
-            } else {
-                Self::Scalar
+                return Self(Backend::Sse2);
             }
         }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            Self::Scalar
+        #[cfg(target_arch = "aarch64")]
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            return Self(Backend::Neon);
+        }
+        Self(Backend::Scalar)
+    }
+
+    pub(super) fn decode(self, source: Cow<'_, str>) -> Result<ValidatedLockFile<'_>> {
+        // SAFETY: only feature detection constructs SIMD capabilities. Dispatch
+        // occurs once per document, outside the monomorphized row loop.
+        match self.0 {
+            Backend::Scalar => ValidatedLockFile::decode_with(source, scalar),
+            #[cfg(target_arch = "x86_64")]
+            Backend::Sse2 => unsafe { x86::decode_sse2(source) },
+            #[cfg(target_arch = "x86_64")]
+            Backend::Avx2 => unsafe { x86::decode_avx2(source) },
+            #[cfg(target_arch = "aarch64")]
+            Backend::Neon => unsafe { aarch64::decode_neon(source) },
         }
     }
 
-    pub(super) fn row(self, hash: &[u8; 64], path: &[u8]) -> Option<([u8; 32], usize, bool)> {
-        match self {
-            Self::Scalar => scan::<false>(hash, path),
+    #[cfg(test)]
+    pub(super) const fn scalar() -> Self {
+        Self(Backend::Scalar)
+    }
+
+    #[cfg(test)]
+    pub(super) fn row(self, hash: &[u8; 64], path: &[u8]) -> DecodedRow {
+        // SAFETY: all test capabilities use the same feature checks as production.
+        match self.0 {
+            Backend::Scalar => scalar(hash, path),
             #[cfg(target_arch = "x86_64")]
-            Self::Sse2 => scan::<true>(hash, path),
+            Backend::Sse2 => unsafe { x86::row_sse2(hash, path) },
+            #[cfg(target_arch = "x86_64")]
+            Backend::Avx2 => unsafe { x86::row_avx2(hash, path) },
+            #[cfg(target_arch = "aarch64")]
+            Backend::Neon => unsafe { aarch64::row_neon(hash, path) },
         }
     }
 }
@@ -40,143 +91,46 @@ pub(super) const fn nibble(byte: u8) -> Option<u8> {
     }
 }
 
-fn scan<const SIMD: bool>(hash: &[u8; 64], path: &[u8]) -> Option<([u8; 32], usize, bool)> {
-    let mut values = [0; 64];
-    let mut block = 0;
-    let mut pos = 0;
-    let mut first_special = None;
-    loop {
-        if block < 4 {
-            let start = block * 16;
-            let input = &hash[start..start + 16];
-            let output = &mut values[start..start + 16];
-            #[cfg(target_arch = "x86_64")]
-            if SIMD {
-                // SAFETY: x86-64 guarantees SSE2; both slices contain 16 bytes.
-                unsafe {
-                    hex16(input, output)?;
-                }
-            } else {
-                for (dst, &byte) in output.iter_mut().zip(input) {
-                    *dst = nibble(byte)?;
-                }
-            }
-            #[cfg(not(target_arch = "x86_64"))]
-            for (dst, &byte) in output.iter_mut().zip(input) {
-                *dst = nibble(byte)?;
-            }
-            block += 1;
-        }
-        if pos == path.len() {
-            return None;
-        }
-        #[cfg(target_arch = "x86_64")]
-        if SIMD && path.len() - pos >= 16 {
-            // SAFETY: the input slice contains 16 initialized bytes, within the allocation.
-            let (ends, special) = unsafe { path16(&path[pos..pos + 16]) };
-            if ends != 0 {
-                let n = ends.trailing_zeros() as usize;
-                let special = special & ((1u32 << n) - 1);
-                if special != 0 && first_special.is_none() {
-                    first_special = Some(pos + special.trailing_zeros() as usize);
-                }
-                pos += n;
-                break;
-            }
-            if special != 0 && first_special.is_none() {
-                first_special = Some(pos + special.trailing_zeros() as usize);
-            }
-            pos += 16;
-            continue;
-        }
-        let end = (pos + 16).min(path.len());
-        while pos < end && path[pos] != b'\n' {
-            if (path[pos] < 32 || path[pos] == b'\\') && first_special.is_none() {
-                first_special = Some(pos);
-            }
-            pos += 1;
-        }
-        if path.get(pos) == Some(&b'\n') {
-            break;
-        }
-    }
-    // Short paths end before all four independent digest blocks are consumed.
-    while block < 4 {
-        let start = block * 16;
-        let input = &hash[start..start + 16];
-        let output = &mut values[start..start + 16];
-        #[cfg(target_arch = "x86_64")]
-        if SIMD {
-            // SAFETY: same fixed-width bounds and architectural guarantee as above.
-            unsafe {
-                hex16(input, output)?;
-            }
-        } else {
-            for (dst, &byte) in output.iter_mut().zip(input) {
-                *dst = nibble(byte)?;
-            }
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        for (dst, &byte) in output.iter_mut().zip(input) {
-            *dst = nibble(byte)?;
-        }
-        block += 1;
-    }
+/// Independent scalar oracle: decode pairs, then inspect exactly the current row.
+fn scalar(hash: &[u8; 64], path: &[u8]) -> DecodedRow {
     let mut oid = [0; 32];
-    for (i, byte) in oid.iter_mut().enumerate() {
-        *byte = values[i * 2] << 4 | values[i * 2 + 1];
+    for (byte, pair) in oid.iter_mut().zip(hash.chunks_exact(2)) {
+        *byte = nibble(pair[0])? << 4 | nibble(pair[1])?;
     }
-    // A single CR immediately before LF is framing, not a path event.
-    let special = first_special.is_some_and(|i| i + 1 != pos || path[i] != b'\r');
-    Some((oid, pos, special))
+    let end = path.iter().position(|&b| b == b'\n')?;
+    let field = path[..end].strip_suffix(b"\r").unwrap_or(&path[..end]);
+    Some((oid, end, field.iter().any(|&b| b < 32 || b == b'\\')))
 }
 
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
-unsafe fn hex16(input: &[u8], output: &mut [u8]) -> Option<()> {
-    use std::arch::x86_64::{
-        _mm_and_si128, _mm_cmpgt_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_or_si128,
-        _mm_set1_epi8, _mm_storeu_si128, _mm_sub_epi8,
-    };
-    // SAFETY: caller supplies readable/writable slices of at least 16 bytes.
-    unsafe {
-        let x = _mm_loadu_si128(input.as_ptr().cast());
-        let digits = _mm_and_si128(
-            _mm_cmpgt_epi8(x, _mm_set1_epi8(47)),
-            _mm_cmpgt_epi8(_mm_set1_epi8(58), x),
-        );
-        let letters = _mm_and_si128(
-            _mm_cmpgt_epi8(x, _mm_set1_epi8(96)),
-            _mm_cmpgt_epi8(_mm_set1_epi8(103), x),
-        );
-        if _mm_movemask_epi8(_mm_or_si128(digits, letters)) != 65535 {
-            return None;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[inline]
+fn finish(
+    oid: [u8; 32],
+    path: &[u8],
+    end: usize,
+    first_special: Option<usize>,
+) -> ([u8; 32], usize, bool) {
+    let has_special = first_special.is_some_and(|i| i + 1 != end || path[i] != b'\r');
+    (oid, end, has_special)
+}
+
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[inline]
+fn tail(
+    oid: [u8; 32],
+    path: &[u8],
+    mut pos: usize,
+    mut first_special: Option<usize>,
+) -> DecodedRow {
+    while pos < path.len() {
+        let byte = path[pos];
+        if byte == b'\n' {
+            return Some(finish(oid, path, pos, first_special));
         }
-        let values = _mm_or_si128(
-            _mm_and_si128(digits, _mm_sub_epi8(x, _mm_set1_epi8(48))),
-            _mm_and_si128(letters, _mm_sub_epi8(x, _mm_set1_epi8(87))),
-        );
-        _mm_storeu_si128(output.as_mut_ptr().cast(), values);
+        if first_special.is_none() && (byte < 32 || byte == b'\\') {
+            first_special = Some(pos);
+        }
+        pos += 1;
     }
-    Some(())
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
-unsafe fn path16(input: &[u8]) -> (u32, u32) {
-    use std::arch::x86_64::{
-        _mm_cmpeq_epi8, _mm_loadu_si128, _mm_min_epu8, _mm_movemask_epi8, _mm_or_si128,
-        _mm_set1_epi8,
-    };
-    // SAFETY: caller supplies at least 16 readable bytes, including at EOF.
-    unsafe {
-        let x = _mm_loadu_si128(input.as_ptr().cast());
-        let ends = _mm_cmpeq_epi8(x, _mm_set1_epi8(10));
-        let controls = _mm_cmpeq_epi8(_mm_min_epu8(x, _mm_set1_epi8(31)), x);
-        let special = _mm_or_si128(controls, _mm_cmpeq_epi8(x, _mm_set1_epi8(92)));
-        (
-            _mm_movemask_epi8(ends).cast_unsigned(),
-            _mm_movemask_epi8(special).cast_unsigned(),
-        )
-    }
+    None
 }
