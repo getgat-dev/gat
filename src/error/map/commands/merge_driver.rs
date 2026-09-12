@@ -3,6 +3,7 @@
 use super::super::super::{Diagnostic, ErrorCode, Failure};
 use crate::presentation::UserLine;
 use gat_command::MergeDriverError;
+use gat_core::lock::MergeConflict;
 use gat_core::oid::Oid;
 use gat_engine::MergeDriverError as EngineError;
 
@@ -34,7 +35,7 @@ impl From<MergeDriverError> for Failure {
                 err,
             ),
             EngineError::Parse { source, .. } => source.into(),
-            EngineError::SemanticConflict(ref conflicts) => {
+            EngineError::SemanticConflict(MergeConflict::Paths(ref conflicts)) => {
                 let lines = conflicts.iter().map(|c| {
                     UserLine::compose([
                         UserLine::identifier(c.path.as_str()),
@@ -62,6 +63,23 @@ impl From<MergeDriverError> for Failure {
                         .with_hint("resolve the conflicting paths manually in the merged gat.lock, then stage it"),
                 )
             }
+            EngineError::SemanticConflict(MergeConflict::DirectoryPrefix {
+                ancestor,
+                descendant,
+            }) => Self::expected(
+                Diagnostic::new(
+                    ErrorCode::Conflict,
+                    "Merge would track a file and its descendant",
+                )
+                .with_detail(UserLine::compose([
+                    UserLine::path_text(&ancestor),
+                    UserLine::authored(" conflicts with "),
+                    UserLine::path_text(&descendant),
+                ]))
+                .with_hint(
+                    "keep either the file or its descendants in the merged gat.lock, then stage it",
+                ),
+            ),
             EngineError::Publish {
                 ref path,
                 ref source,
@@ -117,7 +135,9 @@ mod tests {
                 theirs: Some(gat_core::oid::Oid::from_hex(&"e".repeat(64)).unwrap()),
             },
         ];
-        let err = MergeDriverError::Engine(EngineError::SemanticConflict(conflicts));
+        let err = MergeDriverError::Engine(EngineError::SemanticConflict(MergeConflict::Paths(
+            conflicts,
+        )));
         let failure: Failure = err.into();
         let detail = failure
             .diagnostic()
@@ -126,6 +146,23 @@ mod tests {
         assert_eq!(detail.lines().count(), 2);
         assert!(detail.contains("src/lib.rs"));
         assert!(detail.contains("src/main.rs"));
+    }
+
+    #[test]
+    fn prefix_conflict_is_expected_and_escapes_path_controls() {
+        let failure: Failure = MergeDriverError::Engine(EngineError::SemanticConflict(
+            MergeConflict::DirectoryPrefix {
+                ancestor: "data\nINJECTED".to_owned(),
+                descendant: "data\nINJECTED/child".to_owned(),
+            },
+        ))
+        .into();
+        assert_eq!(failure.diagnostic().code(), ErrorCode::Conflict);
+        let detail = failure.diagnostic().detail().unwrap();
+        assert_eq!(detail.lines().count(), 1);
+        assert!(detail.contains("INJECTED"));
+        assert!(detail.contains("/child"));
+        assert!(failure.technical_source().is_none());
     }
 
     fn rendered_diagnostic(error: EngineError) -> String {

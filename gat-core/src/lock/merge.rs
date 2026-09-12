@@ -22,9 +22,9 @@
 //! two independent insertions into the same sorted textual gap merge
 //! cleanly instead of colliding as a false conflict.
 //!
-//! This module constructs no errors at all: merge conflicts are represented
-//! as ordinary data ([`merge_three_way`]'s `Err(Vec<Conflict>)` case), not
-//! failures, and the merge rule is total over already-parsed [`Lock`] values.
+//! Same-path conflicts are reported before checking the resolved map for
+//! file/directory-prefix conflicts. Success certifies single-file invariants;
+//! shard placement and cross-shard validation remain the caller's responsibility.
 
 use super::{Entry, Lock};
 use crate::lexical_path::GatPath;
@@ -42,20 +42,30 @@ pub struct Conflict {
     pub theirs: Option<Oid>,
 }
 
-/// Merge `ours` and `theirs` against their common `ancestor`, keyed by
-/// path. Returns the merged, path-sorted [`Lock`] on a clean merge, or the
-/// full list of same-path conflicts (one entry per conflicting path, in
-/// canonical path order) if any remain.
+/// A merge cannot produce a valid single-file lock.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum MergeConflict {
+    /// All incompatible same-path changes, in decoded-path order.
+    #[error("{} path(s) changed incompatibly", .0.len())]
+    Paths(Vec<Conflict>),
+    /// The resolved map tracks both a file and one of its descendants.
+    #[error("merged paths conflict: {ancestor:?} and {descendant:?}")]
+    DirectoryPrefix {
+        ancestor: String,
+        descendant: String,
+    },
+}
+
+/// Resolve per-path changes, then certify the combined single-file map.
 ///
-/// Every path present in any of the three inputs is considered
-/// independently: a path added, removed, or modified on only one side (or
-/// identically on both) always merges cleanly, no matter what unrelated
-/// paths changed elsewhere in the same lock document.
-/// This resolves same-path conflicts only; the combined map can introduce
-/// file/directory-prefix conflicts even when all three inputs are valid.
-pub fn merge_three_way(ancestor: &Lock, ours: &Lock, theirs: &Lock) -> Result<Lock, Vec<Conflict>> {
-    // One ordered union retains all three values without separate indexes or
-    // a second collection of keys. Inputs need not already be path-sorted.
+/// Success returns unique, strictly path-ordered entries with no tracked
+/// file/directory-prefix overlap. Same-path conflicts take precedence over
+/// prefix conflicts; otherwise the first prefix conflict in path order is returned.
+/// Inputs must have unique canonical paths; their entry order is immaterial.
+/// This does not validate shard placement or conflicts with other files.
+pub fn merge_three_way(ancestor: &Lock, ours: &Lock, theirs: &Lock) -> Result<Lock, MergeConflict> {
+    // Resolve all three versions through one ordered union. Inputs need not
+    // already be path-sorted.
     let mut paths: BTreeMap<&GatPath, [Option<Oid>; 3]> = BTreeMap::new();
     for (side, lock) in [ancestor, ours, theirs].into_iter().enumerate() {
         for entry in &lock.entries {
@@ -91,11 +101,41 @@ pub fn merge_three_way(ancestor: &Lock, ours: &Lock, theirs: &Lock) -> Result<Lo
         }
     }
 
-    if conflicts.is_empty() {
-        Ok(Lock { entries })
-    } else {
-        Err(conflicts)
+    if !conflicts.is_empty() {
+        return Err(MergeConflict::Paths(conflicts));
     }
+    if let Some((ancestor, descendant)) = directory_prefix_conflict(&entries) {
+        return Err(MergeConflict::DirectoryPrefix {
+            ancestor: ancestor.to_owned(),
+            descendant: descendant.to_owned(),
+        });
+    }
+    Ok(Lock { entries })
+}
+
+/// Search the sorted result without an auxiliary index or allocated bound strings.
+/// The first key at or above `path + '/'` is its first possible descendant;
+/// punctuation siblings such as `foo.bar` can separate it from the tracked file.
+fn directory_prefix_conflict(entries: &[Entry]) -> Option<(&str, &str)> {
+    for (index, entry) in entries.iter().enumerate() {
+        let path = entry.path.as_str();
+        let remaining = &entries[index + 1..];
+        let next = remaining.partition_point(|candidate| {
+            candidate
+                .path
+                .as_str()
+                .bytes()
+                .cmp(path.bytes().chain(std::iter::once(b'/')))
+                .is_lt()
+        });
+        if let Some(candidate) = remaining.get(next) {
+            let descendant = candidate.path.as_str();
+            if super::codec::is_directory_prefix(path, descendant) {
+                return Some((path, descendant));
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -121,6 +161,103 @@ mod tests {
     const OID_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const OID_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const OID_C: &str = "ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccdd";
+
+    #[test]
+    fn prefix_search_matches_pairwise_reference_for_every_subset() {
+        let mut pool = [
+            "a",
+            "a!",
+            "a!b",
+            "a.b",
+            "a/b",
+            "a/b/c",
+            "a0",
+            "b",
+            "b/c",
+            "é\0",
+            "é\0/child",
+            "é\t",
+            "é\t/child",
+        ];
+        pool.sort_unstable();
+        for mask in 0..(1usize << pool.len()) {
+            let entries: Vec<_> = pool
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| mask & (1 << index) != 0)
+                .map(|(_, path)| (*path, OID_A))
+                .collect();
+            let lock = lock(&entries);
+            let expected = entries.iter().enumerate().find_map(|(i, (path, _))| {
+                entries[i + 1..].iter().find_map(|(descendant, _)| {
+                    descendant
+                        .strip_prefix(path)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+                        .then_some((*path, *descendant))
+                })
+            });
+            assert_eq!(
+                directory_prefix_conflict(&lock.entries),
+                expected,
+                "subset {mask}"
+            );
+        }
+    }
+
+    #[test]
+    fn merged_directory_prefix_conflicts_are_rejected_in_both_directions() {
+        for (file, descendant) in [("foo", "foo/bar"), ("é\t", "é\t/child")] {
+            let ancestor = lock(&[]);
+            let file_side = lock(&[(file, OID_A)]);
+            let descendant_side = lock(&[("foo.bar", OID_B), (descendant, OID_C)]);
+            for (ours, theirs) in [
+                (&file_side, &descendant_side),
+                (&descendant_side, &file_side),
+            ] {
+                assert_eq!(
+                    merge_three_way(&ancestor, ours, theirs).unwrap_err(),
+                    MergeConflict::DirectoryPrefix {
+                        ancestor: file.to_owned(),
+                        descendant: descendant.to_owned(),
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn replacing_a_file_with_descendants_and_punctuation_siblings_is_valid() {
+        let ancestor = lock(&[("foo", OID_A)]);
+        let ours = lock(&[("foo/bar", OID_B)]);
+        let theirs = lock(&[("foo", OID_A), ("foo.bar", OID_C)]);
+        let merged = merge_three_way(&ancestor, &ours, &theirs).unwrap();
+        assert_eq!(
+            Lock::parse(&merged.to_string()).unwrap().entries,
+            merged.entries
+        );
+        assert_eq!(
+            merged
+                .entries
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            ["foo.bar", "foo/bar"]
+        );
+    }
+
+    #[test]
+    fn same_path_conflicts_take_precedence_over_prefix_conflicts() {
+        let ancestor = lock(&[]);
+        let ours = lock(&[("a", OID_A), ("foo", OID_A)]);
+        let theirs = lock(&[("a", OID_B), ("foo/bar", OID_B)]);
+        let MergeConflict::Paths(conflicts) =
+            merge_three_way(&ancestor, &ours, &theirs).unwrap_err()
+        else {
+            panic!("expected same-path conflict first");
+        };
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].path, "a");
+    }
 
     #[test]
     fn independent_additions_on_both_sides_merge_cleanly() {
@@ -209,7 +346,11 @@ mod tests {
         let ours = lock(&[("a.bin", OID_B)]);
         let theirs = lock(&[("a.bin", OID_C)]);
 
-        let conflicts = merge_three_way(&ancestor, &ours, &theirs).unwrap_err();
+        let MergeConflict::Paths(conflicts) =
+            merge_three_way(&ancestor, &ours, &theirs).unwrap_err()
+        else {
+            panic!("expected same-path conflicts");
+        };
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].path, "a.bin");
         assert_eq!(conflicts[0].ancestor, None);
@@ -223,7 +364,11 @@ mod tests {
         let ours = lock(&[("a.bin", OID_B)]);
         let theirs = lock(&[("a.bin", OID_C)]);
 
-        let conflicts = merge_three_way(&ancestor, &ours, &theirs).unwrap_err();
+        let MergeConflict::Paths(conflicts) =
+            merge_three_way(&ancestor, &ours, &theirs).unwrap_err()
+        else {
+            panic!("expected same-path conflicts");
+        };
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].path, "a.bin");
     }
@@ -234,7 +379,11 @@ mod tests {
         let ours = lock(&[]);
         let theirs = lock(&[("a.bin", OID_B)]);
 
-        let conflicts = merge_three_way(&ancestor, &ours, &theirs).unwrap_err();
+        let MergeConflict::Paths(conflicts) =
+            merge_three_way(&ancestor, &ours, &theirs).unwrap_err()
+        else {
+            panic!("expected same-path conflicts");
+        };
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].ours, None);
         assert_eq!(conflicts[0].theirs, Some(oid(OID_B)));
@@ -246,7 +395,11 @@ mod tests {
         let ours = lock(&[("a.bin", OID_B)]);
         let theirs = lock(&[]);
 
-        let conflicts = merge_three_way(&ancestor, &ours, &theirs).unwrap_err();
+        let MergeConflict::Paths(conflicts) =
+            merge_three_way(&ancestor, &ours, &theirs).unwrap_err()
+        else {
+            panic!("expected same-path conflicts");
+        };
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].ours, Some(oid(OID_B)));
         assert_eq!(conflicts[0].theirs, None);
@@ -269,7 +422,11 @@ mod tests {
         let ours = lock(&[("a.bin", OID_B), ("b.bin", OID_B)]);
         let theirs = lock(&[("a.bin", OID_C), ("b.bin", OID_C)]);
 
-        let conflicts = merge_three_way(&ancestor, &ours, &theirs).unwrap_err();
+        let MergeConflict::Paths(conflicts) =
+            merge_three_way(&ancestor, &ours, &theirs).unwrap_err()
+        else {
+            panic!("expected same-path conflicts");
+        };
         assert_eq!(conflicts.len(), 2);
         assert_eq!(conflicts[0].path, "a.bin");
         assert_eq!(conflicts[1].path, "b.bin");

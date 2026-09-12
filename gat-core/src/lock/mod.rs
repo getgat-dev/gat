@@ -20,7 +20,7 @@ pub use error::{InvalidOidReason, LockDomainError, LockError, MalformedRowReason
 pub use identity::{
     CanonicalDesiredIdentity, LOCK_VERSION, ShardContentIdentity, ShardContentIdentityDecodeError,
 };
-pub use merge::{Conflict, merge_three_way};
+pub use merge::{Conflict, MergeConflict, merge_three_way};
 pub use shard::{LockShardId, LockShardIdError, LockShardLevels, LockShardLevelsError};
 
 /// Validated, allocation-conscious row access for storage implementations.

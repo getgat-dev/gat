@@ -79,6 +79,34 @@ fn independent_insertions_into_the_same_sorted_gap_merge_cleanly() {
     );
 }
 
+/// A structurally invalid union must fail the Git driver protocol without
+/// replacing `%A`, even though each input is a valid lock document.
+#[test]
+fn single_file_prefix_conflict_exits_nonzero_without_changing_ours() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let header = gat_core::lock::VERSION;
+    let digest = "a".repeat(64);
+    std::fs::write(dir.join("O"), format!("{header}\n")).unwrap();
+    let before = format!("{header}\r\n{digest}\tfoo\r\n");
+    std::fs::write(dir.join("A"), &before).unwrap();
+    std::fs::write(
+        dir.join("B"),
+        format!("{header}\n{digest}\tfoo.bar\n{digest}\tfoo/bar\n"),
+    )
+    .unwrap();
+
+    let output = gat(dir, &["merge-driver", "O", "A", "B"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(std::fs::read(dir.join("A")).unwrap(), before.as_bytes());
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        diagnostic.contains("file and its descendant"),
+        "{diagnostic}"
+    );
+    assert!(diagnostic.contains("foo/bar"), "{diagnostic}");
+}
+
 /// Scenario 2: two branches modify two different existing tracked
 /// paths -- an ordinary case that a plain text merge would already
 /// handle, but must keep working through the semantic driver too.

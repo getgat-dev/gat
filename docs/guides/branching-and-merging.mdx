@@ -84,9 +84,10 @@ automatically. Different edits to the same path, or an edit versus deletion,
 require a decision. Gat does not merge binary contents.
 
 The combined lock must also satisfy file/directory-prefix constraints: for example,
-it cannot track both `data` and `data/model.bin`. The driver resolves same-path
-conflicts but currently does not certify these constraints across merged paths
-or shards; subsequent Gat reads reject an invalid combined lock.
+it cannot track both `data` and `data/model.bin`. The driver rejects these conflicts
+within each merged file before writing output. It does not certify conflicts across
+shards or files Git resolves without invoking the driver; subsequent Gat reads
+validate the complete lock.
 
 <Accordion title="Three-way merge rules">
   Gat compares each path's content ID, treating absence as deletion:
