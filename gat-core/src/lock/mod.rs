@@ -7,6 +7,8 @@
 //! narrow [`validated`] facade.
 
 mod codec;
+/// Canonical byte serialization for resident and streaming destinations.
+pub mod encoding;
 mod error;
 mod identity;
 mod merge;

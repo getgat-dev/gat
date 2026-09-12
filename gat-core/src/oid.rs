@@ -111,7 +111,7 @@ impl Oid {
     }
 
     /// Shared allocation-free encoding for owned strings, formatting, and serde.
-    fn encode_hex(&self, buf: &mut [u8; 64]) {
+    pub(crate) fn encode_hex(&self, buf: &mut [u8; 64]) {
         const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
         for (i, byte) in self.0.iter().enumerate() {
             buf[i * 2] = HEX_DIGITS[(byte >> 4) as usize];

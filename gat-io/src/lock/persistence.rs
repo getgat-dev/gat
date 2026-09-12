@@ -2133,8 +2133,8 @@ pub fn publish_flat_shard(
 /// (`desired_rows_by_shard_ids`), `next_row` is called repeatedly (`Ok(None)`
 /// signals exhaustion; rows must already be in ascending `path` order, the
 /// same order the `SQLite` desired-state cursor already yields) and each row
-/// is validated, rendered, and written straight to a same-directory temp
-/// file as it's produced, feeding the exact same bytes into an
+/// is encoded into a bounded reusable buffer and written to a same-directory
+/// temp file, feeding the exact same blocks into an
 /// incremental BLAKE3 hasher in the same pass. At most one row is ever
 /// resident here at a time, so peak destination-side memory for a huge
 /// first mount / recovery replay stays a small constant rather than
@@ -2180,26 +2180,20 @@ pub fn publish_flat_shard_streaming(
     // total length required -- so the hasher is updated with exactly the
     // same bytes as they're written, in the same pass, and finalized once
     // writing is done. There is no second read of the temp file at all.
-    let mut hasher = blake3::Hasher::new();
+    let mut sink = HashingWriter {
+        writer: tmp.as_file_mut(),
+        hasher: blake3::Hasher::new(),
+    };
     {
-        let mut writer = BufWriter::new(tmp.as_file_mut());
-        let mut write_row = |bytes: &[u8]| -> Result<()> {
-            hasher.update(bytes);
-            writer
-                .write_all(bytes)
-                .map_err(|source| LockError::io("writing temp file for", &path, source))
-        };
-        write_row(format!("{}\n", super::VERSION).as_bytes())?;
+        // Buffer before hashing as well as writing. Large ordinary path spans
+        // may bypass the buffer, keeping memory bounded even for huge rows.
+        let mut writer = BufWriter::with_capacity(256 * 1024, &mut sink);
+        gat_core::lock::encoding::write_header(&mut writer)
+            .map_err(|source| LockError::io("writing temp file for", &path, source))?;
         let mut row = Some(first);
         while let Some(entry) = row {
-            write_row(
-                format!(
-                    "{}\t{}\n",
-                    entry.oid,
-                    gat_core::lock::EscapedPath(&entry.path)
-                )
-                .as_bytes(),
-            )?;
+            gat_core::lock::encoding::write_row(&mut writer, &entry)
+                .map_err(|source| LockError::io("writing temp file for", &path, source))?;
             #[cfg(any(test, feature = "test-support"))]
             {
                 row_count += 1;
@@ -2211,7 +2205,7 @@ pub fn publish_flat_shard_streaming(
             .flush()
             .map_err(|source| LockError::io("flushing temp file for", &path, source))?;
     }
-    let content_hash = super::ShardContentIdentity::from_array(*hasher.finalize().as_bytes());
+    let content_hash = super::ShardContentIdentity::from_array(*sink.hasher.finalize().as_bytes());
     tmp.as_file_mut()
         .sync_all()
         .map_err(|source| LockError::io("syncing temp file publishing", &path, source))?;
@@ -2227,6 +2221,25 @@ pub fn publish_flat_shard_streaming(
         identity: content_hash,
         proof: published.proof,
     }))
+}
+
+/// Sits below the output buffer so BLAKE3 receives the same large blocks as
+/// the file. Only bytes accepted by the destination contribute to its identity.
+struct HashingWriter<W> {
+    writer: W,
+    hasher: blake3::Hasher,
+}
+
+impl<W: std::io::Write> std::io::Write for HashingWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let written = self.writer.write(bytes)?;
+        self.hasher.update(&bytes[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
+    }
 }
 
 /// On-disk fan-out layout for a sharded `gat.lock/` directory: which shard
@@ -3836,6 +3849,109 @@ mod tests {
 
         let on_disk = std::fs::read(tmp.path().join("gat.lock")).unwrap();
         assert_eq!(published.identity, crate::lock::hash_shard_bytes(&on_disk));
+    }
+
+    #[test]
+    fn streaming_publication_matches_canonical_bytes_across_blocks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut entries = Vec::new();
+        for i in 0..3000 {
+            let path = format!(
+                "{i:05}/é\t{}\r\n",
+                "x".repeat(if i == 1500 { 1024 * 1024 } else { 80 })
+            );
+            entries.push(Entry {
+                path: gat_core::lexical_path::GatPath::parse_canonical(&path).unwrap(),
+                oid: gat_core::oid::Oid::from_bytes([u8::try_from(i % 256).unwrap(); 32]),
+            });
+        }
+        let expected = Lock {
+            entries: entries.clone(),
+        }
+        .to_string();
+        let mut rows = entries.into_iter();
+        let receipt = publish_flat_shard_streaming(&layout(tmp.path()), || Ok(rows.next()))
+            .unwrap()
+            .unwrap();
+        let actual = std::fs::read(tmp.path().join("gat.lock")).unwrap();
+        assert_eq!(actual, expected.as_bytes());
+        assert_eq!(receipt.identity, crate::lock::hash_shard_bytes(&actual));
+    }
+
+    #[test]
+    fn streaming_source_failure_preserves_existing_file_and_removes_staging_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("gat.lock");
+        std::fs::write(&path, b"existing lock").unwrap();
+        let mut first = Some(entry("a", &"ab".repeat(32)));
+        let result = publish_flat_shard_streaming(&layout(tmp.path()), || {
+            first.take().map_or_else(
+                || {
+                    Err(LockError::RowSource(Box::new(std::io::Error::other(
+                        "source failed",
+                    ))))
+                },
+                |entry| Ok(Some(entry)),
+            )
+        });
+        assert!(matches!(result, Err(LockError::RowSource(_))));
+        assert_eq!(std::fs::read(path).unwrap(), b"existing lock");
+        assert!(!std::fs::read_dir(tmp.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".tmp-")
+        }));
+    }
+
+    #[test]
+    fn buffered_hashing_handles_partial_writes_and_propagates_failures() {
+        use std::io::{self, BufWriter, Write};
+        struct Destination {
+            bytes: Vec<u8>,
+            limit: usize,
+            fail_flush: bool,
+        }
+        impl Write for Destination {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.bytes.len() == self.limit {
+                    return Err(io::Error::other("write failed"));
+                }
+                let n = bytes.len().min(7).min(self.limit - self.bytes.len());
+                self.bytes.extend_from_slice(&bytes[..n]);
+                Ok(n)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                if self.fail_flush {
+                    Err(io::Error::other("flush failed"))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        for size in [1, 63, 64, 65_536, 262_144, 1_048_576] {
+            for (limit, fail_flush) in [(usize::MAX, false), (101, false), (usize::MAX, true)] {
+                let mut sink = HashingWriter {
+                    writer: Destination {
+                        bytes: Vec::new(),
+                        limit,
+                        fail_flush,
+                    },
+                    hasher: blake3::Hasher::new(),
+                };
+                let input = vec![b'x'; 4097];
+                let result = {
+                    let mut buffered = BufWriter::with_capacity(size, &mut sink);
+                    buffered.write_all(&input).and_then(|()| buffered.flush())
+                };
+                assert_eq!(result.is_ok(), limit == usize::MAX && !fail_flush);
+                assert_eq!(sink.hasher.finalize(), blake3::hash(&sink.writer.bytes));
+                if result.is_ok() {
+                    assert_eq!(sink.writer.bytes, input);
+                }
+            }
+        }
     }
 
     #[test]
