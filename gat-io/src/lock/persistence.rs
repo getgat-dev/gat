@@ -127,8 +127,8 @@ fn coherent_read_to_string(
 /// should exist afterward, as [`prepare_sharded_buckets`] returns
 /// it -- factored into a named alias purely to keep that signature (and
 /// its `into_par_iter` callers) legible.
-type ShardBuckets = (
-    BTreeMap<LockShardId, Vec<Entry>>,
+type ShardBuckets<'a> = (
+    BTreeMap<LockShardId, Vec<&'a Entry>>,
     std::collections::HashSet<std::path::PathBuf>,
 );
 
@@ -283,7 +283,12 @@ impl ShardEvidence {
 /// [`Self::into_entries`].
 pub(crate) struct FullShardEvidence {
     evidence: ShardEvidence,
-    entries: Vec<Entry>,
+    entries: EvidenceRows,
+}
+
+enum EvidenceRows {
+    Owned(Vec<Entry>),
+    Validated(gat_core::lock::validated::ValidatedLockFile<'static>),
 }
 
 impl FullShardEvidence {
@@ -305,7 +310,13 @@ impl FullShardEvidence {
 
     /// Take ownership of the exact rows rendered into this shard.
     pub(crate) fn into_entries(self) -> Vec<Entry> {
-        self.entries
+        match self.entries {
+            EvidenceRows::Owned(entries) => entries,
+            EvidenceRows::Validated(view) => view
+                .rows()
+                .map(|(path, oid)| super::entry_from_validated_parts(path, oid))
+                .collect(),
+        }
     }
 }
 
@@ -729,71 +740,225 @@ fn list_shard_files_at(root: &Path, path: &Path) -> Result<Option<Vec<ShardFile>
 /// tree is rejected here exactly as it would be by a normal `load`.
 ///
 pub(super) fn observe_full_lock_with_evidence(root: &Path) -> Result<FullLockEvidence> {
-    let shard_files = list_shard_files(root)?;
-    // `list_shard_files` already rejects a mixed-depth tree
-    // (`list_shard_files_at`'s `shard_topology` check), so this shape is
-    // only ever derived from a discovered set that has already passed
-    // uniform-topology validation -- never from an arbitrary "first"
-    // shard's own depth.
-    shard_topology(shard_files.iter().map(|file| file.shard_id))?;
-
-    let shards: Vec<FullShardEvidence> = shard_files
-        .par_iter()
-        .map(|shard_file| -> Result<FullShardEvidence> {
-            let path = &shard_file.full_path;
-            let observation = coherent_read_to_string(path, || {
-                #[cfg(any(test, feature = "test-support"))]
-                super::test_support::record_full_lock_evidence_shard_read();
-                std::fs::read_to_string(path)
-                    .map_err(|source| LockError::io("reading", path, source))
-            })?;
-            let identity = super::identity::hash_shard_bytes(observation.value.as_bytes());
-            let parsed =
-                Lock::parse(&observation.value).map_err(|err| wrap_shard_parse_error(path, err))?;
-            Ok(FullShardEvidence {
-                evidence: ShardEvidence {
-                    shard_id: shard_file.shard_id,
-                    identity,
-                    proof: observation.proof,
-                },
-                entries: parsed.entries,
+    let mut files = list_shard_files(root)?;
+    files.sort_by_key(|file| file.shard_id);
+    let mut shards = read_resident_shards(&files, true)?;
+    certify_resident_shards(&mut shards)?;
+    Ok(FullLockEvidence {
+        shards: shards
+            .into_iter()
+            .map(|shard| FullShardEvidence {
+                evidence: shard.evidence.expect("evidence requested"),
+                entries: EvidenceRows::Validated(shard.view),
             })
+            .collect(),
+    })
+}
+
+/// Own coherent input until validation and consumption have both completed.
+struct ResidentShard {
+    view: gat_core::lock::validated::ValidatedLockFile<'static>,
+    evidence: Option<ShardEvidence>,
+    placement_error: Option<gat_core::lock::LockError>,
+}
+
+fn read_resident_shards(files: &[ShardFile], with_evidence: bool) -> Result<Vec<ResidentShard>> {
+    // Collect results in shard order before reporting errors; parallel workers
+    // must not make the selected diagnostic depend on scheduling.
+    let results: Vec<_> = files
+        .par_iter()
+        .map(|file| {
+            let observation = coherent_read_to_string(&file.full_path, || {
+                std::fs::read_to_string(&file.full_path)
+                    .map_err(|source| LockError::io("reading", &file.full_path, source))
+            })?;
+            decode_resident_shard(file, observation, with_evidence)
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect();
+    let shards = results.into_iter().collect::<Result<Vec<_>>>()?;
+    #[cfg(any(test, feature = "test-support"))]
+    for _ in files {
+        super::test_support::record_full_shard_text_read();
+        if with_evidence {
+            super::test_support::record_full_lock_evidence_shard_read();
+        }
+    }
+    Ok(shards)
+}
 
-    // Cross-shard duplicates first, matching the same "a path belongs to
-    // exactly one shard" error `load_sharded` gives a corrupt/
-    // hand-edited tree.
-    let mut seen_paths: BTreeSet<gat_core::lexical_path::GatPath> = BTreeSet::new();
-    for shard in &shards {
-        for entry in &shard.entries {
-            if !seen_paths.insert(entry.path.clone()) {
+fn decode_resident_shard(
+    file: &ShardFile,
+    observation: crate::file_state::CoherentObservation<String>,
+    with_evidence: bool,
+) -> Result<ResidentShard> {
+    let evidence = with_evidence.then(|| ShardEvidence {
+        shard_id: file.shard_id,
+        identity: super::identity::hash_shard_bytes(observation.value.as_bytes()),
+        proof: observation.proof,
+    });
+    let view = gat_core::lock::validated::ValidatedLockFile::from_owned(observation.value)
+        .map_err(|err| wrap_shard_parse_error(&file.full_path, err))?;
+    let placement_error = if file.shard_id.is_flat() {
+        None
+    } else {
+        view.rows()
+            .find_map(|(path, _)| check_shard_placement(file, file.shard_id.levels(), path).err())
+    };
+    Ok(ResidentShard {
+        view,
+        evidence,
+        placement_error,
+    })
+}
+
+/// Bound each acquisition by its admitted size, not just an initial size
+/// estimate. A file that grew before acquisition falls back without retaining
+/// an unexpectedly large source; coherent-observation races still fail closed.
+fn try_read_resident_shards(
+    files: &[ShardFile],
+    budget: u64,
+) -> Result<Option<Vec<ResidentShard>>> {
+    use std::io::Read;
+    let mut remaining = budget;
+    let mut sizes = Vec::with_capacity(files.len());
+    for file in files {
+        let size = std::fs::symlink_metadata(&file.full_path)
+            .map_err(|source| LockError::io("reading", &file.full_path, source))?
+            .len();
+        let Some(rest) = remaining.checked_sub(size) else {
+            return Ok(None);
+        };
+        remaining = rest;
+        sizes.push(size);
+    }
+    let results: Vec<Result<Option<ResidentShard>>> = files
+        .par_iter()
+        .zip(sizes)
+        .map(|(file, size)| {
+            let observation = crate::file_state::coherent_observation(
+                &file.full_path,
+                || -> Result<Option<String>> {
+                    let input = std::fs::File::open(&file.full_path)
+                        .map_err(|source| LockError::io("reading", &file.full_path, source))?;
+                    let mut bytes = Vec::new();
+                    input
+                        .take(size.saturating_add(1))
+                        .read_to_end(&mut bytes)
+                        .map_err(|source| LockError::io("reading", &file.full_path, source))?;
+                    if bytes.len() as u64 > size {
+                        return Ok(None);
+                    }
+                    String::from_utf8(bytes).map(Some).map_err(|source| {
+                        LockError::io(
+                            "reading",
+                            &file.full_path,
+                            std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+                        )
+                    })
+                },
+            )?;
+            observation
+                .value
+                .map(|value| {
+                    decode_resident_shard(
+                        file,
+                        crate::file_state::CoherentObservation {
+                            value,
+                            proof: observation.proof,
+                        },
+                        false,
+                    )
+                })
+                .transpose()
+        })
+        .collect();
+    let resident = results.into_iter().collect::<Result<Option<Vec<_>>>>()?;
+    #[cfg(any(test, feature = "test-support"))]
+    if resident.is_some() {
+        for _ in files {
+            super::test_support::record_full_shard_text_read();
+        }
+    }
+    Ok(resident)
+}
+
+/// Merge borrowed rows, retaining only one pending head per shard. This merge
+/// can be repeated for emission without reading or decoding source bytes again.
+fn resident_rows(
+    shards: &[ResidentShard],
+) -> impl Iterator<Item = (&str, gat_core::oid::Oid, usize)> {
+    let mut cursors: Vec<_> = shards.iter().map(|shard| shard.view.rows()).collect();
+    let mut heap = BinaryHeap::new();
+    for (owner, cursor) in cursors.iter_mut().enumerate() {
+        if let Some((path, oid)) = cursor.next() {
+            heap.push(Reverse(MergeHead {
+                path,
+                shard_idx: owner,
+                oid,
+            }));
+        }
+    }
+    std::iter::from_fn(move || {
+        let Reverse(MergeHead {
+            path,
+            shard_idx: owner,
+            oid,
+        }) = heap.pop()?;
+        if let Some((next, oid)) = cursors[owner].next() {
+            heap.push(Reverse(MergeHead {
+                path: next,
+                shard_idx: owner,
+                oid,
+            }));
+        }
+        Some((path, oid, owner))
+    })
+}
+
+fn certify_resident_shards(shards: &mut [ResidentShard]) -> Result<()> {
+    let mut previous: Option<&str> = None;
+    let mut stack: Vec<&str> = Vec::new();
+    let mut prefix_error = None;
+    for (path, _, _) in resident_rows(shards) {
+        if let Some(previous) = previous {
+            if previous == path {
                 return Err(LockDomainError::PathInMultipleShards {
-                    path: entry.path.as_str().to_string(),
+                    path: path.to_owned(),
                 }
                 .into());
             }
-        }
-    }
-    // Once every path is known to belong to exactly one shard, check it's
-    // the shard the hash placement `shard_id_for_path` predicts.
-    for shard in &shards {
-        let levels = shard_levels_from_id(&shard.evidence.shard_id);
-        for entry in &shard.entries {
-            let expected_shard_id = shard_id_for_path(&entry.path, levels);
-            if expected_shard_id != shard.evidence.shard_id {
-                return Err(LockDomainError::MisplacedShardRow {
-                    path: entry.path.as_str().to_string(),
-                    actual: shard.evidence.shard_id.to_canonical_string(),
-                    expected: expected_shard_id.to_canonical_string(),
-                }
-                .into());
+            let lcp = previous
+                .bytes()
+                .zip(path.bytes())
+                .take_while(|(a, b)| a == b)
+                .count();
+            while stack.last().is_some_and(|s| s.len() > lcp) {
+                stack.pop();
+            }
+            if let Some(&ancestor) = stack.last()
+                && path.as_bytes().get(ancestor.len()) == Some(&b'/')
+                && prefix_error.is_none()
+            {
+                prefix_error = Some(LockDomainError::DirectoryPrefixConflict {
+                    ancestor: ancestor.to_owned(),
+                    descendant: path.to_owned(),
+                });
             }
         }
+        stack.push(path);
+        previous = Some(path);
     }
-    super::validate_no_path_directory_conflicts(&seen_paths)?;
-
-    Ok(FullLockEvidence { shards })
+    // Preserve duplicate > placement > directory-conflict precedence. Placement
+    // was computed in the workers; only selecting a stored error is serial.
+    for shard in shards {
+        if let Some(error) = shard.placement_error.take() {
+            return Err(error.into());
+        }
+    }
+    if let Some(error) = prefix_error {
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 /// counterpart of [`list_shard_files`]: flat is the degenerate one-shard
@@ -848,8 +1013,8 @@ pub(crate) fn visit_lock_rows(
 /// as each shard is parsed.
 ///
 /// A bounded row decoder for the multi-shard merge. Complete validation happens
-/// in the merge's first pass; consumer callbacks run only in its second pass.
-/// Flat files use a retained certified view instead, so they are read and decoded once.
+/// while staging decoded rows in a private spool; callbacks consume that spool
+/// only after certification. Resident inputs instead retain certified views.
 struct ShardLineCursor {
     reader: std::io::BufReader<std::fs::File>,
     path: std::path::PathBuf,
@@ -917,29 +1082,30 @@ impl ShardLineCursor {
 /// tiebreak) so a [`std::collections::BinaryHeap`] of these can select
 /// the next row across every shard in `O(log shards)` instead of a
 /// linear scan over every shard's head each time.
-struct MergeHead {
-    path: String,
+struct MergeHead<P = String> {
+    path: P,
     oid: gat_core::oid::Oid,
     shard_idx: usize,
 }
 
-impl PartialEq for MergeHead {
+impl<P: AsRef<str>> PartialEq for MergeHead<P> {
     fn eq(&self, other: &Self) -> bool {
-        self.path == other.path && self.shard_idx == other.shard_idx
+        self.path.as_ref() == other.path.as_ref() && self.shard_idx == other.shard_idx
     }
 }
-impl Eq for MergeHead {}
-impl PartialOrd for MergeHead {
+impl<P: AsRef<str>> Eq for MergeHead<P> {}
+impl<P: AsRef<str>> PartialOrd for MergeHead<P> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
-impl Ord for MergeHead {
+impl<P: AsRef<str>> Ord for MergeHead<P> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         #[cfg(any(test, feature = "test-support"))]
         super::test_support::record_merge_head_comparison();
         self.path
-            .cmp(&other.path)
+            .as_ref()
+            .cmp(other.path.as_ref())
             .then_with(|| self.shard_idx.cmp(&other.shard_idx))
     }
 }
@@ -950,12 +1116,8 @@ impl Ord for MergeHead {
 /// entries plus one pending row per shard -- never a whole shard's rows,
 /// let alone the whole tree's.
 ///
-/// [`visit_lock_rows_validated`] opens two of these in turn over the
-/// same `shards` slice: [`validate_ordered_merge`] uses one to prove
-/// order/placement/cross-shard-conflict validity with nothing retained
-/// past the current row, and only once that succeeds does
-/// [`emit_ordered_merge`] open a second, fresh one to actually call
-/// `keep`/`visit` incrementally.
+/// The bounded-memory mode opens this merge once. Validation stages decoded
+/// rows in a private spool; only after certification does emission consume it.
 struct ShardMerge {
     cursors: Vec<ShardLineCursor>,
     heap: BinaryHeap<Reverse<MergeHead>>,
@@ -1039,16 +1201,21 @@ fn check_shard_placement(
 /// Certify ordering, placement, uniqueness and directory conflicts across shards
 /// before the emission pass invokes consumer callbacks. Unordered input is invalid.
 fn validate_ordered_merge(
+    root: &Path,
     shards: &[ShardFile],
     exact_path: Option<&str>,
     narrow_enabled: bool,
-) -> Result<bool> {
+) -> Result<(bool, std::fs::File)> {
+    use std::io::{BufWriter, Seek, Write};
+    let mut spool = tempfile::tempfile()
+        .map_err(|source| LockError::io("staging validated rows for", root, source))?;
+    let mut writer = BufWriter::with_capacity(256 * 1024, &mut spool);
     let mut merge = ShardMerge::open(shards)?;
     let mut open: Vec<(String, usize)> = Vec::new();
     let mut last_path_per_shard: Vec<Option<String>> = vec![None; shards.len()];
     let mut exact_found = false;
 
-    while let Some((path, _oid, shard_idx)) = merge.next(shards)? {
+    while let Some((path, oid, shard_idx)) = merge.next(shards)? {
         if let Some(last) = &last_path_per_shard[shard_idx]
             && path.as_str() < last.as_str()
         {
@@ -1096,30 +1263,57 @@ fn validate_ordered_merge(
             exact_found = true;
         }
 
+        writer
+            .write_all(&(path.len() as u64).to_le_bytes())
+            .and_then(|()| writer.write_all(oid.as_bytes()))
+            .and_then(|()| writer.write_all(path.as_bytes()))
+            .map_err(|source| LockError::io("staging validated rows for", root, source))?;
         open.push((path, shard_idx));
         #[cfg(any(test, feature = "test-support"))]
         super::test_support::observe_retained_ordered_rows(open.len());
     }
 
-    Ok(exact_found)
+    writer
+        .flush()
+        .map_err(|source| LockError::io("flushing validated rows for", root, source))?;
+    drop(writer);
+    spool
+        .rewind()
+        .map_err(|source| LockError::io("rewinding validated rows for", root, source))?;
+    Ok((exact_found, spool))
 }
 
-/// The emission pass behind [`visit_lock_rows_validated`]'s ordered fast
-/// path, run only once [`validate_ordered_merge`] has already proven the
-/// whole tree valid and ordered. Re-merges the same shards from fresh
-/// cursors and calls `keep`/`visit` immediately per selected row --
-/// nothing beyond the current row and the shard-head heap is ever
-/// retained here, so peak state does not grow with how many rows the
-/// selection matches.
-fn emit_ordered_merge(
-    shards: &[ShardFile],
+/// Consume a private binary spool after global certification. The original
+/// shard files are never reopened, and paths/OIDs are not semantically reparsed.
+fn emit_validated_spool(
+    root: &Path,
+    spool: std::fs::File,
     exact_path: Option<&str>,
     narrow_to_exact: bool,
     keep: &impl Fn(&str) -> bool,
     visit: &mut impl FnMut(&Entry) -> Result<()>,
 ) -> Result<()> {
-    let mut merge = ShardMerge::open(shards)?;
-    while let Some((path, oid, _shard_idx)) = merge.next(shards)? {
+    use std::io::Read;
+    let mut reader = std::io::BufReader::new(spool);
+    let mut row = || -> std::io::Result<Option<(String, gat_core::oid::Oid)>> {
+        let mut len = [0; 8];
+        if reader.read(&mut len[..1])? == 0 {
+            return Ok(None);
+        }
+        reader.read_exact(&mut len[1..])?;
+        let len = usize::try_from(u64::from_le_bytes(len))
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let mut oid = [0; 32];
+        reader.read_exact(&mut oid)?;
+        let mut path = vec![0; len];
+        reader.read_exact(&mut path)?;
+        let path = String::from_utf8(path)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        Ok(Some((path, gat_core::oid::Oid::from_bytes(oid))))
+    };
+    while let Some((path, oid)) =
+        row().map_err(|source| LockError::io("reading validated rows for", root, source))?
+    {
         if narrow_to_exact && exact_path != Some(path.as_str()) {
             continue;
         }
@@ -1134,7 +1328,19 @@ pub(crate) fn visit_lock_rows_validated(
     root: &Path,
     exact_path: Option<&str>,
     keep: impl Fn(&str) -> bool,
+    visit: impl FnMut(&Entry) -> Result<()>,
+) -> Result<()> {
+    visit_lock_rows_with_budget(root, exact_path, keep, visit, 64 * 1024 * 1024)
+}
+
+/// Source-byte admission budget; row descriptors and escape arenas are additional
+/// proportional storage. Larger trees retain the bounded row-streaming mode.
+fn visit_lock_rows_with_budget(
+    root: &Path,
+    exact_path: Option<&str>,
+    keep: impl Fn(&str) -> bool,
     mut visit: impl FnMut(&Entry) -> Result<()>,
+    source_budget: u64,
 ) -> Result<()> {
     let mut shards = list_shard_files(root)?;
     shards.sort_by_key(|a| a.shard_id);
@@ -1173,6 +1379,26 @@ pub(crate) fn visit_lock_rows_validated(
         return Ok(());
     }
 
+    if let Some(mut resident) = try_read_resident_shards(&shards, source_budget)? {
+        certify_resident_shards(&mut resident)?;
+        if let Some(row) =
+            exact_path.and_then(|exact| resident.iter().find_map(|shard| shard.view.find(exact)))
+        {
+            #[cfg(any(test, feature = "test-support"))]
+            super::test_support::record_selected_shard_parse();
+            if keep(row.0) {
+                visit(&super::entry_from_validated_parts(row.0, row.1))?;
+            }
+        } else {
+            for (path, oid, _) in resident_rows(&resident) {
+                if keep(path) {
+                    visit(&super::entry_from_validated_parts(path, oid))?;
+                }
+            }
+        }
+        return Ok(());
+    }
+
     // Narrowing to a single confirmed `exact_path` row is only
     // unambiguous when every shard shares one fan-out depth (so
     // `shard_id_for_path` predicts one consistent shard for it); a mixed
@@ -1186,13 +1412,13 @@ pub(crate) fn visit_lock_rows_validated(
             .len()
             == 1;
 
-    let exact_found = validate_ordered_merge(&shards, exact_path, narrow_enabled)?;
+    let (exact_found, spool) = validate_ordered_merge(root, &shards, exact_path, narrow_enabled)?;
     let narrow_to_exact = narrow_enabled && exact_found;
     #[cfg(any(test, feature = "test-support"))]
     if narrow_to_exact {
         super::test_support::record_selected_shard_parse();
     }
-    emit_ordered_merge(&shards, exact_path, narrow_to_exact, &keep, &mut visit)?;
+    emit_validated_spool(root, spool, exact_path, narrow_to_exact, &keep, &mut visit)?;
 
     Ok(())
 }
@@ -1471,27 +1697,41 @@ pub fn set_load_missing_path_hook_for_test(hook: impl FnOnce() + 'static) {
 /// a caller (e.g. [`save_sharded`]'s per-bucket render) that can't
 /// promise its input is already ordered.
 fn render_entries(entries: &[Entry]) -> String {
-    #[cfg(any(test, feature = "test-support"))]
-    super::test_support::record_render_entries_call();
-    if entries.is_sorted_by(|a, b| a.path <= b.path) {
-        return render_sorted_entries(entries);
-    }
-    let mut sorted = entries.to_vec();
-    sorted.sort_by(|a, b| a.path.cmp(&b.path));
-    render_sorted_entries(&sorted)
+    let mut out = String::new();
+    render_entries_into(entries, &mut out);
+    out
 }
 
-/// Serialize an already-path-sorted entry slice in the canonical
-/// lock-format byte representation. Only [`render_entries`]
-/// should call this directly -- it does not itself sort or validate.
-fn render_sorted_entries(entries: &[Entry]) -> String {
-    use std::fmt::Write;
-    let mut out = String::new();
-    let _ = writeln!(out, "{}", super::VERSION);
-    for e in entries {
-        let _ = writeln!(out, "{}\t{}", e.oid, gat_core::lock::EscapedPath(&e.path));
+fn render_entries_into(entries: &[Entry], out: &mut String) {
+    if entries.is_sorted_by(|a, b| a.path <= b.path) {
+        render_ordered_entries(entries.iter(), out);
+    } else {
+        let mut sorted: Vec<_> = entries.iter().collect();
+        sorted.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+        render_ordered_entries(sorted.into_iter(), out);
     }
-    out
+}
+
+/// Reuse ordinary worker/job buffers, but release an oversized allocation before
+/// the next shard. The resident renderer keeps its measured formatting kernel.
+fn render_ordered_entries<'a>(entries: impl Iterator<Item = &'a Entry>, out: &mut String) {
+    #[cfg(any(test, feature = "test-support"))]
+    super::test_support::record_render_entries_call();
+    use std::fmt::Write;
+    if out.capacity() > 1024 * 1024 {
+        *out = String::new();
+    } else {
+        out.clear();
+    }
+    let _ = writeln!(out, "{}", super::VERSION);
+    for entry in entries {
+        let _ = writeln!(
+            out,
+            "{}\t{}",
+            entry.oid,
+            gat_core::lock::EscapedPath(&entry.path)
+        );
+    }
 }
 
 /// Read `<root>/gat.lock` from disk. Empty lock if nothing exists yet
@@ -1704,78 +1944,63 @@ fn load_sharded(dir: &Path) -> Result<Lock> {
     let mut shard_files = Vec::new();
     shard::collect_files(dir, &mut shard_files)?;
     shard_files.sort();
-    let shards: Vec<(LockShardId, Vec<Entry>)> = shard_files
-        .par_iter()
-        .map(|file| -> Result<(LockShardId, Vec<Entry>)> {
-            let rel = file
+    let files = shard_files
+        .into_par_iter()
+        .map(|full_path| {
+            let rel = full_path
                 .strip_prefix(dir)
-                .expect("shard file is under gat.lock/");
-            let shard_text = format!(
+                .expect("shard file is under lock directory");
+            let name = format!(
                 "gat.lock/{}",
                 rel.to_str()
-                    .ok_or_else(|| LockError::NonUtf8Path { path: file.clone() })?
+                    .ok_or_else(|| LockError::NonUtf8Path {
+                        path: full_path.clone()
+                    })?
                     .replace(std::path::MAIN_SEPARATOR, "/")
             );
-            let shard_id = LockShardId::parse_canonical(&shard_text)
-                .map_err(|err| wrap_shard_id_error(file, err))?;
-            let text = std::fs::read_to_string(file)
-                .map_err(|source| LockError::io("reading", file, source))?;
-            let shard = Lock::parse(&text).map_err(|err| wrap_shard_parse_error(file, err))?;
-            Ok((shard_id, shard.entries))
+            let shard_id = LockShardId::parse_canonical(&name)
+                .map_err(|err| wrap_shard_id_error(&full_path, err))?;
+            Ok(ShardFile {
+                shard_id,
+                full_path,
+            })
         })
+        .collect::<Vec<Result<_>>>()
+        .into_iter()
         .collect::<Result<Vec<_>>>()?;
-
-    // A completed live `gat.lock/` directory is always uniformly
-    // sharded: reject a mixed-depth tree here, the
-    // same way `list_shard_files`/Git-persisted discovery do, before
-    // ever reaching the cross-shard-duplicate or placement checks
-    // below (both of which assume every shard shares one depth).
-    shard_topology(shards.iter().map(|(id, _)| *id))
+    shard_topology(files.iter().map(|file| file.shard_id))
         .map_err(|err| wrap_shard_topology_error(dir, err))?;
-
-    // Cross-shard duplicates first, in shard-file order, matching the
-    // "a path belongs to exactly one shard" error a corrupt/hand-edited
-    // tree gets regardless of which of its two conflicting copies this
-    // happened to concatenate first (or last).
-    let mut seen_paths: BTreeSet<gat_core::lexical_path::GatPath> = BTreeSet::new();
-    for (_, entries) in &shards {
-        for entry in entries {
-            if !seen_paths.insert(entry.path.clone()) {
-                return Err(LockDomainError::PathInMultipleShards {
-                    path: entry.path.as_str().to_string(),
-                }
-                .into());
-            }
-        }
+    let mut shards = read_resident_shards(&files, false).map_err(preserve_missing_shard_error)?;
+    certify_resident_shards(&mut shards)?;
+    // Release each source/arena as its required owned output is materialized,
+    // rather than retaining every source alongside the complete owned lock.
+    let mut entries = Vec::new();
+    for shard in shards {
+        entries.extend(
+            shard
+                .view
+                .rows()
+                .map(|(path, oid)| super::entry_from_validated_parts(path, oid)),
+        );
     }
+    Ok(Lock { entries })
+}
 
-    // Once every path is known to belong to exactly one shard, check
-    // it's the shard the hash placement `shard_id_for_path` predicts --
-    // corruption a lazy single-shard lookup (e.g.
-    // `LockSnapshot::entry_for_path`) trusts without re-checking, so a
-    // full load is where it's caught.
-    for (shard_id, entries) in &shards {
-        let levels = shard_id.levels();
-        for entry in entries {
-            let expected_shard_id = shard_id_for_path(&entry.path, levels);
-            if expected_shard_id != *shard_id {
-                return Err(LockDomainError::MisplacedShardRow {
-                    path: entry.path.as_str().to_string(),
-                    actual: shard_id.to_canonical_string(),
-                    expected: expected_shard_id.to_canonical_string(),
-                }
-                .into());
-            }
-        }
+/// Coherent observation deliberately abstracts failed stat calls. Recover a
+/// genuine disappearance on this cold path so `load` can retain its existing
+/// one-time live-shape retry after a concurrent reshape. Other coherence and
+/// non-regular-file failures must remain failures, not missing-file shortcuts.
+fn preserve_missing_shard_error(error: LockError) -> LockError {
+    if let LockError::FileState(
+        crate::file_state::FileStateError::NotRegularFile { path }
+        | crate::file_state::FileStateError::Observed { path },
+    ) = &error
+        && let Err(source) = std::fs::symlink_metadata(path)
+        && source.kind() == std::io::ErrorKind::NotFound
+    {
+        return LockError::io("reading", path, source);
     }
-
-    super::validate_no_path_directory_conflicts(&seen_paths)?;
-    Ok(Lock {
-        entries: shards
-            .into_iter()
-            .flat_map(|(_, entries)| entries)
-            .collect(),
-    })
+    error
 }
 
 /// Write entries into a `gat.lock/` directory sharded across
@@ -1809,20 +2034,112 @@ fn save_sharded(
     let (buckets, kept) = prepare_sharded_buckets(lock, path, shard_levels)?;
     buckets
         .into_par_iter()
-        .map(|(shard_id, entries)| -> Result<()> {
+        .map_init(String::new, |rendered, (shard_id, entries)| -> Result<()> {
             let rel = relative_shard_path(&shard_id)
                 .expect("sharded bucket keys are never the flat sentinel");
             let file_path = path.join(&rel);
-            let rendered = render_entries(&entries);
             if let Some(parent) = file_path.parent() {
                 std::fs::create_dir_all(parent)
                     .map_err(|source| LockError::io("creating", parent, source))?;
             }
-            publish_rendered_shard_content(&file_path, &rendered, !incremental)
+            if !incremental && large_shard(&entries) {
+                stream_ordered_shard(&file_path, &entries, None).map(|_| ())
+            } else {
+                render_ordered_entries(entries.iter().copied(), rendered);
+                publish_rendered_shard_content(&file_path, rendered, !incremental)
+            }
         })
         .collect::<Result<Vec<_>>>()?;
     shard::remove_stale(path, &kept)?;
     Ok(())
+}
+
+/// Only unconditional replacement may stream before content identity is known.
+/// Incremental publication retains resident comparison and its no-write path.
+fn large_shard(entries: &[&Entry]) -> bool {
+    let mut bytes = 0usize;
+    for entry in entries {
+        bytes = bytes
+            .saturating_add(entry.path.as_str().len())
+            .saturating_add(66);
+        if bytes >= 1024 * 1024 {
+            return true;
+        }
+    }
+    false
+}
+
+fn stream_ordered_shard(
+    path: &Path,
+    entries: &[&Entry],
+    shard_id: Option<LockShardId>,
+) -> Result<Option<ShardEvidence>> {
+    use crate::atomic::AtomicError;
+    use std::io::{BufWriter, Write};
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".tmp-")
+        .tempfile_in(parent)
+        .map_err(|source| AtomicError::TempFileUnavailable {
+            dir: parent.to_path_buf(),
+            source,
+        })?;
+    fn encode(out: &mut impl Write, entries: &[&Entry]) -> std::io::Result<()> {
+        gat_core::lock::encoding::write_header(out)?;
+        for entry in entries {
+            gat_core::lock::encoding::write_row(out, entry)?;
+        }
+        out.flush()
+    }
+    let identity = if shard_id.is_some() {
+        let mut sink = HashingWriter {
+            writer: tmp.as_file_mut(),
+            hasher: blake3::Hasher::new(),
+        };
+        encode(
+            &mut BufWriter::with_capacity(256 * 1024, &mut sink),
+            entries,
+        )
+        .map_err(|source| AtomicError::WriteFailed {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Some(super::ShardContentIdentity::from_array(
+            *sink.hasher.finalize().as_bytes(),
+        ))
+    } else {
+        encode(
+            &mut BufWriter::with_capacity(256 * 1024, tmp.as_file_mut()),
+            entries,
+        )
+        .map_err(|source| AtomicError::WriteFailed {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        None
+    };
+    tmp.as_file_mut()
+        .sync_all()
+        .map_err(|source| AtomicError::SyncFailed {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if let Some(shard_id) = shard_id {
+        let published = crate::atomic::persist_finalized_with_proof(tmp, path)?;
+        Ok(Some(ShardEvidence {
+            shard_id,
+            identity: identity.expect("identity requested"),
+            proof: published.proof,
+        }))
+    } else {
+        crate::atomic::persist_with_retry(tmp, path).map_err(|error| {
+            AtomicError::PublishFailed {
+                path: path.to_path_buf(),
+                source: error.error,
+            }
+        })?;
+        Ok(None)
+    }
 }
 
 /// Shared bucket-construction step of [`save_sharded`] and
@@ -1833,24 +2150,29 @@ fn save_sharded(
 /// publish plus the full set of shard-relative paths that should
 /// still exist afterward, for [`shard::remove_stale`] to reconcile
 /// against.
-fn prepare_sharded_buckets(
-    lock: &Lock,
+fn prepare_sharded_buckets<'a>(
+    lock: &'a Lock,
     path: &Path,
     shard_levels: LockShardLevels,
-) -> Result<ShardBuckets> {
+) -> Result<ShardBuckets<'a>> {
     if path.is_file() {
         std::fs::remove_file(path)
             .map_err(|source| LockError::io("removing flat", path, source))?;
     }
     std::fs::create_dir_all(path).map_err(|source| LockError::io("creating", path, source))?;
 
-    let mut buckets: std::collections::BTreeMap<LockShardId, Vec<Entry>> =
+    let mut buckets: std::collections::BTreeMap<LockShardId, Vec<&Entry>> =
         std::collections::BTreeMap::new();
     for entry in &lock.entries {
         buckets
             .entry(LockShardId::for_path(&entry.path, shard_levels))
             .or_default()
-            .push(entry.clone());
+            .push(entry);
+    }
+    if !lock.entries.is_sorted_by(|a, b| a.path <= b.path) {
+        for bucket in buckets.values_mut() {
+            bucket.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+        }
     }
     let kept: std::collections::HashSet<_> = buckets
         .keys()
@@ -1877,26 +2199,39 @@ fn save_sharded_with_publication(
 
     let published = buckets
         .into_par_iter()
-        .map(|(shard_id, mut entries)| -> Result<FullShardEvidence> {
-            entries.sort_by(|a, b| a.path.cmp(&b.path));
-            let rel = relative_shard_path(&shard_id)
-                .expect("sharded bucket keys are never the flat sentinel");
-            let file_path = path.join(&rel);
-            let rendered = render_entries(&entries);
-            let identity = super::identity::hash_shard_bytes(rendered.as_bytes());
-            if let Some(parent) = file_path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|source| LockError::io("creating", parent, source))?;
-            }
-            let policy = if incremental {
-                ShardPublishPolicy::SkipIfUnchanged { prior: None }
-            } else {
-                ShardPublishPolicy::AlwaysWrite
-            };
-            let evidence =
-                publish_rendered_shard(&file_path, shard_id, &rendered, identity, policy)?;
-            Ok(FullShardEvidence { evidence, entries })
-        })
+        .map_init(
+            String::new,
+            |rendered, (shard_id, entries)| -> Result<FullShardEvidence> {
+                let rel = relative_shard_path(&shard_id)
+                    .expect("sharded bucket keys are never the flat sentinel");
+                let file_path = path.join(&rel);
+                if let Some(parent) = file_path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|source| LockError::io("creating", parent, source))?;
+                }
+                if !incremental && large_shard(&entries) {
+                    let evidence = stream_ordered_shard(&file_path, &entries, Some(shard_id))?
+                        .expect("evidence requested");
+                    return Ok(FullShardEvidence {
+                        evidence,
+                        entries: EvidenceRows::Owned(entries.into_iter().cloned().collect()),
+                    });
+                }
+                render_ordered_entries(entries.iter().copied(), rendered);
+                let identity = super::identity::hash_shard_bytes(rendered.as_bytes());
+                let policy = if incremental {
+                    ShardPublishPolicy::SkipIfUnchanged { prior: None }
+                } else {
+                    ShardPublishPolicy::AlwaysWrite
+                };
+                let evidence =
+                    publish_rendered_shard(&file_path, shard_id, rendered, identity, policy)?;
+                Ok(FullShardEvidence {
+                    evidence,
+                    entries: EvidenceRows::Owned(entries.into_iter().cloned().collect()),
+                })
+            },
+        )
         .collect::<Result<Vec<_>>>()?;
     shard::remove_stale(path, &kept)?;
     Ok(published)
@@ -1961,7 +2296,10 @@ fn save_file_atomic_with_publication(lock: &Lock, path: &Path) -> Result<FullSha
         identity,
         ShardPublishPolicy::AlwaysWrite,
     )?;
-    Ok(FullShardEvidence { evidence, entries })
+    Ok(FullShardEvidence {
+        evidence,
+        entries: EvidenceRows::Owned(entries),
+    })
 }
 
 /// Compute the shard file identifier the desired-state mirror stores for one
@@ -2050,27 +2388,30 @@ pub fn save_sparse_shards(
     }
     let published: Vec<Result<ShardEvidence>> = non_empty
         .par_iter()
-        .map(|(shard_id, rel)| -> Result<ShardEvidence> {
-            let file_path = base.join(rel);
-            let entries = rows_by_shard
-                .get(shard_id)
-                .expect("non-empty shard ids always have rows");
-            let rendered = render_entries(entries);
-            let identity = super::identity::hash_shard_bytes(rendered.as_bytes());
-            if let Some(parent) = file_path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|source| LockError::io("creating", parent, source))?;
-            }
-            publish_rendered_shard(
-                &file_path,
-                *shard_id,
-                &rendered,
-                identity,
-                ShardPublishPolicy::SkipIfUnchanged {
-                    prior: priors.get(shard_id).copied(),
-                },
-            )
-        })
+        .map_init(
+            String::new,
+            |rendered, (shard_id, rel)| -> Result<ShardEvidence> {
+                let file_path = base.join(rel);
+                let entries = rows_by_shard
+                    .get(shard_id)
+                    .expect("non-empty shard ids always have rows");
+                render_entries_into(entries, rendered);
+                let identity = super::identity::hash_shard_bytes(rendered.as_bytes());
+                if let Some(parent) = file_path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|source| LockError::io("creating", parent, source))?;
+                }
+                publish_rendered_shard(
+                    &file_path,
+                    *shard_id,
+                    rendered,
+                    identity,
+                    ShardPublishPolicy::SkipIfUnchanged {
+                        prior: priors.get(shard_id).copied(),
+                    },
+                )
+            },
+        )
         .collect();
     Ok((published.into_iter().collect::<Result<_>>()?, removed))
 }
@@ -3955,6 +4296,148 @@ mod tests {
     }
 
     #[test]
+    fn resident_and_spooled_visits_consume_the_certified_generation_once() {
+        for budget in [0, u64::MAX] {
+            let tmp = tempfile::tempdir().unwrap();
+            let entries = (0..500)
+                .map(|i| entry(&format!("data/{i:04}é\t.bin"), &"ab".repeat(32)))
+                .collect();
+            let lock = Lock { entries };
+            save(&lock, tmp.path(), LockShardLevels::new(1).unwrap()).unwrap();
+            let files = list_shard_files(tmp.path()).unwrap();
+            assert!(files.len() > 1);
+            let before_stream = super::super::test_support::shard_text_reads();
+            let before_resident = super::super::test_support::full_shard_text_reads();
+            let mut rows = Vec::new();
+            visit_lock_rows_with_budget(
+                tmp.path(),
+                None,
+                |_| true,
+                |row| {
+                    if rows.is_empty() {
+                        // Publication/removal after certification cannot alter emission.
+                        for file in &files {
+                            std::fs::remove_file(&file.full_path).unwrap();
+                        }
+                    }
+                    rows.push(row.clone());
+                    Ok(())
+                },
+                budget,
+            )
+            .unwrap();
+            assert_eq!(rows, lock.entries);
+            if budget == 0 {
+                assert_eq!(
+                    super::super::test_support::shard_text_reads() - before_stream,
+                    files.len()
+                );
+            } else {
+                assert_eq!(
+                    super::super::test_support::full_shard_text_reads() - before_resident,
+                    files.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn resident_merge_prefix_validation_agrees_with_pairwise_reference() {
+        let paths = [
+            "foo",
+            "foo.bar",
+            "foo/bar",
+            "foo/bar/baz",
+            "foo0",
+            "a",
+            "a/b",
+            "a.b",
+            "é",
+            "é/x",
+        ];
+        for a in paths {
+            for b in paths {
+                for c in paths {
+                    let selected = [a, b, c];
+                    let invalid = selected.iter().enumerate().any(|(i, x)| {
+                        selected[i + 1..].iter().any(|y| {
+                            x == y
+                                || x.strip_prefix(y).is_some_and(|s| s.starts_with('/'))
+                                || y.strip_prefix(x).is_some_and(|s| s.starts_with('/'))
+                        })
+                    });
+                    let mut shards = selected
+                        .into_iter()
+                        .map(|path| ResidentShard {
+                            view: gat_core::lock::validated::ValidatedLockFile::from_owned(
+                                format!("{}\n{}\t{path}\n", super::super::VERSION, "ab".repeat(32)),
+                            )
+                            .unwrap(),
+                            evidence: None,
+                            placement_error: None,
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        certify_resident_shards(&mut shards).is_err(),
+                        invalid,
+                        "{selected:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn large_shard_streaming_preserves_bytes_and_evidence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = format!("data/{}é\r\n", "x".repeat(1024 * 1024));
+        let lock = Lock {
+            entries: vec![entry(&path, &"ab".repeat(32))],
+        };
+        let levels = LockShardLevels::new(1).unwrap();
+        save(&lock, tmp.path(), levels).unwrap();
+        let files = list_shard_files(tmp.path()).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&files[0].full_path).unwrap(),
+            lock.to_string()
+        );
+        let result = save_with_publication(&lock, tmp.path(), levels).unwrap();
+        let mut shards = result.into_shards();
+        let shard = shards.pop().unwrap();
+        let bytes = std::fs::read(&files[0].full_path).unwrap();
+        assert_eq!(shard.identity(), super::super::hash_shard_bytes(&bytes));
+        assert_eq!(shard.into_entries(), lock.entries);
+    }
+
+    #[test]
+    fn coherent_shard_disappearance_preserves_the_shape_retry_boundary() {
+        use crate::file_state::FileStateError;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("missing.tsv");
+        assert!(
+            preserve_missing_shard_error(
+                FileStateError::NotRegularFile { path: path.clone() }.into()
+            )
+            .is_not_found_race()
+        );
+        std::fs::write(&path, b"changed").unwrap();
+        assert!(matches!(
+            preserve_missing_shard_error(FileStateError::Observed { path }.into()),
+            LockError::FileState(FileStateError::Observed { .. })
+        ));
+        assert!(
+            !preserve_missing_shard_error(
+                FileStateError::NotRegularFile {
+                    path: tmp.path().to_path_buf()
+                }
+                .into()
+            )
+            .is_not_found_race()
+        );
+    }
+
+    #[test]
     fn load_returns_empty_lock_when_file_missing() {
         let tmp = tempfile::tempdir().unwrap();
         assert_eq!(load(tmp.path()).unwrap(), Lock::default());
@@ -4306,7 +4789,7 @@ mod tests {
     }
 
     #[test]
-    fn visit_lock_rows_validated_never_reads_a_whole_shard_text_on_the_ordered_fast_path() {
+    fn bounded_shard_visit_does_not_retain_whole_sources() {
         // The ordered k-way merge must stream each shard one row at a
         // time, with bounded live buffering per shard
         // path, which is the only one that reads a shard's complete text
@@ -4325,7 +4808,7 @@ mod tests {
 
         let before = crate::lock::test_support::full_shard_text_reads();
         let mut kept = 0;
-        visit_lock_rows_validated(
+        visit_lock_rows_with_budget(
             tmp.path(),
             None,
             |_| true,
@@ -4333,6 +4816,7 @@ mod tests {
                 kept += 1;
                 Ok(())
             },
+            0,
         )
         .unwrap();
         assert_eq!(
