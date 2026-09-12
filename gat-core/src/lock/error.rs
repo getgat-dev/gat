@@ -53,8 +53,7 @@ pub enum LockDomainError {
     #[error("unrecognised lock-file version: expected {expected:?}, got {got:?}")]
     UnsupportedVersion { expected: String, got: String },
 
-    /// A row failed structural TSV parsing (wrong field count, missing
-    /// tab, an otherwise-malformed line).
+    /// A row has an invalid digest/path separator, missing LF, or unordered path.
     #[error("line {line}: {reason}")]
     MalformedRow {
         line: usize,
@@ -75,7 +74,7 @@ pub enum LockDomainError {
     #[error("line {line}: path {path:?} is not written in its canonical form")]
     NonCanonicalPath { line: usize, path: String },
 
-    /// A row's OID field is malformed (missing prefix, wrong length, not
+    /// A row's OID field is malformed (wrong length, not
     /// hex, ...).
     #[error("line {line}: {reason}")]
     InvalidOid {
@@ -112,24 +111,22 @@ pub enum LockDomainError {
     },
 }
 
-/// Why [`LockDomainError::MalformedRow`] was raised: a structural
-/// TSV-parsing fact about a row, never a preformatted parser message.
+/// Why [`LockDomainError::MalformedRow`] was raised: a framing or ordering
+/// violation, never a preformatted parser message.
 #[derive(Debug, thiserror::Error)]
 pub enum MalformedRowReason {
-    #[error("missing path field")]
-    MissingPath,
-    #[error("path {path:?}: missing oid field")]
-    MissingOid { path: String },
-    #[error("path {path:?}: too many fields")]
-    TooManyFields { path: String },
+    #[error("expected a TAB after exactly 64 hexadecimal bytes")]
+    InvalidSeparator,
+    #[error("record must end with a newline (LF or CRLF)")]
+    MissingLineFeed,
+    #[error("path {path:?} is not in strictly increasing order")]
+    UnorderedPath { path: String },
 }
 
 /// Why [`LockDomainError::InvalidOid`] was raised: a structural fact about
 /// the row's oid field, never a preformatted parser message.
 #[derive(Debug, thiserror::Error)]
 pub enum InvalidOidReason {
-    #[error("oid must start with \"blake3:\"")]
-    MissingPrefix,
     #[error("oid is not a valid 64-character lower-case hex blake3 hash")]
     NotHexBlake3,
 }

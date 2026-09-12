@@ -76,8 +76,8 @@ fn prefix_removal_keeps_sibling_prefixes_distinct() {
 }
 
 #[test]
-fn quoted_paths_roundtrip_and_sort_by_decoded_bytes() {
-    use gat_core::lock::validated::{FilteredRowCursor, is_path_ordered};
+fn escaped_paths_roundtrip_in_decoded_order() {
+    use gat_core::lock::validated::FilteredRowCursor;
     let paths = [
         "a\tfile", "a\nfile", "a\rfile", "a\"file", "a/file", "aZfile", "é file",
     ];
@@ -85,18 +85,16 @@ fn quoted_paths_roundtrip_and_sort_by_decoded_bytes() {
         entries: paths.iter().map(|p| entry(p, 'a')).collect(),
     };
     let text = lock.to_string();
-    assert_eq!(text.lines().count(), paths.len() + 1);
-    assert!(text.contains(r#""a\tfile""#));
-    assert!(text.contains(r#""a\nfile""#));
-    assert!(text.contains(r#""a\rfile""#));
-    assert!(text.contains(r#""a\"file""#));
-    assert!(is_path_ordered(&text));
+    assert!(text.contains(r"a\x09file"));
+    assert!(text.contains(r"a\x0afile"));
+    assert!(text.contains(r"a\x0dfile"));
+    assert!(text.contains("a\"file"));
     assert_eq!(Lock::parse(&text).unwrap(), lock);
     let mut cursor = FilteredRowCursor::new(&text, |_| true).unwrap();
     for expected in &lock.entries {
-        assert_eq!(cursor.next().unwrap().as_ref(), Some(expected));
+        assert_eq!(cursor.next().as_ref(), Some(expected));
     }
-    assert!(cursor.next().unwrap().is_none());
+    assert!(cursor.next().is_none());
     let reversed = format!(
         "{}\n{}\n",
         gat_core::lock::VERSION,
@@ -108,49 +106,89 @@ fn quoted_paths_roundtrip_and_sort_by_decoded_bytes() {
             .collect::<Vec<_>>()
             .join("\n")
     );
-    assert!(!is_path_ordered(&reversed));
-    assert_eq!(Lock::parse(&reversed).unwrap().entries.len(), paths.len());
+    assert!(Lock::parse(&reversed).is_err());
+    assert!(FilteredRowCursor::new(&reversed, |_| true).is_err());
 }
 
 #[test]
-fn quoted_path_syntax_is_strict() {
-    for field in [
-        "plain",
-        r#""unterminated"#,
-        r#""a"b""#,
-        r#""a\x09b""#,
-        r#""a\u0009b""#,
-        r#""a\/b""#,
-        r#""a\\b""#,
-        r#""a\"#,
-        "\"a\tb\"",
-        "\"a\nb\"",
-        "\"a\rb\"",
-        "\"\"",
+fn malformed_file_never_invokes_callbacks() {
+    use gat_core::lock::validated::visit_rows_validated;
+    let oid = oid('a');
+    for suffix in [
+        format!("{oid}\ta\n"),
+        format!("{oid}\ta.b\n{oid}\ta/b\n"),
+        format!("{oid}\tz\\x2f\n"),
+        format!("{oid}\t0\n"),
     ] {
-        let text = format!(
-            "{}\n{field}\tblake3:{}\n",
-            gat_core::lock::VERSION,
-            oid('a')
+        let text = format!("{}\n{oid}\ta\n{suffix}", gat_core::lock::VERSION);
+        assert!(
+            visit_rows_validated(
+                &text,
+                |_, _| panic!("selection before certification"),
+                |_| panic!("emission before certification")
+            )
+            .is_err()
         );
-        assert!(Lock::parse(&text).is_err(), "accepted {field:?}");
     }
 }
 
 #[test]
-fn escaped_paths_keep_duplicate_and_directory_conflict_validation() {
-    for fields in [[r#""a\tb""#, r#""a\tb""#], [r#""a\nb""#, r#""a\nb/child""#]] {
-        let text = format!(
-            "{}\n{}\tblake3:{}\n{}\tblake3:{}\n",
+fn writer_sorts_paths_and_uses_only_the_new_v1_grammar() {
+    let lock = Lock {
+        entries: vec![entry("z", 'b'), entry("a\t\"x", 'a')],
+    };
+    assert_eq!(
+        lock.to_string(),
+        format!(
+            "{}\n{}\ta\\x09\"x\n{}\tz\n",
             gat_core::lock::VERSION,
-            fields[0],
             oid('a'),
-            fields[1],
             oid('b')
+        )
+    );
+}
+
+#[test]
+fn certified_lookup_uses_decoded_paths_and_handles_missing_keys() {
+    use gat_core::lock::validated::ValidatedLockFile;
+    let lock = Lock {
+        entries: [
+            "a\tfile",
+            "a\"file",
+            "a/file",
+            "z.bin",
+            "é.bin",
+            "ê.bin",
+            "日本語",
+        ]
+        .iter()
+        .map(|p| entry(p, 'a'))
+        .collect(),
+    };
+    let text = lock.to_string();
+    let view = ValidatedLockFile::parse(&text).unwrap();
+    for expected in &lock.entries {
+        assert_eq!(
+            view.find(expected.path.as_str()),
+            Some((expected.path.as_str(), expected.oid))
         );
-        assert!(Lock::parse(&text).is_err());
-        let mut cursor =
-            gat_core::lock::validated::FilteredRowCursor::new(&text, |_| false).unwrap();
-        assert!(cursor.next().is_err());
     }
+    for missing in [
+        "",
+        "a",
+        r"a\x09file",
+        "b.bin",
+        "z.bin/child",
+        "ë.bin",
+        "日本語2",
+    ] {
+        assert!(view.find(missing).is_none(), "{missing:?}");
+    }
+    let empty = format!("{}\n", gat_core::lock::VERSION);
+    assert!(
+        ValidatedLockFile::parse(&empty)
+            .unwrap()
+            .find("a")
+            .is_none()
+    );
 }

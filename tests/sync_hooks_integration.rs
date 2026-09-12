@@ -14,9 +14,8 @@ use common::{assert_ok, gat, gat_with_env, git, git_with_env};
 /// A repo with gat initialized (hooks installed) and one committed,
 /// gat-tracked file on `main`.
 fn setup() -> tempfile::TempDir {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_support_git::empty_git_repo();
     let dir = tmp.path();
-    assert_ok(&git(dir, &["init", "-q", "-b", "main"]), "git init");
     assert_ok(&gat(dir, &["init"]), "gat init");
     std::fs::write(dir.join("big.bin"), b"main content").unwrap();
     assert_ok(&gat(dir, &["add", "big.bin"]), "gat add");
@@ -286,9 +285,8 @@ fn sync_dry_run_never_writes_info_exclude() {
 /// itself already opens (and so creates) the database.
 #[test]
 fn sync_dry_run_never_creates_the_materialized_state_database() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_support_git::empty_git_repo();
     let dir = tmp.path();
-    assert_ok(&git(dir, &["init", "-q", "-b", "main"]), "git init");
     assert_ok(&gat(dir, &["init"]), "gat init");
     std::fs::write(dir.join("README"), "hi").unwrap();
     assert_ok(&git(dir, &["add", "-A"]), "git add");
@@ -366,9 +364,8 @@ fn linked_worktree_shares_hooks_but_has_its_own_materialized_state() {
         Some(shared_cache.path().to_str().unwrap()),
     )];
 
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_support_git::empty_git_repo();
     let dir = tmp.path();
-    assert_ok(&git(dir, &["init", "-q", "-b", "main"]), "git init");
     assert_ok(&gat(dir, &["init"]), "gat init");
     std::fs::write(dir.join("big.bin"), b"main content").unwrap();
     assert_ok(
@@ -414,9 +411,8 @@ fn linked_worktree_shares_hooks_but_has_its_own_materialized_state() {
 
 #[test]
 fn hooks_install_is_cooperative_with_a_pre_existing_hook() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = test_support_git::empty_git_repo();
     let dir = tmp.path();
-    assert_ok(&git(dir, &["init", "-q", "-b", "main"]), "git init");
     let hooks_dir = dir.join(".git/hooks");
     std::fs::create_dir_all(&hooks_dir).unwrap();
     std::fs::write(

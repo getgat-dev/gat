@@ -7,17 +7,20 @@
 //! narrow [`validated`] facade.
 
 mod codec;
+/// Canonical byte serialization for resident and streaming destinations.
+pub mod encoding;
 mod error;
 mod identity;
 mod merge;
+mod reader;
 mod shard;
 
-pub use codec::{Entry, Lock, QuotedPath, VERSION, path_matches_scope};
+pub use codec::{Entry, EscapedPath, Lock, VERSION, path_matches_scope};
 pub use error::{InvalidOidReason, LockDomainError, LockError, MalformedRowReason, Result};
 pub use identity::{
     CanonicalDesiredIdentity, LOCK_VERSION, ShardContentIdentity, ShardContentIdentityDecodeError,
 };
-pub use merge::{Conflict, merge_three_way};
+pub use merge::{Conflict, MergeConflict, merge_three_way};
 pub use shard::{LockShardId, LockShardIdError, LockShardLevels, LockShardLevelsError};
 
 /// Validated, allocation-conscious row access for storage implementations.
@@ -29,15 +32,15 @@ pub use shard::{LockShardId, LockShardIdError, LockShardLevels, LockShardLevelsE
 /// Codec helpers are intentionally not flattened into [`crate::lock`]:
 ///
 /// ```compile_fail
-/// use gat_core::lock::parse_row;
+/// use gat_core::lock::FilteredRowCursor;
 /// ```
 pub mod validated {
     pub use super::codec::{
-        FilteredRowCursor, check_ordered_row_conflict, entry_from_validated_parts,
-        exceeds_directory_upper_bound, is_directory_prefix, is_path_ordered, parse_row,
-        validate_no_path_directory_conflicts, visit_filtered_matching, visit_filtered_unordered,
+        FilteredRowCursor, entry_from_validated_parts, exceeds_directory_upper_bound,
+        is_directory_prefix, validate_no_path_directory_conflicts, visit_filtered_matching,
         visit_rows_validated,
     };
+    pub use super::reader::ValidatedLockFile;
 
     /// Compute the shard identity for row text whose canonical path form was
     /// already proven by this facade's parser/visitor contract.
@@ -52,4 +55,4 @@ pub mod validated {
 
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
-pub use codec::test_probes;
+pub use reader::test_probes;

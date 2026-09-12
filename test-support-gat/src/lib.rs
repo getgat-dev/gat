@@ -183,8 +183,7 @@ impl TestRepo {
     /// Panics if the temporary directory cannot be created or Git initialization fails.
     #[must_use]
     pub fn empty_git_repo() -> Self {
-        let dir = tempfile::tempdir().expect("creating TestRepo tempdir");
-        run_git(dir.path(), &["init", "-q", "-b", "main"]);
+        let dir = test_support_git::empty_git_repo();
         Self {
             dir,
             cache_dir: None,
@@ -285,14 +284,13 @@ impl TestRepo {
     /// Stages every file currently in the working tree (`git add -A`),
     /// without committing.
     pub fn stage_all(&self) {
-        self.git(&["add", "-A"]);
+        test_support_git::stage_all(self.path());
     }
 
     /// Stages and commits every file currently in the working tree (`git
     /// add -A; git commit -q -m msg`).
     pub fn commit_all(&self, message: &str) {
-        self.stage_all();
-        self.git(&["commit", "-q", "-m", message]);
+        test_support_git::commit_all(self.path(), message);
     }
 
     /// Creates (but does not check out) a branch named `name` at `HEAD`.

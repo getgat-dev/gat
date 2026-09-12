@@ -191,20 +191,11 @@ fn explicit_repository_failures_are_deduplicated_and_dry_runs_are_uncertain() {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let output = test_support_git::command(dir, args)
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git {args:?} failed:\nstdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    test_support_git::run_git(dir, args);
 }
 
 fn test_repo() -> tempfile::TempDir {
-    let temp = tempfile::tempdir().expect("tempdir");
-    git(temp.path(), &["init", "-q", "-b", "main"]);
+    let temp = test_support_git::empty_git_repo();
     git(temp.path(), &["config", "core.autocrlf", "false"]);
     std::fs::write(temp.path().join(".git/info/exclude"), ".gat/\n").unwrap();
     commit_all(temp.path(), "initial");
@@ -219,12 +210,10 @@ fn commit_all(dir: &Path, message: &str) {
 fn commit_all_at(dir: &Path, message: &str, seconds: i64) {
     git(dir, &["add", "-A"]);
     let date = format!("@{seconds} +0000");
-    let output = test_support_git::command(dir, &["commit", "-q", "--allow-empty", "-m", message])
+    test_support_git::GitCommand::new(dir, &["commit", "-q", "--allow-empty", "-m", message])
         .env("GIT_AUTHOR_DATE", &date)
         .env("GIT_COMMITTER_DATE", &date)
-        .output()
-        .expect("commit with timestamp");
-    assert!(output.status.success());
+        .run();
 }
 
 fn track(repo: &Repository, root: &Path, path: &str, bytes: &[u8]) -> Oid {
@@ -443,15 +432,11 @@ fn all_refs_keeps_custom_commit_refs_and_ignores_blob_refs() {
         .unwrap()
         .write_all(b"not a commit")
         .unwrap();
-    let blob = String::from_utf8(child.wait_with_output().unwrap().stdout)
-        .unwrap()
-        .trim()
-        .to_string();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "git hash-object failed");
+    let blob = String::from_utf8(output.stdout).unwrap().trim().to_string();
     git(temp.path(), &["update-ref", "refs/custom/blob", &blob]);
-    let lock_text = test_support_git::command(temp.path(), &["show", "refs/custom/kept:gat.lock"])
-        .output()
-        .unwrap();
-    assert!(lock_text.status.success());
+    let lock_text = test_support_git::run_git(temp.path(), &["show", "refs/custom/kept:gat.lock"]);
     assert!(
         String::from_utf8(lock_text.stdout)
             .unwrap()
@@ -568,7 +553,7 @@ fn shallow_clone_with_crlf_lock_fails_closed() {
     let clone_parent = tempfile::tempdir().unwrap();
     let clone = clone_parent.path().join("clone");
     let source_url = gat_io::remote_file_url_for_test(source.path());
-    let output = test_support_git::command(
+    test_support_git::run_git(
         source.path(),
         &[
             "clone",
@@ -579,10 +564,7 @@ fn shallow_clone_with_crlf_lock_fails_closed() {
             &source_url,
             clone.to_str().unwrap(),
         ],
-    )
-    .output()
-    .unwrap();
-    assert!(output.status.success());
+    );
     git(&clone, &["config", "core.autocrlf", "true"]);
     git(&clone, &["checkout", "-q"]);
     let lock_text = std::fs::read_to_string(clone.join("gat.lock")).unwrap();

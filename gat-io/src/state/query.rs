@@ -1524,7 +1524,7 @@ mod tests {
     use gat_core::path_scope::{PathScope, normalize_path_scope};
     use gat_core::selection::Selection;
 
-    fn git_repo() -> tempfile::TempDir {
+    fn state_directory() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
     }
 
@@ -1540,7 +1540,7 @@ mod tests {
     }
 
     fn store_with(paths: &[&str]) -> (tempfile::TempDir, StateStore) {
-        let tmp = git_repo();
+        let tmp = state_directory();
         let repo = Repo::at(tmp.path().to_path_buf());
         let mut store = StateStore::open(&repo).unwrap();
         let entries: Vec<Entry> = paths
@@ -2216,7 +2216,7 @@ mod tests {
         paths: &[&str],
         shard_levels: crate::lock::LockShardLevels,
     ) -> (tempfile::TempDir, StateStore) {
-        let tmp = git_repo();
+        let tmp = state_directory();
         let repo = Repo::at(tmp.path().to_path_buf());
         let mut store = StateStore::open(&repo).unwrap();
         let entries: Vec<Entry> = paths

@@ -282,9 +282,8 @@ pub fn isolated_child_env(cmd: &mut Command) {
     for key in gat_core::settings::SettingKey::CANONICAL {
         cmd.env_remove(key.environment_name());
     }
+    test_support_git::isolated_git_env(cmd);
     cmd.env(HOME_ENV_VAR, fake_home())
-        .env("GIT_CONFIG_GLOBAL", test_support_git::isolated_gitconfig())
-        .env("GIT_CONFIG_SYSTEM", test_support_git::isolated_gitconfig())
         .env("PATH", path_with_gat())
         .env_remove("GAT_CACHE_LOCATION");
 }

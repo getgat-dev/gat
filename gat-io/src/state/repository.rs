@@ -1152,8 +1152,8 @@ mod tests {
 
     #[test]
     fn ignored_directory_summaries_do_not_query_each_desired_subtree() {
-        let (temp, layout) = layout();
-        test_support_git::run_git(temp.path(), &["init", "-q"]);
+        let temp = test_support_git::empty_git_repo();
+        let layout = RepositoryLayout::at(temp.path().to_path_buf());
         std::fs::write(temp.path().join(".gitignore"), "data/d*/\n").unwrap();
         let entries = (0..10)
             .map(|index| {

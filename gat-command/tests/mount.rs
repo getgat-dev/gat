@@ -28,15 +28,16 @@ fn mount_config(target: &str) -> MountConfig {
 }
 
 fn git_repo() -> tempfile::TempDir {
-    let dir = tempfile::tempdir().unwrap();
-    run_git(dir.path(), &["init", "-q", "-b", "main"]);
+    let dir = test_support_git::empty_git_repo();
     std::fs::write(dir.path().join("README"), "fixture").unwrap();
     commit_all(dir.path(), "initial");
     dir
 }
 
 fn source_repo(entries: &[(&str, char)]) -> tempfile::TempDir {
-    let dir = git_repo();
+    // Consumers need a committed source snapshot, not intermediate history.
+    let dir = test_support_git::empty_git_repo();
+    std::fs::write(dir.path().join("README"), "fixture").unwrap();
     let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
         .unwrap()
         .repository_at(dir.path().to_path_buf());
@@ -662,24 +663,29 @@ fn automatic_setup_imports_reuses_and_can_be_skipped() {
         assert_eq!(after_skip.remotes, config.remotes);
         assert_eq!(after_skip.routes, config.routes);
 
-        // An opt-out is invocation-only: a later update can set storage up.
-        mount(
-            &repo,
-            MountRequest::Update {
-                name: "vendor".into(),
-                location: None,
-                target: None,
-                path: None,
-                revision: None,
-                remote: None,
-                no_setup: false,
-                include: None,
-                exclude: None,
-                scope: ConfigScope::Project,
-            },
-            &NoopProgress,
-        )
-        .unwrap();
+        // Only the initially opted-out case needs setup enabled afterward.
+        // The other cases already verified setup during Add and preservation
+        // during the skipped Update above.
+        if no_setup {
+            // An opt-out is invocation-only: a later update can set storage up.
+            mount(
+                &repo,
+                MountRequest::Update {
+                    name: "vendor".into(),
+                    location: None,
+                    target: None,
+                    path: None,
+                    revision: None,
+                    remote: None,
+                    no_setup: false,
+                    include: None,
+                    exclude: None,
+                    scope: ConfigScope::Project,
+                },
+                &NoopProgress,
+            )
+            .unwrap();
+        }
         let config = repo.load_config().unwrap();
         assert_eq!(config.remotes.by_name.len(), expected_count);
         assert_eq!(

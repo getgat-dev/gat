@@ -3,7 +3,10 @@ name = "test-support-git"
 edition = "2024"
 rust-version = "1.91"
 publish = false
-description = "Dependency-free hermetic Git subprocess fixtures for gat workspace tests."
+description = "Isolated Git subprocess fixtures for gat workspace tests."
+
+[dependencies]
+tempfile = "3"
 
 [lib]
 name = "test_support_git"

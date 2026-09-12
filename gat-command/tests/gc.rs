@@ -13,8 +13,7 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 fn repository() -> (tempfile::TempDir, Repository) {
-    let temp = tempfile::tempdir().unwrap();
-    git(temp.path(), &["init", "-q", "-b", "main"]);
+    let temp = test_support_git::empty_git_repo();
     git(
         temp.path(),
         &["commit", "-q", "--allow-empty", "-m", "initial"],

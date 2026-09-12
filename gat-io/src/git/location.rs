@@ -447,14 +447,7 @@ mod tests {
         test_support_git::run_git(root, args);
     }
 
-    fn file_url(path: &Path) -> String {
-        let path = path.display().to_string().replace('\\', "/");
-        if let Some(stripped) = path.strip_prefix('/') {
-            format!("file:///{stripped}")
-        } else {
-            format!("file:///{path}")
-        }
-    }
+    use test_support_git::file_remote_url as file_url;
 
     #[test]
     fn classifies_local_paths_and_clone_locations() {
@@ -528,8 +521,7 @@ mod tests {
 
     #[test]
     fn prepared_local_worktree_exposes_semantic_revision_and_config() {
-        let source = tempfile::tempdir().unwrap();
-        git(source.path(), &["init", "-q"]);
+        let source = test_support_git::empty_git_repo();
         std::fs::write(source.path().join("tracked"), b"content").unwrap();
         std::fs::write(
             source.path().join("gat.yaml"),
@@ -553,8 +545,7 @@ mod tests {
 
     #[test]
     fn temporary_clone_lives_exactly_as_long_as_prepared_worktree() {
-        let source = tempfile::tempdir().unwrap();
-        git(source.path(), &["init", "-q"]);
+        let source = test_support_git::empty_git_repo();
         std::fs::write(source.path().join("tracked"), b"content").unwrap();
         git(source.path(), &["add", "-A"]);
         git(source.path(), &["commit", "-q", "-m", "initial"]);
@@ -571,8 +562,7 @@ mod tests {
 
     #[test]
     fn temporary_bare_clone_is_opened_once_and_removed_on_drop() {
-        let source = tempfile::tempdir().unwrap();
-        git(source.path(), &["init", "-q"]);
+        let source = test_support_git::empty_git_repo();
         std::fs::write(source.path().join("tracked"), b"content").unwrap();
         git(source.path(), &["add", "-A"]);
         git(source.path(), &["commit", "-q", "-m", "initial"]);

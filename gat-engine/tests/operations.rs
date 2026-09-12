@@ -10,8 +10,7 @@ use gat_engine::{
 };
 
 fn repository() -> (tempfile::TempDir, Repository) {
-    let temp = tempfile::tempdir().expect("create temporary repository");
-    test_support_git::run_git(temp.path(), &["init", "-q", "-b", "main"]);
+    let temp = test_support_git::empty_git_repo();
     std::fs::write(temp.path().join("README"), "fixture\n").expect("write initial file");
     test_support_git::commit_all(temp.path(), "initial");
     let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])

@@ -70,13 +70,24 @@ git switch main
 git merge improve-model
 ```
 
-When both branches changed `gat.lock`, Gat's semantic merge driver compares the lock **by tracked path**, not by text line.
+When Git invokes the installed semantic driver for a changed lock file or shard,
+Gat merges by decoded path and emits strictly path-ordered rows. Fast-forwards
+and one-sided file changes can bypass the driver.
+
+Git's default text merge does not validate lock ordering. Do not use `merge=union`:
+it can concatenate conflicting additions out of order.
 
 ### What merges automatically?
 
 Independent path changes, identical additions, and one-sided changes merge
 automatically. Different edits to the same path, or an edit versus deletion,
 require a decision. Gat does not merge binary contents.
+
+The combined lock must also satisfy file/directory-prefix constraints: for example,
+it cannot track both `data` and `data/model.bin`. The driver rejects these conflicts
+within each merged file before writing output. It does not certify conflicts across
+shards or files Git resolves without invoking the driver; subsequent Gat reads
+validate the complete lock.
 
 <Accordion title="Three-way merge rules">
   Gat compares each path's content ID, treating absence as deletion:
@@ -139,7 +150,10 @@ Use `git status` as the source of truth for whether `gat.lock` is unresolved. A 
   <Step title="Produce the final semantic lock">
     Edit the lock to retain independent changes from both sides and resolve
     the conflicting paths. Keep the two-field [lock format](/spec/lock-v1):
-    quoted path, a tab, and content ID. Remove an entry to choose deletion.
+    64 lowercase hexadecimal digest characters, a tab, and an unquoted escaped path.
+    Encode path controls as lowercase `\xhh`; quotes and spaces are literal.
+    Keep rows strictly sorted by decoded path bytes, and terminate the header and
+    every row with LF (CRLF is also accepted). Remove an entry to choose deletion.
 
     <Warning>
     Do not delete `gat.lock` and try to recreate it from whichever files happen to be in your working tree. `gat.lock` is the authoritative versioned map; the working tree may represent only one side of the merge.

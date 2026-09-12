@@ -1812,26 +1812,6 @@ mod tests {
                         entry("tree/deep/c", 3, 0),
                     ],
                 ),
-                (
-                    "tree",
-                    "tree",
-                    vec![
-                        entry("outside", 4, 0),
-                        entry("tree/a", 1, 0),
-                        entry("tree/sub/b", 2, 0),
-                        entry("tree/sub/deep/c", 3, 0),
-                    ],
-                ),
-                (
-                    "missing",
-                    "tree",
-                    vec![
-                        entry("outside", 4, 0),
-                        entry("tree/a", 1, 0),
-                        entry("tree/sub/b", 2, 0),
-                        entry("tree/sub/deep/c", 3, 0),
-                    ],
-                ),
             ] {
                 let tmp = git_repo();
                 let repo = Repo::at(tmp.path().to_path_buf());
@@ -1849,6 +1829,27 @@ mod tests {
                     levels,
                 );
                 let shape = crate::lock::LockStore::acquire_matching_shape(&repo, levels).unwrap();
+                // Both no-ops preserve this seeded fixture; reuse it before
+                // the descending move instead of publishing two extra trees.
+                if src == "tree" {
+                    let original = store.load_desired_as_lock().unwrap().entries;
+                    for source in ["tree", "missing"] {
+                        store
+                            .publish_desired_move::<DesiredPublishTestError>(
+                                &repo,
+                                &shape,
+                                &gp(source),
+                                &gp("tree"),
+                            )
+                            .unwrap();
+                        let mut published = crate::lock::LockStore::load_all(repo.root_path())
+                            .unwrap()
+                            .entries;
+                        published.sort_by(|a, b| a.path.cmp(&b.path));
+                        assert_eq!(published, original, "depth={depth}, {source} -> tree");
+                        assert_eq!(store.load_desired_as_lock().unwrap().entries, original);
+                    }
+                }
                 store
                     .publish_desired_move::<DesiredPublishTestError>(
                         &repo,

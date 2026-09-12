@@ -331,8 +331,7 @@ mod tests {
 
     #[test]
     fn common_dir_reports_the_git_directory_without_exposing_a_repository() {
-        let tmp = tempfile::tempdir().unwrap();
-        gix::init(tmp.path()).unwrap();
+        let tmp = test_support_git::empty_git_repo();
 
         assert_eq!(common_dir_at(tmp.path()).unwrap(), tmp.path().join(".git"));
     }
@@ -348,8 +347,7 @@ mod tests {
 
     #[test]
     fn resolve_commit_classifies_an_unborn_head_without_exposing_gix_types() {
-        let tmp = tempfile::tempdir().unwrap();
-        gix::init(tmp.path()).unwrap();
+        let tmp = test_support_git::empty_git_repo();
         let layout = RepositoryLayout::at(tmp.path().to_path_buf());
 
         let err = resolve_commit(&layout, &GitRevisionSpec::from("HEAD")).unwrap_err();
@@ -360,8 +358,7 @@ mod tests {
 
     #[test]
     fn git_integration_resolves_the_common_directory_once() {
-        let tmp = tempfile::tempdir().unwrap();
-        gix::init(tmp.path()).unwrap();
+        let tmp = test_support_git::empty_git_repo();
         let layout = RepositoryLayout::at(tmp.path().to_path_buf());
         let before = test_support::common_dir_resolutions();
 

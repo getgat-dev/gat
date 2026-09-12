@@ -978,7 +978,7 @@ dependencies = [
 
 [[package]]
 name = "gat"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anstream",
  "anstyle",
@@ -4072,6 +4072,9 @@ dependencies = [
 [[package]]
 name = "test-support-git"
 version = "0.0.0"
+dependencies = [
+ "tempfile",
+]
 
 [[package]]
 name = "thiserror"

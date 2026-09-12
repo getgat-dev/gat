@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use gat_core::lock::{Conflict, Lock, LockError as CoreLockError, merge_three_way};
+use gat_core::lock::{Lock, LockError as CoreLockError, MergeConflict, merge_three_way};
 use gat_io::LockStore;
 
 use crate::RepositoryAccessError;
@@ -29,8 +29,8 @@ pub enum MergeDriverError {
         #[source]
         source: CoreLockError,
     },
-    #[error("gat.lock semantic merge conflict ({} path(s))", .0.len())]
-    SemanticConflict(Vec<Conflict>),
+    #[error("gat.lock semantic merge conflict: {0}")]
+    SemanticConflict(MergeConflict),
     #[error("could not publish the merged lock at `{}`", path.display())]
     Publish {
         path: PathBuf,
@@ -48,19 +48,23 @@ fn read_stage(path: &Path, stage: MergeStage) -> Result<Lock, MergeDriverError> 
     let Some(text) = text else {
         return Ok(Lock::default());
     };
-    if text.trim().is_empty() {
+    // Git supplies an empty stage for an absent side of an add/delete merge.
+    // Whitespace-only files are present but malformed lock documents.
+    if text.is_empty() {
         return Ok(Lock::default());
     }
     Lock::parse(&text).map_err(|source| MergeDriverError::Parse { stage, source })
 }
 
 pub fn merge_driver(ancestor: &Path, ours: &Path, theirs: &Path) -> Result<(), MergeDriverError> {
-    let ancestor_lock = read_stage(ancestor, MergeStage::Ancestor)?;
-    let ours_lock = read_stage(ours, MergeStage::Ours)?;
-    let theirs_lock = read_stage(theirs, MergeStage::Theirs)?;
-
-    let merged = merge_three_way(&ancestor_lock, &ours_lock, &theirs_lock)
-        .map_err(MergeDriverError::SemanticConflict)?;
+    // Release all three input maps before allocating publication buffers.
+    let merged = {
+        let ancestor_lock = read_stage(ancestor, MergeStage::Ancestor)?;
+        let ours_lock = read_stage(ours, MergeStage::Ours)?;
+        let theirs_lock = read_stage(theirs, MergeStage::Theirs)?;
+        merge_three_way(&ancestor_lock, &ours_lock, &theirs_lock)
+            .map_err(MergeDriverError::SemanticConflict)?
+    };
     LockStore::publish_file_atomic(&merged, ours).map_err(|source| MergeDriverError::Publish {
         path: ours.to_path_buf(),
         source: Box::new(RepositoryAccessError::from_lock(source)),
@@ -157,6 +161,36 @@ mod tests {
     }
 
     #[test]
+    fn merged_prefix_conflict_preserves_ours_byte_for_byte() {
+        for intervening in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let ancestor = tmp.path().join("O");
+            let ours = tmp.path().join("A");
+            let theirs = tmp.path().join("B");
+            write(&ancestor, &Lock::default());
+            let before = Lock {
+                entries: vec![entry("foo", OID_A)],
+            }
+            .to_string()
+            .replace('\n', "\r\n");
+            std::fs::write(&ours, &before).unwrap();
+            let mut entries = Vec::new();
+            if intervening {
+                entries.push(entry("foo.bar", OID_B));
+            }
+            entries.push(entry("foo/bar", OID_B));
+            write(&theirs, &Lock { entries });
+
+            let error = merge_driver(&ancestor, &ours, &theirs).unwrap_err();
+            assert!(
+                matches!(error, MergeDriverError::SemanticConflict(MergeConflict::DirectoryPrefix { ancestor, descendant }) if ancestor == "foo" && descendant == "foo/bar")
+            );
+            assert_eq!(std::fs::read(&ours).unwrap(), before.as_bytes());
+            assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 3);
+        }
+    }
+
+    #[test]
     fn missing_and_empty_stages_are_empty_locks() {
         let tmp = tempfile::tempdir().unwrap();
         let missing = tmp.path().join("missing-O");
@@ -173,6 +207,31 @@ mod tests {
                 .entries,
             []
         );
+    }
+
+    #[test]
+    fn whitespace_only_stages_fail_without_publication() {
+        for invalid_stage in [MergeStage::Ancestor, MergeStage::Ours, MergeStage::Theirs] {
+            let tmp = tempfile::tempdir().unwrap();
+            let ancestor = tmp.path().join("O");
+            let ours = tmp.path().join("A");
+            let theirs = tmp.path().join("B");
+            for (path, stage) in [
+                (&ancestor, MergeStage::Ancestor),
+                (&ours, MergeStage::Ours),
+                (&theirs, MergeStage::Theirs),
+            ] {
+                if stage == invalid_stage {
+                    std::fs::write(path, " \r\n\t").unwrap();
+                } else {
+                    write(path, &Lock::default());
+                }
+            }
+            let before = std::fs::read(&ours).unwrap();
+            let error = merge_driver(&ancestor, &ours, &theirs).unwrap_err();
+            assert!(matches!(error, MergeDriverError::Parse {stage, ..} if stage == invalid_stage));
+            assert_eq!(std::fs::read(&ours).unwrap(), before);
+        }
     }
 
     #[test]

@@ -27,6 +27,55 @@ pub fn isolated_gitconfig() -> &'static Path {
     .as_path()
 }
 
+/// Creates an owned, empty Git repository on `main`.
+///
+/// # Panics
+/// Panics if temporary directory creation or Git initialization fails.
+#[must_use]
+pub fn empty_git_repo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("creating Git fixture directory");
+    run_git(dir.path(), &["init", "-q", "-b", "main"]);
+    dir
+}
+
+const AMBIENT_GIT_ENV: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_CONFIG",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_TEMPLATE_DIR",
+    "GIT_DEFAULT_HASH",
+    "GIT_DEFAULT_REF_FORMAT",
+    "GIT_AUTHOR_DATE",
+    "GIT_COMMITTER_DATE",
+];
+
+/// Isolates repository discovery, configuration, and identity for a child.
+/// Apply deliberate test-specific environment overrides after this function.
+/// This does not prevent ancestor discovery: repository tests must initialize
+/// their own repository, and discovery tests must control their directory tree.
+pub fn isolated_git_env(command: &mut Command) {
+    for key in AMBIENT_GIT_ENV {
+        command.env_remove(key);
+    }
+    command
+        .env("GIT_AUTHOR_NAME", "T")
+        .env("GIT_AUTHOR_EMAIL", "t@example.com")
+        .env("GIT_COMMITTER_NAME", "T")
+        .env("GIT_COMMITTER_EMAIL", "t@example.com")
+        .env("GIT_CONFIG_GLOBAL", isolated_gitconfig())
+        .env("GIT_CONFIG_SYSTEM", isolated_gitconfig());
+}
+
 /// A Git command with deterministic identity and isolated configuration.
 #[must_use]
 pub struct GitCommand {
@@ -40,14 +89,8 @@ impl GitCommand {
 
     pub fn empty(dir: &Path) -> Self {
         let mut command = Command::new("git");
-        command
-            .current_dir(dir)
-            .env("GIT_AUTHOR_NAME", "T")
-            .env("GIT_AUTHOR_EMAIL", "t@example.com")
-            .env("GIT_COMMITTER_NAME", "T")
-            .env("GIT_COMMITTER_EMAIL", "t@example.com")
-            .env("GIT_CONFIG_GLOBAL", isolated_gitconfig())
-            .env("GIT_CONFIG_SYSTEM", isolated_gitconfig());
+        command.current_dir(dir);
+        isolated_git_env(&mut command);
         Self { command }
     }
 
@@ -92,12 +135,14 @@ impl GitCommand {
     ///
     /// # Panics
     /// Panics if Git cannot be started or its output cannot be collected.
-    pub fn output(self) -> Output {
-        let mut command = self.command;
-        let program = format!("{command:?}");
-        command
+    pub fn output(mut self) -> Output {
+        self.collect_output()
+    }
+
+    fn collect_output(&mut self) -> Output {
+        self.command
             .output()
-            .unwrap_or_else(|error| panic!("running {program}: {error}"))
+            .unwrap_or_else(|error| panic!("running {:?}: {error}", self.command))
     }
 
     #[allow(
@@ -107,12 +152,12 @@ impl GitCommand {
     ///
     /// # Panics
     /// Panics if Git cannot be run or exits unsuccessfully.
-    pub fn run(self) -> Output {
-        let program = format!("{:?}", self.command);
-        let output = self.output();
+    pub fn run(mut self) -> Output {
+        let output = self.collect_output();
         assert!(
             output.status.success(),
-            "{program} failed: stdout={} stderr={}",
+            "{:?} failed: stdout={} stderr={}",
+            self.command,
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
@@ -165,6 +210,34 @@ pub fn command(dir: &Path, args: &[&str]) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn isolation_removes_ambient_values_and_allows_explicit_overrides() {
+        let dir = std::env::temp_dir();
+        let mut command = Command::new("git");
+        for key in AMBIENT_GIT_ENV {
+            command.env(key, "ambient");
+        }
+        isolated_git_env(&mut command);
+        let env: std::collections::BTreeMap<_, _> = command.get_envs().collect();
+        for key in AMBIENT_GIT_ENV {
+            assert_eq!(env.get(std::ffi::OsStr::new(key)), Some(&None), "{key}");
+        }
+        let command = GitCommand::new(&dir, &["version"])
+            .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
+            .into_command();
+        assert!(command.get_envs().any(|(key, value)| {
+            key == "GIT_AUTHOR_DATE" && value == Some(std::ffi::OsStr::new("2000-01-01T00:00:00Z"))
+        }));
+    }
+
+    #[test]
+    fn fixture_owns_repository_and_initial_branch() {
+        let dir = empty_git_repo();
+        assert!(dir.path().join(".git").is_dir());
+        let output = run_git(dir.path(), &["symbolic-ref", "HEAD"]);
+        assert_eq!(output.stdout, b"refs/heads/main\n");
+    }
 
     #[test]
     fn command_uses_isolated_config_and_fixed_identity() {

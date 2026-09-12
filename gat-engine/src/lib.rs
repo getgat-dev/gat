@@ -275,9 +275,7 @@ pub(crate) mod test_harness {
     }
 
     pub fn git_repo() -> TestRepo {
-        let temp = tempfile::tempdir().expect("create temporary repository");
-        test_support_git::run_git(temp.path(), &["init", "--quiet"]);
-        TestRepo(temp)
+        TestRepo(test_support_git::empty_git_repo())
     }
 
     pub fn git(dir: &Path, args: &[&str]) {

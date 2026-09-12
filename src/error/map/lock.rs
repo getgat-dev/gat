@@ -11,9 +11,13 @@ use gat_core::lock::{
 /// reusing the reason's own (developer-facing) `Display`.
 const fn malformed_row_problem(reason: &MalformedRowReason) -> &'static str {
     match reason {
-        MalformedRowReason::MissingPath => "this row is missing its path field",
-        MalformedRowReason::MissingOid { .. } => "this row is missing its object id field",
-        MalformedRowReason::TooManyFields { .. } => "this row has too many fields",
+        MalformedRowReason::InvalidSeparator => {
+            "expected a tab after a 64-character lowercase hexadecimal object id"
+        }
+        MalformedRowReason::MissingLineFeed => "this record must end with a newline (LF or CRLF)",
+        MalformedRowReason::UnorderedPath { .. } => {
+            "lock paths must be in strictly increasing order"
+        }
     }
 }
 
@@ -21,7 +25,6 @@ const fn malformed_row_problem(reason: &MalformedRowReason) -> &'static str {
 /// reusing the reason's own (developer-facing) `Display`.
 const fn invalid_oid_problem(reason: &InvalidOidReason) -> &'static str {
     match reason {
-        InvalidOidReason::MissingPrefix => "this object id is missing its required prefix",
         InvalidOidReason::NotHexBlake3 => "this object id is not a valid hash",
     }
 }
@@ -232,7 +235,7 @@ mod tests {
     fn malformed_row_failure_surfaces_the_line_and_reason() {
         let err = LockDomainError::MalformedRow {
             line: 7,
-            reason: MalformedRowReason::TooManyFields {
+            reason: MalformedRowReason::UnorderedPath {
                 path: "some/path".to_string(),
             },
         };

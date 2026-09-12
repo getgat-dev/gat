@@ -622,8 +622,7 @@ mod tests {
     }
 
     fn repository() -> tempfile::TempDir {
-        let root = tempfile::tempdir().unwrap();
-        git(root.path(), &["init", "-q"]);
+        let root = test_support_git::empty_git_repo();
         git(root.path(), &["config", "user.name", "Test"]);
         git(
             root.path(),
@@ -729,19 +728,11 @@ mod tests {
     #[test]
     fn historical_lock_shape_comes_from_each_commit_tree() {
         let root = repository();
-        let first = format!(
-            "{}\n\"a.bin\"\tblake3:{}\n",
-            gat_core::lock::VERSION,
-            "a".repeat(64)
-        );
+        let first = format!("{0}\n{1}\ta.bin\n", gat_core::lock::VERSION, "a".repeat(64));
         commit(root.path(), "gat.lock", first.as_bytes(), "flat");
         std::fs::remove_file(root.path().join("gat.lock")).unwrap();
         std::fs::create_dir(root.path().join("gat.lock")).unwrap();
-        let second = format!(
-            "{}\n\"b.bin\"\tblake3:{}\n",
-            gat_core::lock::VERSION,
-            "b".repeat(64)
-        );
+        let second = format!("{0}\n{1}\tb.bin\n", gat_core::lock::VERSION, "b".repeat(64));
         commit(
             root.path(),
             "gat.lock/00.lock",
@@ -787,7 +778,7 @@ mod ownership_tests {
     use super::*;
     use gat_core::lexical_path::GatPath;
     use gat_core::oid::Oid;
-    use std::process::Command as GitCommand;
+    use test_support_git::GitCommand;
 
     fn lock_path(path: &str) -> GatPath {
         GatPath::parse_canonical(path).unwrap()
@@ -801,21 +792,14 @@ mod ownership_tests {
         test_support_git::GitCommand::empty(dir)
             .args(["-c", "core.autocrlf=false"])
             .args(args)
-            .into_command()
     }
 
     fn git(dir: &Path, args: &[&str]) {
-        let output = git_command(dir, args).output().unwrap();
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        git_command(dir, args).run();
     }
 
     fn test_repo() -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().unwrap();
-        git(tmp.path(), &["init", "-q"]);
+        let tmp = test_support_git::empty_git_repo();
         git(tmp.path(), &["config", "user.name", "Test"]);
         git(
             tmp.path(),
@@ -856,26 +840,15 @@ mod ownership_tests {
         std::fs::write(dir.join(file), contents).unwrap();
         git(dir, &["add", "-A"]);
         let date = format!("@{seconds} +0000");
-        let out = git_command(dir, &["commit", "-q", "-m", message])
+        git_command(dir, &["commit", "-q", "-m", message])
             .env("GIT_AUTHOR_DATE", &date)
             .env("GIT_COMMITTER_DATE", &date)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "git commit failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+            .run();
     }
 
-    /// The name `test_repo()`'s initial branch got, whatever the
-    /// environment's `init.defaultBranch`/compiled-in default is (tests
-    /// must not assume `main`).
+    /// Returns the currently checked-out branch.
     fn current_branch(dir: &std::path::Path) -> String {
-        let out = git_command(dir, &["rev-parse", "--abbrev-ref", "HEAD"])
-            .output()
-            .unwrap();
-        assert!(out.status.success());
+        let out = git_command(dir, &["rev-parse", "--abbrev-ref", "HEAD"]).run();
         String::from_utf8(out.stdout).unwrap().trim().to_string()
     }
 
@@ -1256,15 +1229,7 @@ mod ownership_tests {
     /// panicking on failure -- used by tests that need the value `git`
     /// prints (a hash, a ref name) rather than just its exit status.
     fn git_stdout(dir: &std::path::Path, args: &[&str]) -> String {
-        let out = git_command(dir, args)
-            .output()
-            .unwrap_or_else(|e| panic!("running git {args:?}: {e}"));
-        assert!(
-            out.status.success(),
-            "git {args:?} failed: stdout={} stderr={}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
+        let out = git_command(dir, args).run();
         String::from_utf8(out.stdout).unwrap().trim().to_string()
     }
 
@@ -1274,6 +1239,7 @@ mod ownership_tests {
     fn write_blob(dir: &std::path::Path, contents: &[u8]) -> String {
         use std::io::Write;
         let mut child = git_command(dir, &["hash-object", "-w", "--stdin"])
+            .into_command()
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -1756,12 +1722,10 @@ mod ownership_tests {
         write_commit_at(dir, "topic.txt", "topic", "topic", 1100);
         git(dir, &["checkout", &base_branch]);
         write_commit_at(dir, "main.txt", "main", "main-side", 500);
-        let out = git_command(dir, &["merge", "--no-ff", "-m", "merge", "topic"])
+        git_command(dir, &["merge", "--no-ff", "-m", "merge", "topic"])
             .env("GIT_AUTHOR_DATE", "@1500 +0000")
             .env("GIT_COMMITTER_DATE", "@1500 +0000")
-            .output()
-            .unwrap();
-        assert!(out.status.success());
+            .run();
         let repo = open_repo(dir);
         let merge = repo.head_id().unwrap().detach();
 
@@ -1816,12 +1780,10 @@ mod ownership_tests {
             repo.head_id().unwrap().detach()
         };
 
-        let out = git_command(dir, &["merge", "--no-ff", "-m", "merge", "topic"])
+        git_command(dir, &["merge", "--no-ff", "-m", "merge", "topic"])
             .env("GIT_AUTHOR_DATE", "@1500 +0000")
             .env("GIT_COMMITTER_DATE", "@1500 +0000")
-            .output()
-            .unwrap();
-        assert!(out.status.success());
+            .run();
         let repo = open_repo(dir);
         let merge = repo.head_id().unwrap().detach();
 
@@ -1911,10 +1873,7 @@ mod ownership_tests {
         let dir = tmp.path();
         write_commit(dir, "a.txt", "a", "A");
         let repo = open_repo(dir);
-        let out = git_command(dir, &["hash-object", "-w", "a.txt"])
-            .output()
-            .unwrap();
-        assert!(out.status.success());
+        let out = git_command(dir, &["hash-object", "-w", "a.txt"]).run();
         let blob_id = String::from_utf8(out.stdout).unwrap().trim().to_string();
 
         let selection = HistorySelection {
@@ -1954,7 +1913,7 @@ mod ownership_tests {
         write_commit(dir, "b.txt", "b", "B");
 
         let shallow_dir = tempfile::tempdir().unwrap();
-        let source_url = format!("file://{}", dir.to_str().unwrap());
+        let source_url = test_support_git::file_remote_url(dir);
         git(
             shallow_dir.path(),
             &["clone", "--depth", "1", &source_url, "."],
@@ -1978,7 +1937,7 @@ mod ownership_tests {
     }
 
     #[test]
-    fn ordered_history_blob_uses_the_bounded_cursor_not_the_btreeset_validator() {
+    fn history_blob_certifies_the_file_once() {
         let tmp = test_repo();
         let mut lock = gat_core::lock::Lock::default();
         lock.upsert(lock_path("a.bin"), lock_oid('a'));
@@ -1992,7 +1951,7 @@ mod ownership_tests {
         .unwrap();
         commit_all(tmp.path(), "persist lock");
 
-        let before = crate::lock::test_support::btree_validation_parses();
+        let before = crate::lock::test_support::file_validation_parses();
         let mut kept = Vec::new();
         let stats = visit_history_lock_entries::<Box<dyn std::error::Error>>(
             tmp.path(),
@@ -2007,9 +1966,9 @@ mod ownership_tests {
 
         assert_eq!(stats.visited, 1);
         assert_eq!(
-            crate::lock::test_support::btree_validation_parses() - before,
-            0,
-            "an ordered historical lock blob must take the bounded fast path"
+            crate::lock::test_support::file_validation_parses() - before,
+            1,
+            "a historical lock blob must be certified exactly once"
         );
         assert_eq!(kept, vec!["data/b.bin", "data/c.bin"]);
     }
@@ -2019,7 +1978,7 @@ mod ownership_tests {
         let cases = [
             (
                 format!(
-                    "{}\n\"shared.bin\"\tblake3:{}\n\"shared.bin\"\tblake3:{}\n",
+                    "{0}\n{1}\tshared.bin\n{2}\tshared.bin\n",
                     gat_core::lock::VERSION,
                     "a".repeat(64),
                     "b".repeat(64)
@@ -2028,7 +1987,7 @@ mod ownership_tests {
             ),
             (
                 format!(
-                    "{}\n\"foo\"\tblake3:{}\n\"foo/bar\"\tblake3:{}\n",
+                    "{0}\n{1}\tfoo\n{2}\tfoo/bar\n",
                     gat_core::lock::VERSION,
                     "a".repeat(64),
                     "b".repeat(64)
@@ -2041,7 +2000,7 @@ mod ownership_tests {
                     gat_core::lock::VERSION,
                     "a".repeat(64)
                 ),
-                "oid must start",
+                "expected a TAB",
             ),
         ];
 
@@ -2068,9 +2027,9 @@ mod ownership_tests {
     fn history_lock_blob_with_invalid_utf8_is_reported_not_lossily_repaired() {
         let tmp = test_repo();
         let mut bytes = format!("{}\n", gat_core::lock::VERSION).into_bytes();
-        bytes.extend_from_slice(b"\"\xffbad.bin\"\tblake3:");
         bytes.extend_from_slice("a".repeat(64).as_bytes());
-        bytes.push(b'\n');
+        // Otherwise canonical digest-first framing isolates the UTF-8 error.
+        bytes.extend_from_slice(b"\t\xffbad.bin\n");
         std::fs::write(tmp.path().join("gat.lock"), bytes).unwrap();
         commit_all(tmp.path(), "invalid utf8 lock");
 

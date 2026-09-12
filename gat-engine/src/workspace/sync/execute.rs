@@ -412,113 +412,134 @@ mod tests {
     #[test]
     fn conflict_precedence_across_intents_cache_states_and_force() {
         for intent in ["replace", "rematerialize", "remove"] {
-            for cache_state in ["valid", "missing", "corrupt"] {
-                for force in [false, true] {
-                    for dry_run in [false, true] {
-                        let tmp = git_repo();
-                        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
-                            .unwrap()
-                            .repository_at(tmp.path().to_path_buf());
-                        set_strategy(&repo, "copy");
-                        let prior = track(&repo, "a.bin", b"prior");
-                        sync(&repo, &SyncOptions::default()).unwrap();
-                        std::fs::write(tmp.path().join("a.bin"), b"local").unwrap();
-                        let entry = match intent {
-                            "replace" => track(&repo, "a.bin", b"desired"),
-                            "remove" => {
-                                repo.save_lock(&Lock::default()).unwrap();
-                                prior
+            let tmp = git_repo();
+            let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+                .unwrap()
+                .repository_at(tmp.path().to_path_buf());
+            set_strategy(&repo, "copy");
+            let cache = repo.resolved_cache_root().unwrap();
+            let mut cases = Vec::new();
+            let mut prior_entries = Vec::new();
+            let mut desired = Lock::default();
+            for cache_state in ["corrupt", "missing", "valid"] {
+                let path = format!("{cache_state}.bin");
+                // Distinct contents keep cache mutations local to each case.
+                let prior_bytes = format!("prior-{cache_state}");
+                let prior = Entry {
+                    path: GatPath::parse_canonical(&path).unwrap(),
+                    oid: ingest(&repo, prior_bytes.as_bytes()).oid,
+                };
+                std::fs::write(tmp.path().join(&path), prior_bytes.as_bytes()).unwrap();
+                prior_entries.push(prior.clone());
+                let expected_bytes = if intent == "replace" {
+                    format!("desired-{cache_state}")
+                } else {
+                    prior_bytes
+                };
+                let entry = if intent == "replace" {
+                    Entry {
+                        path: prior.path,
+                        oid: ingest(&repo, expected_bytes.as_bytes()).oid,
+                    }
+                } else {
+                    prior
+                };
+                if intent != "remove" {
+                    desired.upsert(entry.path.clone(), entry.oid);
+                }
+                let object = cache.object_path_for_test(&entry.oid);
+                match cache_state {
+                    "missing" => std::fs::remove_file(object).unwrap(),
+                    "corrupt" => {
+                        cache.make_object_writable_for_test(&entry.oid).unwrap();
+                        std::fs::write(object, b"broken").unwrap();
+                    }
+                    _ => {}
+                }
+                cases.push((cache_state, entry, expected_bytes));
+            }
+            record_materialized(&repo, &prior_entries).unwrap();
+            repo.save_lock(&desired).unwrap();
+            for (_, entry, _) in &cases {
+                std::fs::write(tmp.path().join(entry.path.as_str()), b"local").unwrap();
+            }
+            // Non-forced execution and preview preserve all files, allowing the
+            // same three independent cases to feed each subsequent sync call.
+            for force in [false, true] {
+                for dry_run in [true, false] {
+                    let outcome = sync(
+                        &repo,
+                        &SyncOptions {
+                            policy: crate::ReconciliationPolicy::Validate {
+                                rematerialize: intent == "rematerialize",
+                            },
+                            force,
+                            dry_run,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    let context = format!("{intent}/force={force}/dry_run={dry_run}");
+                    let mut conflicts = Vec::new();
+                    let mut missing = Vec::new();
+                    let mut corrupted = Vec::new();
+                    let mut changes = 0;
+                    for (cache_state, entry, expected_bytes) in &cases {
+                        let changed = match (*cache_state, intent, force) {
+                            ("corrupt", "replace" | "rematerialize", _) => {
+                                corrupted.push((entry.path.clone(), entry.oid));
+                                false
                             }
-                            _ => prior,
+                            (_, _, false) => {
+                                conflicts.push(entry.path.clone());
+                                false
+                            }
+                            ("missing", "replace" | "rematerialize", true) => {
+                                missing.push((entry.path.clone(), entry.oid));
+                                false
+                            }
+                            _ => true,
                         };
-                        let cache = repo.resolved_cache_root().unwrap();
-                        let object = cache.object_path_for_test(&entry.oid);
-                        match cache_state {
-                            "missing" => std::fs::remove_file(object).unwrap(),
-                            "corrupt" => {
-                                cache.make_object_writable_for_test(&entry.oid).unwrap();
-                                std::fs::write(object, b"broken").unwrap();
-                            }
-                            _ => {}
-                        }
-                        let outcome = sync(
-                            &repo,
-                            &SyncOptions {
-                                policy: crate::ReconciliationPolicy::Validate {
-                                    rematerialize: intent == "rematerialize",
-                                },
-                                force,
-                                dry_run,
-                                ..Default::default()
-                            },
-                        )
-                        .unwrap();
-                        let corrupted = intent != "remove" && cache_state == "corrupt";
-                        let conflict = !force && !corrupted;
-                        let missing = force && intent != "remove" && cache_state == "missing";
-                        let changed = !corrupted && !conflict && !missing;
-                        let context =
-                            format!("{intent}/{cache_state}/force={force}/dry_run={dry_run}");
-                        assert_eq!(
-                            outcome.conflicts,
-                            if conflict {
-                                vec![entry.path.clone()]
-                            } else {
-                                vec![]
-                            },
-                            "{context}"
-                        );
-                        assert_eq!(
-                            outcome.missing,
-                            if missing {
-                                vec![(entry.path.clone(), entry.oid)]
-                            } else {
-                                vec![]
-                            },
-                            "{context}"
-                        );
-                        assert_eq!(
-                            outcome.corrupted,
-                            if corrupted {
-                                vec![(entry.path.clone(), entry.oid)]
-                            } else {
-                                vec![]
-                            },
-                            "{context}"
-                        );
-                        assert_eq!(outcome.materialized, 0, "{context}");
-                        assert_eq!(
-                            outcome.replaced,
-                            usize::from(changed && intent == "replace"),
-                            "{context}"
-                        );
-                        assert_eq!(
-                            outcome.rematerialized,
-                            usize::from(changed && intent == "rematerialize"),
-                            "{context}"
-                        );
-                        assert_eq!(
-                            outcome.removed,
-                            usize::from(changed && intent == "remove"),
-                            "{context}"
-                        );
+                        changes += usize::from(changed);
+                        let path = tmp.path().join(entry.path.as_str());
                         if changed && !dry_run && intent == "remove" {
-                            assert!(!tmp.path().join("a.bin").exists(), "{context}");
+                            assert!(!path.exists(), "{context}/{cache_state}");
                         } else {
-                            let expected: &[u8] = if !changed || dry_run {
-                                b"local"
-                            } else if intent == "replace" {
-                                b"desired"
+                            let expected = if changed && !dry_run {
+                                expected_bytes.as_bytes()
                             } else {
-                                b"prior"
+                                b"local"
                             };
                             assert_eq!(
-                                std::fs::read(tmp.path().join("a.bin")).unwrap(),
+                                std::fs::read(path).unwrap(),
                                 expected,
-                                "{context}"
+                                "{context}/{cache_state}"
                             );
                         }
                     }
+                    assert_eq!(outcome.conflicts, conflicts, "{context}");
+                    assert_eq!(outcome.missing, missing, "{context}");
+                    assert_eq!(outcome.corrupted, corrupted, "{context}");
+                    assert_eq!(outcome.materialized, 0, "{context}");
+                    assert_eq!(
+                        outcome.replaced,
+                        if intent == "replace" { changes } else { 0 },
+                        "{context}"
+                    );
+                    assert_eq!(
+                        outcome.rematerialized,
+                        if intent == "rematerialize" {
+                            changes
+                        } else {
+                            0
+                        },
+                        "{context}"
+                    );
+                    assert_eq!(
+                        outcome.removed,
+                        if intent == "remove" { changes } else { 0 },
+                        "{context}"
+                    );
                 }
             }
         }
