@@ -43,7 +43,8 @@ pub(super) unsafe fn row_avx2(hash: &[u8; 64], path: &[u8]) -> DecodedRow {
     // 32 remaining initialized bytes. The output store spans exactly the OID.
     unsafe {
         let (n0, v0) = hex32(_mm256_loadu_si256(hash.as_ptr().cast()));
-        // A fixed prologue overlaps the first path block with digest decoding.
+        // Expose independent path and digest work in a fixed prologue; the
+        // compiler chooses the actual instruction order.
         // Even an immediate LF must wait for validation of the second hash block.
         let first_path = if path.len() >= 32 {
             let x = _mm256_loadu_si256(path.as_ptr().cast());
