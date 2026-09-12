@@ -1637,6 +1637,9 @@ mod tests {
         .unwrap();
         drop(store);
 
+        // Replace desired state while retaining the old materialized row for
+        // the batch's removal action; the desired lock itself must be valid.
+        repo.save_lock(&gat_core::lock::Lock::default()).unwrap();
         let ab_entry = track(&repo, "a/b", b"new");
         let plan = SyncPlan {
             actions: vec![
@@ -1699,6 +1702,9 @@ mod tests {
         .unwrap();
         drop(store);
 
+        // Replace desired state while retaining the old materialized row for
+        // the batch's removal action; the desired lock itself must be valid.
+        repo.save_lock(&gat_core::lock::Lock::default()).unwrap();
         let a_entry = track(&repo, "a", b"new");
         let plan = SyncPlan {
             actions: vec![

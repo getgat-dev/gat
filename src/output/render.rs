@@ -499,14 +499,11 @@ fn render_route_details(
 /// Authors the CLI-facing label/wording for one `gat diff` row's change,
 /// keeping "new"/"removed"/"changed" prose in root presentation rather
 /// than the command crate that only computes the typed change.
-fn diff_row_metadata(change: &gat_engine::RowChange) -> (rows::ListStatus, &'static str) {
+const fn diff_row_metadata(change: &gat_command::DiffChange) -> (rows::ListStatus, &'static str) {
     match change {
-        gat_engine::RowChange::Added { .. } => (rows::ListStatus::Added, "new"),
-        gat_engine::RowChange::Removed => (rows::ListStatus::Deleted, "removed"),
-        gat_engine::RowChange::Modified { .. } => (rows::ListStatus::Modified, "changed"),
-        gat_engine::RowChange::Unchanged { .. } => {
-            unreachable!("`Unchanged::Drop` comparisons never yield unchanged rows")
-        }
+        gat_command::DiffChange::Added { .. } => (rows::ListStatus::Added, "new"),
+        gat_command::DiffChange::Removed => (rows::ListStatus::Deleted, "removed"),
+        gat_command::DiffChange::Modified { .. } => (rows::ListStatus::Modified, "changed"),
     }
 }
 
@@ -3007,6 +3004,38 @@ mod outcome_tests {
     }
 
     #[test]
+    fn diff_renders_every_constructible_change() {
+        let oid = gat_core::oid::Oid::from_bytes([7; 32]);
+        for (change, label) in [
+            (gat_command::DiffChange::Added { oid }, "new"),
+            (gat_command::DiffChange::Removed, "removed"),
+            (gat_command::DiffChange::Modified { oid }, "changed"),
+        ] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            render(
+                &mut Output::new(&mut stdout, &mut stderr),
+                Outcome::Diff(DiffOutcome::Changes {
+                    scope: gat_command::SelectionScope::Unrestricted,
+                    from: gat_core::git::GitRevisionSpec::from_string("HEAD".into()),
+                    to: DiffTarget::WorkingTree,
+                    rows: vec![gat_command::DiffRow {
+                        path: GatPath::parse_canonical("data.bin").unwrap(),
+                        change,
+                        mount: None,
+                    }],
+                    changes: 1,
+                }),
+            )
+            .unwrap();
+            let text = String::from_utf8(stdout).unwrap();
+            assert!(text.contains("data.bin"));
+            assert!(text.contains(label));
+            assert!(stderr.is_empty());
+        }
+    }
+
+    #[test]
     fn scope_hints_are_separated_from_results_and_precede_count_footers() {
         use gat_command::SelectionScope;
         for scope in [
@@ -3038,7 +3067,7 @@ mod outcome_tests {
                         to: DiffTarget::WorkingTree,
                         rows: vec![gat_command::DiffRow {
                             path: GatPath::parse_canonical("data.bin").unwrap(),
-                            change: gat_engine::RowChange::Removed,
+                            change: gat_command::DiffChange::Removed,
                             mount: None,
                         }],
                         changes: 1,

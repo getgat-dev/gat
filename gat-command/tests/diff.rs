@@ -3,12 +3,12 @@ mod common;
 use common::{
     RecordingProgress, add_paths, commit_all, git, remove_paths, repository, set_lock_shard_levels,
 };
-use gat_command::{DiffError, DiffOutcome, DiffRequest, DiffTarget, diff};
+use gat_command::{DiffChange, DiffError, DiffOutcome, DiffRequest, DiffTarget, diff};
 use gat_core::git::GitRevisionSpec;
 use gat_core::path_scope::normalize_path_scope;
 use gat_core::progress::{NoopProgress, ProgressOperation, ProgressReporter};
 use gat_core::selection::Selection;
-use gat_engine::{Repository, RowChange};
+use gat_engine::Repository;
 use std::path::{Path, PathBuf};
 
 fn scoped_selection(path: &Path) -> Selection {
@@ -58,12 +58,11 @@ enum RowStatus {
     Modified,
 }
 
-fn row_status(change: &RowChange) -> RowStatus {
+const fn row_status(change: &DiffChange) -> RowStatus {
     match change {
-        RowChange::Added { .. } => RowStatus::Added,
-        RowChange::Removed => RowStatus::Deleted,
-        RowChange::Modified { .. } => RowStatus::Modified,
-        RowChange::Unchanged { .. } => unreachable!(),
+        DiffChange::Added { .. } => RowStatus::Added,
+        DiffChange::Removed => RowStatus::Deleted,
+        DiffChange::Modified { .. } => RowStatus::Modified,
     }
 }
 
@@ -250,7 +249,7 @@ fn diff_compares_two_explicit_revisions() {
     assert_eq!(to, DiffTarget::Revision(revision("v2")));
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].path.as_str(), "a.bin");
-    assert!(matches!(rows[0].change, RowChange::Modified { .. }));
+    assert!(matches!(rows[0].change, DiffChange::Modified { .. }));
 }
 
 #[test]
@@ -270,7 +269,7 @@ fn diff_with_one_revision_compares_it_against_the_working_tree() {
     assert_eq!(from.as_str(), "v1");
     assert_eq!(to, DiffTarget::WorkingTree);
     assert_eq!(rows.len(), 1);
-    assert!(matches!(rows[0].change, RowChange::Modified { .. }));
+    assert!(matches!(rows[0].change, DiffChange::Modified { .. }));
 }
 
 #[test]

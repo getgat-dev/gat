@@ -643,16 +643,14 @@ pub(super) fn apply_shard_entries_tx(
     let chunk_size = sql_chunk_size_with_shared_binds(2, 1);
     let mut params: Vec<rusqlite::types::ToSqlOutput<'_>> = Vec::with_capacity(chunk_size * 2 + 1);
     for chunk in entries.chunks(chunk_size) {
-        // The shared shard-ID parameter is numbered one past every row's
-        // two per-row placeholders (`?1`/`?2` for row 0, `?3`/`?4` for row
-        // 1, ...), so every row's `VALUES (...)` tuple references the same
-        // trailing `?{shard_param}` instead of its own copy.
-        let shard_param = chunk.len() * 2 + 1;
-        let row_placeholders: Vec<String> = (0..chunk.len())
-            .map(|i| format!("(?{}, ?{}, ?{shard_param})", i * 2 + 1, i * 2 + 2))
-            .collect();
+        // Bind the shared value first. A high-numbered parameter in the first
+        // tuple makes SQLite search its growing variable list for subsequent
+        // lower-numbered parameters, causing quadratic statement preparation.
+        // Anonymous row parameters advance monotonically; repeated ?1 lookups
+        // always find the first variable.
+        let row_placeholders = vec!["(?1, ?, ?)"; chunk.len()];
         let sql = format!(
-            "INSERT INTO state (path, desired_oid, desired_shard_id)
+            "INSERT INTO state (desired_shard_id, path, desired_oid)
              VALUES {}
              ON CONFLICT(path) DO UPDATE SET
                  desired_oid = excluded.desired_oid,
@@ -660,11 +658,11 @@ pub(super) fn apply_shard_entries_tx(
             row_placeholders.join(", ")
         );
         params.clear();
+        params.push(shard_buf.as_str().into());
         for e in chunk {
             params.push(e.path.as_str().into());
             params.push(e.oid.as_bytes().as_slice().into());
         }
-        params.push(shard_buf.as_str().into());
         tx.execute(&sql, params_from_iter(params.iter()))
             .with_state_context(|| format!("upserting {} desired-state row(s)", chunk.len()))?;
     }

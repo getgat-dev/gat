@@ -46,6 +46,27 @@ pub fn write_row(out: &mut impl Write, entry: &Entry) -> io::Result<()> {
     out.write_all(b"\n")
 }
 
+/// Append one canonical row to a resident text buffer without formatting
+/// ordinary paths. The caller establishes ordering and whole-lock invariants.
+#[allow(
+    clippy::missing_panics_doc,
+    reason = "Hex encoding only emits ASCII bytes"
+)]
+pub fn append_row(out: &mut String, entry: &Entry) {
+    use std::fmt::Write;
+    let mut hex = [0; 64];
+    entry.oid.encode_hex(&mut hex);
+    out.push_str(std::str::from_utf8(&hex).expect("hex digits are always valid UTF-8"));
+    out.push('\t');
+    let path = entry.path.as_str();
+    if path.bytes().any(|byte| byte < 32) {
+        let _ = write!(out, "{}", super::EscapedPath(&entry.path));
+    } else {
+        out.push_str(path);
+    }
+    out.push('\n');
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,6 +86,18 @@ mod tests {
             let mut bytes = Vec::new();
             write_header(&mut bytes).unwrap();
             write_row(&mut bytes, &entry).unwrap();
+            let mut resident = format!("{VERSION}\n");
+            append_row(&mut resident, &entry);
+            assert_eq!(resident.as_bytes(), bytes);
+            let plain = Entry {
+                path: GatPath::parse_canonical("data/é.bin").unwrap(),
+                oid: entry.oid,
+            };
+            let mut plain_bytes = Vec::new();
+            write_row(&mut plain_bytes, &plain).unwrap();
+            let mut plain_text = String::new();
+            append_row(&mut plain_text, &plain);
+            assert_eq!(plain_text.as_bytes(), plain_bytes);
             assert_eq!(
                 bytes,
                 format!(

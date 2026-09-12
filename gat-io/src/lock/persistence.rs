@@ -1270,24 +1270,19 @@ fn render_entries_into(entries: &[Entry], out: &mut String) {
 }
 
 /// Reuse ordinary worker/job buffers, but release an oversized allocation before
-/// the next shard. The resident renderer keeps its measured formatting kernel.
+/// the next shard.
 fn render_ordered_entries<'a>(entries: impl Iterator<Item = &'a Entry>, out: &mut String) {
     #[cfg(any(test, feature = "test-support"))]
     super::test_support::record_render_entries_call();
-    use std::fmt::Write;
     if out.capacity() > 1024 * 1024 {
         *out = String::new();
     } else {
         out.clear();
     }
-    let _ = writeln!(out, "{}", super::VERSION);
+    out.push_str(super::VERSION);
+    out.push('\n');
     for entry in entries {
-        let _ = writeln!(
-            out,
-            "{}\t{}",
-            entry.oid,
-            gat_core::lock::EscapedPath(&entry.path)
-        );
+        gat_core::lock::encoding::append_row(out, entry);
     }
 }
 

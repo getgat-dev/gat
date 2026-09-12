@@ -35,7 +35,7 @@ pub use config::{
     ConfigAction, ConfigError, ConfigOutcome, ConfigRequest, ConfigScalarValue, ConfigSource,
     config, config_with_lifecycle_observer,
 };
-pub use diff::{DiffError, DiffOutcome, DiffRequest, DiffRow, DiffTarget, diff};
+pub use diff::{DiffChange, DiffError, DiffOutcome, DiffRequest, DiffRow, DiffTarget, diff};
 pub use fetch::{
     FetchError, FetchOutcome, FetchRequest, FetchSource, fetch, fetch_with_desired_operation,
 };

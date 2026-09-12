@@ -277,7 +277,62 @@ pub fn visit_filtered_matching(
     visit_rows_validated(text, |path, _| Ok(keep(path)), visit)
 }
 
+// Retain string-prefix candidates, including non-adjacent ancestors such as
+// `a`, `a-`, `a/b`. Each candidate is pushed and popped at most once.
+fn validate_entries_if_ordered<'a>(entries: impl Iterator<Item = &'a Entry>) -> Result<bool> {
+    let mut previous: Option<&str> = None;
+    let mut candidates: Vec<&str> = Vec::new();
+    for entry in entries {
+        let path = entry.path.as_str();
+        if let Some(previous) = previous {
+            match previous.cmp(path) {
+                std::cmp::Ordering::Equal => {
+                    return Err(LockDomainError::DuplicatePath {
+                        path: path.to_owned(),
+                        line: None,
+                    }
+                    .into());
+                }
+                std::cmp::Ordering::Greater => return Ok(false),
+                std::cmp::Ordering::Less => {}
+            }
+            while candidates
+                .last()
+                .is_some_and(|p| p.len() >= path.len() || !path.starts_with(p))
+            {
+                candidates.pop();
+            }
+            if previous.len() < path.len() && path.starts_with(previous) {
+                candidates.push(previous);
+            }
+            if let Some(&ancestor) = candidates.last()
+                && path.as_bytes().get(ancestor.len()) == Some(&b'/')
+            {
+                return Err(LockDomainError::DirectoryPrefixConflict {
+                    ancestor: ancestor.to_owned(),
+                    descendant: path.to_owned(),
+                }
+                .into());
+            }
+        }
+        previous = Some(path);
+    }
+    Ok(true)
+}
+
 impl Lock {
+    /// Validate uniqueness and file/directory consistency of resident entries.
+    /// Sorted inputs borrow entries directly; unordered inputs sort references,
+    /// without cloning paths. Validation is linear in path bytes after ordering.
+    pub fn validate(&self) -> Result<()> {
+        if !validate_entries_if_ordered(self.entries.iter())? {
+            let mut entries: Vec<_> = self.entries.iter().collect();
+            entries.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+            validate_entries_if_ordered(entries.into_iter())?;
+        }
+        Ok(())
+    }
+
     /// Parse and validate a complete lock-v1 file before materializing entries.
     ///
     /// Rows contain 64 lowercase hex digest bytes, TAB, and an unquoted path

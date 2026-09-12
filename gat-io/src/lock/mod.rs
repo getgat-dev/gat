@@ -104,7 +104,9 @@ impl LockStore {
 
     /// Atomically publish one self-contained lock document at an arbitrary
     /// path, such as the `%A` file supplied by Git's merge-driver protocol.
+    /// Reject duplicate paths and file/directory conflicts before any write.
     pub fn publish_file_atomic(lock: &Lock, path: &std::path::Path) -> Result<()> {
+        lock.validate()?;
         persistence::save_file_atomic(lock, path)
     }
 
@@ -139,11 +141,14 @@ impl LockStore {
 
     /// Publish the complete logical lock at the configured shard depth.
     /// Physical shape selection and any required reshape remain internal.
+    /// Validate the complete path set before writing or reshaping, including
+    /// conflicts between paths that would land in different shards.
     pub fn publish_repository(
         layout: &crate::RepositoryLayout,
         lock: &Lock,
         shard_levels: LockShardLevels,
     ) -> Result<()> {
+        lock.validate()?;
         persistence::publish_complete(layout, lock, shard_levels)
     }
 
@@ -154,6 +159,7 @@ impl LockStore {
         lock: &Lock,
         shard_levels: LockShardLevels,
     ) -> Result<FullLockEvidence> {
+        lock.validate()?;
         persistence::publish_complete_with_evidence(layout, lock, shard_levels)
     }
 
@@ -394,6 +400,26 @@ mod tests {
 
     fn oid(hex: &str) -> gat_core::oid::Oid {
         gat_core::oid::Oid::from_hex(hex).unwrap()
+    }
+
+    #[test]
+    fn evidence_publication_rejects_invalid_entries_before_writing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = crate::RepositoryLayout::at(tmp.path().to_path_buf());
+        let lock = Lock {
+            entries: ["a", "a-", "a/b"]
+                .into_iter()
+                .map(|path| Entry {
+                    path: gp(path),
+                    oid: gat_core::oid::Oid::from_bytes([1; 32]),
+                })
+                .collect(),
+        };
+        assert!(
+            LockStore::publish_complete_with_evidence(&layout, &lock, LockShardLevels::FLAT)
+                .is_err()
+        );
+        assert!(!tmp.path().join("gat.lock").exists());
     }
 
     #[test]

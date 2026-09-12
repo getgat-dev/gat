@@ -199,3 +199,30 @@ fn refresh_removes_missing_shards_from_rows_catalog_and_identity() {
         *refreshed.identity().as_bytes()
     );
 }
+
+#[test]
+fn refresh_flat_lock_across_sql_chunks_preserves_insert_update_and_removal() {
+    let temp = tempfile::tempdir().unwrap();
+    let layout = RepositoryLayout::at(temp.path().to_path_buf());
+    // Exceed the 30,000-bind budget, exercising a full chunk and a tail.
+    let mut entries: Vec<_> = (0..15_003)
+        .map(|i| entry(&format!("file-{i:05}.bin"), u8::try_from(i % 251).unwrap()))
+        .collect();
+    publish_flat(&layout, entries.clone());
+    let mut store = StateStore::open(&layout).unwrap();
+    store.refresh_desired_state(&layout).unwrap();
+    assert_eq!(store.load_desired_as_lock().unwrap().entries, entries);
+
+    for item in &mut entries {
+        item.oid = Oid::from_bytes([255; 32]);
+    }
+    entries.remove(0);
+    entries.push(entry("new-file-with-longer-name.bin", 254));
+    publish_flat(&layout, entries.clone());
+    store.refresh_desired_state(&layout).unwrap();
+    assert_eq!(store.load_desired_as_lock().unwrap().entries, entries);
+    assert_eq!(
+        StateStore::observe_canonical_identity(&layout).unwrap(),
+        flat_identity(temp.path())
+    );
+}
