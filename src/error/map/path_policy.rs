@@ -26,20 +26,21 @@ impl From<UnknownRemoteOverrideError> for Failure {
 
 impl From<PathPolicyError> for Failure {
     fn from(err: PathPolicyError) -> Self {
-        match &err {
-            PathPolicyError::Identity(source) => (*source).into(),
+        match err {
+            PathPolicyError::Config(source) => source.into(),
+            PathPolicyError::Identity(source) => source.into(),
             PathPolicyError::UnknownRouteRemote {
                 route_name, remote, ..
             } => Self::expected(
                 Diagnostic::new(ErrorCode::RemoteNotFound, "Route names an unknown remote")
-                    .with_subject(UserLine::identifier(route_name))
+                    .with_subject(UserLine::identifier(&route_name))
                     .with_hint(UserLine::compose([
                         UserLine::authored("add `"),
-                        UserLine::identifier(remote),
+                        UserLine::identifier(&remote),
                         UserLine::authored("` with `"),
                         UserLine::compose([
                             UserLine::authored("gat remote add "),
-                            UserLine::identifier(remote),
+                            UserLine::identifier(&remote),
                             UserLine::authored(" <url>"),
                         ])
                         .unbroken(),
@@ -48,12 +49,12 @@ impl From<PathPolicyError> for Failure {
             ),
             PathPolicyError::UnknownDefault { name } => Self::expected(
                 Diagnostic::new(ErrorCode::RemoteNotFound, "Unknown default remote")
-                    .with_subject(UserLine::identifier(name))
+                    .with_subject(UserLine::identifier(&name))
                     .with_hint(UserLine::compose([
                         UserLine::authored("add it with `"),
                         UserLine::compose([
                             UserLine::authored("gat remote add "),
-                            UserLine::identifier(name),
+                            UserLine::identifier(&name),
                             UserLine::authored(" <url>"),
                         ])
                         .unbroken(),

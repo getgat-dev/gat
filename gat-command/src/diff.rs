@@ -67,6 +67,8 @@ pub enum DiffOutcome {
 #[derive(Debug, thiserror::Error)]
 pub enum DiffError {
     #[error(transparent)]
+    Policy(#[from] gat_engine::PathPolicyError),
+    #[error(transparent)]
     Snapshot(#[from] gat_engine::RepoSnapshotError),
     #[error(transparent)]
     Repository(#[from] gat_engine::RepositoryError),
@@ -95,7 +97,7 @@ pub fn diff(
                 ProgressSpec::indeterminate(ProgressOperation::ComparingState),
                 |_| -> Result<_, DiffError> {
                     let rows = current.revision_with_current(&from, &selection, Unchanged::Drop)?;
-                    Ok(annotate_rows(rows, &current.config().mounts))
+                    annotate_rows(rows, &current.config().mounts)
                 },
             )?;
             (scope, rows)
@@ -114,7 +116,7 @@ pub fn diff(
                         &selection,
                         Unchanged::Drop,
                     )?;
-                    Ok(annotate_rows(rows, &config.mounts))
+                    annotate_rows(rows, &config.mounts)
                 },
             )?;
             (scope, rows)
@@ -138,11 +140,11 @@ pub fn diff(
 fn annotate_rows(
     rows: Vec<gat_engine::ChangedRow>,
     mounts: &gat_core::config::MountsConfig,
-) -> Vec<DiffRow> {
+) -> Result<Vec<DiffRow>, DiffError> {
     if rows.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    let ownership = gat_engine::MountOwnership::new(mounts);
+    let ownership = gat_engine::MountOwnership::new(mounts)?;
     let mut annotated = Vec::with_capacity(rows.len());
     for row in rows {
         let change = match row.change {
@@ -159,7 +161,7 @@ fn annotate_rows(
             change,
         });
     }
-    annotated
+    Ok(annotated)
 }
 
 #[cfg(test)]
@@ -183,7 +185,7 @@ mod tests {
             change,
         })
         .collect();
-        let annotated = annotate_rows(rows, &gat_core::config::MountsConfig::default());
+        let annotated = annotate_rows(rows, &gat_core::config::MountsConfig::default()).unwrap();
         let actual: Vec<_> = annotated
             .iter()
             .map(|row| (row.path.as_str(), row.change))

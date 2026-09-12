@@ -1092,8 +1092,8 @@ impl MountsConfig {
     /// however it got here -- layered global/project/local, or hand-edited
     /// directly into one `gat.yaml`) fails closed on any equal, ancestor, or
     /// descendant target overlap, not only a single proposed mutation.
-    /// [`Self::check_target`] validates one candidate target against every
-    /// *other* mount; this reuses it for every mount against every other,
+    /// Sort borrowed targets and scan prefix candidates in O(M log M) time,
+    /// without cloning paths or performing a pairwise scan,
     /// so a conflict introduced entirely outside `gat mount add`/`update`
     /// (e.g. hand-authored config, or two layers each individually valid
     /// but jointly overlapping after merge) is still caught before any
@@ -1101,8 +1101,29 @@ impl MountsConfig {
     /// collisions across layers are resolved by `Self::merged_with`
     /// before this ever runs, so this only ever sees one target per name.
     pub fn validate_effective(&self) -> std::result::Result<(), ConfigError> {
-        for (name, mount) in &self.by_name {
-            self.check_target(&mount.target, Some(name))?;
+        let mut ordered: Vec<_> = self.by_name.iter().collect();
+        ordered.sort_unstable_by(|(a_name, a), (b_name, b)| {
+            a.target.cmp(&b.target).then_with(|| a_name.cmp(b_name))
+        });
+        let mut candidates: Vec<(&crate::name::MountName, &MountConfig)> = Vec::new();
+        for (name, mount) in ordered {
+            while candidates
+                .last()
+                .is_some_and(|(_, prior)| !mount.target.as_str().starts_with(prior.target.as_str()))
+            {
+                candidates.pop();
+            }
+            if let Some((other_name, other)) = candidates.last()
+                && mount.target.is_or_under(&other.target)
+            {
+                return Err(ConfigError::MountTargetOverlap {
+                    name: Some(name.to_string()),
+                    target: mount.target.to_string(),
+                    other_name: other_name.to_string(),
+                    other_target: other.target.to_string(),
+                });
+            }
+            candidates.push((name, mount));
         }
         Ok(())
     }

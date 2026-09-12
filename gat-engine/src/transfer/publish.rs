@@ -483,11 +483,13 @@ pub fn publish_window(
                     RemoteCompletion::Verification { oids, result } => {
                         state.verification_active = false;
                         let error_index = state.verification_error_index(&oids);
+                        let result = result.and_then(|completed| {
+                            services
+                                .cache_session
+                                .commit_verification(services.cache_root, completed)
+                        });
                         match result {
-                            Ok(completed) => {
-                                let verified = services
-                                    .cache_session
-                                    .commit_verification(services.cache_root, completed);
+                            Ok(verified) => {
                                 assert_eq!(
                                     verified.len(),
                                     oids.len(),

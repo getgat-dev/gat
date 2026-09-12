@@ -60,6 +60,8 @@ type Result<T> = std::result::Result<T, PathPolicyError>;
 #[derive(Debug, thiserror::Error)]
 pub enum PathPolicyError {
     #[error(transparent)]
+    Config(#[from] gat_core::config::ConfigError),
+    #[error(transparent)]
     Identity(#[from] super::remote_catalog::RemoteIdentityError),
     /// A configured route names a remote that isn't in `remotes.by_name`.
     #[error(
@@ -145,10 +147,10 @@ pub struct MountOwnership {
 }
 
 impl MountOwnership {
-    /// Compile non-overlapping targets from validated effective mounts.
-    #[must_use]
-    pub fn new(mounts: &gat_core::config::MountsConfig) -> Self {
-        Self {
+    /// Validate effective mount targets and compile indexed ownership.
+    pub fn new(mounts: &gat_core::config::MountsConfig) -> Result<Self> {
+        mounts.validate_effective()?;
+        Ok(Self {
             mounts: PathPrefixMap::from_entries(
                 mounts
                     .by_name
@@ -156,7 +158,7 @@ impl MountOwnership {
                     .map(|(name, mount)| (mount.target.clone(), name.clone()))
                     .collect(),
             ),
-        }
+        })
     }
 
     /// The mount containing or equal to this path, or none for root ownership.
@@ -332,7 +334,7 @@ impl EffectivePathPolicy {
         test_support::record_policy_compilation();
         let route_identities =
             super::remote_catalog::IdentityRange::allocate(config.routes.by_name.len())?;
-        let mounts = MountOwnership::new(&config.mounts);
+        let mounts = MountOwnership::new(&config.mounts)?;
         let mut routes = HashMap::with_capacity(config.routes.by_name.len());
         let mut route_descriptors = Vec::with_capacity(config.routes.by_name.len());
         for (name, route) in &config.routes.by_name {
@@ -663,6 +665,37 @@ mod tests {
     }
 
     #[test]
+    fn ownership_compilation_rejects_overlapping_raw_configuration() {
+        for targets in [
+            ["data", "data/nested"],
+            ["data/nested", "data"],
+            ["data", "data"],
+        ] {
+            let mounts = MountsConfig {
+                by_name: [
+                    (gat_core::name::MountName::from("aaa"), mount(targets[0])),
+                    (gat_core::name::MountName::from("zzz"), mount(targets[1])),
+                ]
+                .into_iter()
+                .collect(),
+            };
+            assert!(matches!(
+                MountOwnership::new(&mounts),
+                Err(PathPolicyError::Config(_))
+            ));
+            let config = Config {
+                mounts,
+                ..Config::default()
+            };
+            let catalog = RemoteCatalog::from_config(&config.remotes).unwrap();
+            assert!(matches!(
+                EffectivePathPolicy::from_config(&config, &catalog),
+                Err(PathPolicyError::Config(_))
+            ));
+        }
+    }
+
+    #[test]
     fn owner_for_path_reports_the_owning_mount_name_and_target() {
         let cfg = Config {
             mounts: MountsConfig {
@@ -712,7 +745,7 @@ mod tests {
             mounts: MountsConfig { by_name: mounts },
             ..Config::default()
         };
-        let ownership = MountOwnership::new(&cfg.mounts);
+        let ownership = MountOwnership::new(&cfg.mounts).unwrap();
         for raw in [
             "vendor/target-150",
             "vendor/target-150/weights.bin",

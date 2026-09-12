@@ -104,6 +104,8 @@ pub enum StatusOutcome {
 #[derive(Debug, thiserror::Error)]
 pub enum StatusError {
     #[error(transparent)]
+    Policy(#[from] gat_engine::PathPolicyError),
+    #[error(transparent)]
     Snapshot(#[from] gat_engine::RepoSnapshotError),
     #[error(transparent)]
     Repository(#[from] gat_engine::RepositoryError),
@@ -143,7 +145,7 @@ pub fn status(
         });
     }
 
-    let ownership = gat_engine::MountOwnership::new(&config.mounts);
+    let ownership = gat_engine::MountOwnership::new(&config.mounts)?;
     let cache = current.cache_presence();
     let rows = with_progress_typed(
         progress,
