@@ -165,7 +165,7 @@ pub use compare::{
 pub use config_file::{
     ConfigFileLoadError, ConfigFileSaveError, load as load_config_file, save as save_config_file,
 };
-pub use desired_operation::DesiredOperation;
+pub use desired_operation::{DesiredOperation, SelectionOperation};
 pub use desired_snapshot::DesiredView;
 pub use excludes::SyncStatus as ExcludesSyncStatus;
 pub use gc::{
@@ -203,7 +203,9 @@ pub use path_policy::{
     EffectivePathPolicy, MountOwnership, PathPolicyError, ResolvedRemote,
     UnknownRemoteOverrideError,
 };
-pub use remote_catalog::{RemoteCatalog, RemoteCatalogError, RemoteId, RemoteUrlValidationError};
+pub use remote_catalog::{
+    RemoteCatalog, RemoteCatalogError, RemoteId, RemoteIdentityError, RemoteUrlValidationError,
+};
 pub use remote_open::{RemoteOpenError, RemoteOpenFailureKind};
 pub use remote_session::RemoteSessionError;
 pub use repo_snapshot::{

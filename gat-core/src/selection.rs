@@ -123,7 +123,7 @@ impl Selection {
     /// The portion of `candidate` relative to the scope, if `candidate` is
     /// in scope -- exposed for `mount add`, which reparents each selected
     /// source path under a destination `PREFIX`. Root scope yields the
-    /// whole path; an exact-file scope yields the empty string; a
+    /// whole path; an exact-file scope yields [`crate::lexical_path::GatSubpathRef::Root`]; a
     /// directory scope yields the path beneath it. `None` when out of
     /// scope. This is the pre-filter relative path; callers that also need
     /// include/exclude filtering should gate on [`Selection::matches`].
@@ -131,8 +131,16 @@ impl Selection {
     pub fn reparent_relative<'a>(
         &self,
         candidate: &'a crate::lexical_path::GatPath,
-    ) -> Option<&'a str> {
-        self.relative(candidate.as_str())
+    ) -> Option<crate::lexical_path::GatSubpathRef<'a>> {
+        self.relative(candidate.as_str()).map(|relative| {
+            if relative.is_empty() {
+                crate::lexical_path::GatSubpathRef::Root
+            } else {
+                crate::lexical_path::GatSubpathRef::Path(
+                    crate::lexical_path::GatPathRef::from_validated(relative),
+                )
+            }
+        })
     }
 
     /// The portion of `candidate` relative to the scope, if `candidate` is

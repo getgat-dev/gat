@@ -49,6 +49,8 @@ pub struct MissingRemoteConfigError {
 #[derive(Debug, thiserror::Error)]
 pub enum RemoteStatusError {
     #[error(transparent)]
+    Identity(#[from] gat_engine::RemoteIdentityError),
+    #[error(transparent)]
     Repository(Box<gat_engine::RepositoryError>),
     #[error(transparent)]
     Acquisition(#[from] Box<gat_engine::RepoSnapshotError>),
@@ -91,7 +93,7 @@ pub fn remote_status_with_desired_operation(
     request: RemoteStatusRequest<'_>,
     progress: &dyn ProgressReporter,
 ) -> Result<RemoteStatusOutcome, RemoteStatusError> {
-    let (operation, desired_view) = desired.split_for_selection();
+    let (mut operation, desired_view) = desired.split_for_selection();
     let ResolvedSelection { selection, scope } =
         selection::resolve(request.selection, operation.config())?;
     let repo = operation.repo();
@@ -130,7 +132,7 @@ pub fn remote_status_with_desired_operation(
         window.record(
             key,
             || StatusObligation { object, remote },
-            |batch| run_status_window(operation, batch, &mut checked, &mut missing, &task),
+            |batch| run_status_window(&mut operation, batch, &mut checked, &mut missing, &task),
         )
     };
 
@@ -141,8 +143,9 @@ pub fn remote_status_with_desired_operation(
         false
     };
 
-    window
-        .finish(|batch| run_status_window(operation, batch, &mut checked, &mut missing, &task))?;
+    window.finish(|batch| {
+        run_status_window(&mut operation, batch, &mut checked, &mut missing, &task)
+    })?;
     checking.finish();
 
     Ok(RemoteStatusOutcome {
@@ -174,7 +177,7 @@ impl RemotePresenceObligation for StatusObligation {
 }
 
 fn run_status_window(
-    operation: &mut gat_engine::Operation<'_>,
+    operation: &mut gat_engine::SelectionOperation<'_, '_>,
     batch: gat_engine::WindowBatch<'_, StatusObligation>,
     checked: &mut usize,
     missing: &mut Vec<MissingRemoteObject>,
@@ -212,8 +215,8 @@ fn run_status_window(
             let object = obligation.object;
             missing.push(MissingRemoteObject {
                 object,
-                remote_name: catalog.remote_name(remote.id()),
-                route: policy.route_name(&remote).cloned(),
+                remote_name: catalog.remote_name(remote.id())?,
+                route: policy.route_name(&remote)?.cloned(),
             });
         }
     }

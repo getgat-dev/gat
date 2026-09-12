@@ -2215,16 +2215,15 @@ fn repair_continues_after_missing_and_mismatched_objects_with_one_transfer_slot(
         // One slot forces failures to finish before the valid objects start.
         // Exercise both one shared window and four successive windows.
         let limits = ExecutionLimits::for_test(window, 10_000, 4096, 1, 1);
-        let mut desired =
-            DesiredOperation::acquire_with_limits(&repo, &NoopProgress, limits).unwrap();
+        let desired = DesiredOperation::acquire_with_limits(&repo, &NoopProgress, limits).unwrap();
         let progress = RecordingProgress::new();
         let task = progress.begin(ProgressSpec::items(
             ProgressOperation::Repairing,
             gat_core::progress::ProgressUnit::Entries,
             Some(4),
         ));
-        let (operation, _) = desired.split_for_selection();
-        let outcome = repair_corrupted(operation, None, &corrupted, &task.handle());
+        let mut operation = desired.finish_selection();
+        let outcome = repair_corrupted(&mut operation, None, &corrupted, &task.handle());
         drop(task);
         assert_eq!(outcome.repaired, 2);
         assert_eq!(outcome.failures.len(), 2);

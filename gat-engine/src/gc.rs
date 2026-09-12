@@ -516,7 +516,9 @@ fn gc_remote_with_limits(
     )
     .open(&catalog, remote_id, Some(&listing.handle()))
     .map_err(|source| GcError::RemoteOpen {
-        remote_name: catalog.remote_name(remote_id),
+        remote_name: catalog
+            .remote_name(remote_id)
+            .expect("remote resolved in this catalog"),
         source,
     })?;
     let executor = crate::remote_executor::RemoteExecutor::with_cancellation(
@@ -526,8 +528,8 @@ fn gc_remote_with_limits(
     let candidates = collect_remote_candidates(&keep, |record| {
         visit_remote_oids(&remote, &executor, &listing.handle(), record)
     })?;
-    listing.finish();
     drop(keep);
+    listing.finish();
     let task = progress.begin(ProgressSpec::items(
         ProgressOperation::GarbageCollecting,
         ProgressUnit::Objects,

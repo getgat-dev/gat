@@ -49,6 +49,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// mapping from a variant to its rendered presentation line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProgressOperation {
+    /// Acquiring repository and configuration authority before state capture.
+    WaitingForRepository,
+    /// Comparing tracked snapshots, including validation and result preparation.
+    ComparingState,
     /// Loading or refreshing tracked/materialized state (`gat.lock`,
     /// the materialized-state database, or both).
     LoadingState,

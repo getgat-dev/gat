@@ -170,7 +170,7 @@ fn certified_lookup_uses_decoded_paths_and_handles_missing_keys() {
     for expected in &lock.entries {
         assert_eq!(
             view.find(expected.path.as_str()),
-            Some((expected.path.as_str(), expected.oid))
+            Some((expected.path.as_borrowed(), expected.oid))
         );
     }
     for missing in [

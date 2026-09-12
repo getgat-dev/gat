@@ -27,6 +27,7 @@ impl From<UnknownRemoteOverrideError> for Failure {
 impl From<PathPolicyError> for Failure {
     fn from(err: PathPolicyError) -> Self {
         match &err {
+            PathPolicyError::Identity(source) => (*source).into(),
             PathPolicyError::UnknownRouteRemote {
                 route_name, remote, ..
             } => Self::expected(

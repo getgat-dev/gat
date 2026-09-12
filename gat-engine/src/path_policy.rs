@@ -59,6 +59,8 @@ type Result<T> = std::result::Result<T, PathPolicyError>;
 /// the already-compiled [`RemoteCatalog`].
 #[derive(Debug, thiserror::Error)]
 pub enum PathPolicyError {
+    #[error(transparent)]
+    Identity(#[from] super::remote_catalog::RemoteIdentityError),
     /// A configured route names a remote that isn't in `remotes.by_name`.
     #[error(
         "route `{route_name}` (`{route_path}`) names remote `{remote}`, which is not configured"
@@ -172,6 +174,7 @@ impl MountOwnership {
 /// independent -- ownership decides mutation authority, routing decides object
 /// storage -- and neither result is written back into any desired-state row.
 pub struct EffectivePathPolicy {
+    route_identities: super::remote_catalog::IdentityRange,
     mounts: MountOwnership,
     /// Keyed by route path, valued by the route's compact identity
     /// ([`RouteId`]) and the remote already compiled to a [`RemoteId`]
@@ -327,6 +330,8 @@ impl EffectivePathPolicy {
     pub fn from_config(config: &Config, catalog: &RemoteCatalog) -> Result<Self> {
         #[cfg(any(test, feature = "test-support"))]
         test_support::record_policy_compilation();
+        let route_identities =
+            super::remote_catalog::IdentityRange::allocate(config.routes.by_name.len())?;
         let mounts = MountOwnership::new(&config.mounts);
         let mut routes = HashMap::with_capacity(config.routes.by_name.len());
         let mut route_descriptors = Vec::with_capacity(config.routes.by_name.len());
@@ -338,7 +343,7 @@ impl EffectivePathPolicy {
                     remote: route.remote.to_string(),
                 }
             })?;
-            let id = RouteId(route_descriptors.len());
+            let id = RouteId(route_identities.id(route_descriptors.len()));
             route_descriptors.push(RouteDescriptor {
                 name: name.clone(),
                 path: route.path.clone(),
@@ -358,6 +363,7 @@ impl EffectivePathPolicy {
             })
             .transpose()?;
         Ok(Self {
+            route_identities,
             mounts,
             routes: PathPrefixMap::from_entries(routes),
             route_descriptors,
@@ -372,16 +378,42 @@ impl EffectivePathPolicy {
     /// this.
     #[must_use]
     pub(crate) fn route_descriptor(&self, id: RouteId) -> &RouteDescriptor {
-        &self.route_descriptors[id.0]
+        &self.route_descriptors[self
+            .route_identities
+            .index(id.0)
+            .expect("route identity checked before use")]
     }
 
     /// The route that selected this remote, borrowed from the same policy
     /// that resolved it. Explicit overrides and default remotes have no route.
     /// The lookup does not clone the name or repeat route resolution.
-    #[must_use]
+    /// A route from another policy is rejected even when its name is identical.
     #[inline]
-    pub fn route_name(&self, remote: &ResolvedRemote) -> Option<&gat_core::name::RouteName> {
-        remote.route.map(|id| &self.route_descriptors[id.0].name)
+    pub fn route_name(
+        &self,
+        remote: &ResolvedRemote,
+    ) -> std::result::Result<
+        Option<&gat_core::name::RouteName>,
+        super::remote_catalog::RemoteIdentityError,
+    > {
+        remote
+            .route
+            .map(|id| {
+                self.route_identities
+                    .index(id.0)
+                    .map(|index| &self.route_descriptors[index].name)
+            })
+            .transpose()
+    }
+
+    pub(crate) fn validate_remote(
+        &self,
+        remote: &ResolvedRemote,
+    ) -> std::result::Result<(), super::remote_catalog::RemoteIdentityError> {
+        if let Some(id) = remote.route {
+            self.route_identities.index(id.0)?;
+        }
+        Ok(())
     }
 
     /// The mount that owns `path` (equal to, or nested beneath, its target),
@@ -511,6 +543,30 @@ mod tests {
     }
 
     #[test]
+    fn route_names_reject_another_policy_even_with_the_same_catalog() {
+        let (first, catalog) = policy_with_routes(&[("data", "bulk")], None);
+        let remote = first
+            .resolved_remote_for_path(&catalog, None, &gp("data/file"))
+            .unwrap()
+            .unwrap();
+        let mut config = Config::default();
+        config.routes.by_name.insert(
+            RouteName::from("another-route"),
+            RouteConfig {
+                path: gp("data"),
+                remote: rn("bulk"),
+            },
+        );
+        let second = EffectivePathPolicy::from_config(&config, &catalog).unwrap();
+        assert_eq!(
+            second.route_name(&remote),
+            Err(super::super::remote_catalog::RemoteIdentityError::ForeignOwner)
+        );
+        assert_eq!(first.route_name(&remote).unwrap().unwrap().as_str(), "data");
+        assert_eq!(std::mem::size_of::<RouteId>(), std::mem::size_of::<usize>());
+    }
+
+    #[test]
     fn remote_for_path_prefers_explicit_then_most_specific_route_then_default() {
         let (policy, catalog) = policy_with_routes(
             &[
@@ -571,7 +627,7 @@ mod tests {
             .unwrap();
         assert_eq!(routed.id, catalog.id_of(&rn("bulk")).unwrap());
         assert_eq!(&*catalog.name(routed.id), "bulk");
-        let route_name = policy.route_name(&routed).unwrap();
+        let route_name = policy.route_name(&routed).unwrap().unwrap();
         assert_eq!(route_name.as_str(), "vendor");
         assert!(std::ptr::eq(
             route_name,
@@ -583,13 +639,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(defaulted.id, catalog.id_of(&rn("origin")).unwrap());
-        assert_eq!(policy.route_name(&defaulted), None);
+        assert_eq!(policy.route_name(&defaulted).unwrap(), None);
 
         let overridden = policy
             .resolved_remote_for_path(&catalog, Some(&rn("origin")), &gp("vendor/a.bin"))
             .unwrap()
             .unwrap();
-        assert_eq!(policy.route_name(&overridden), None);
+        assert_eq!(policy.route_name(&overridden).unwrap(), None);
     }
 
     /// An explicit `--remote` override naming a

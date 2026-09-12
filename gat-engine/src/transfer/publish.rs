@@ -373,6 +373,13 @@ pub fn publish_window(
         return Ok(PublishOutcome::default());
     }
 
+    for object in &objects {
+        operation
+            .remotes_catalog()
+            .validate_id(object.remote.id())
+            .and_then(|()| operation.policy().validate_remote(&object.remote))
+            .map_err(RemotePresenceError::Identity)?;
+    }
     let mut state = PipelineState::new(&objects);
 
     let services = operation.window_services();

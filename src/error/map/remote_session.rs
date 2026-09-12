@@ -5,8 +5,13 @@ use gat_engine::RemoteSessionError;
 
 impl From<RemoteSessionError> for Failure {
     fn from(err: RemoteSessionError) -> Self {
-        let kind = err.kind().clone();
-        let template = err.template().clone();
-        super::remote::semantic_remote_open_failure(&kind, &template, err)
+        match &err {
+            RemoteSessionError::Identity(source) => (*source).into(),
+            RemoteSessionError::Open { source } => {
+                let kind = source.kind().clone();
+                let template = source.template().clone();
+                super::remote::semantic_remote_open_failure(&kind, &template, err)
+            }
+        }
     }
 }

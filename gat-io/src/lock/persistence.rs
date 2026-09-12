@@ -378,7 +378,7 @@ pub enum ShardPublishPolicy {
 ///   - Missing: falls straight through to tier 3, no read attempted.
 ///   - Regular file, size differs from `rendered`: a definitive
 ///     zero-content-read inequality shortcut (the same one
-///     [`super::IdentityCheck::Hashed`]'s size-mismatch case uses on the
+///     [`super::IdentityCheck::SizeMismatch`] uses on the
 ///     read side) -- falls through to tier 3 without opening the file.
 ///   - Regular file, size matches: exactly one
 ///     [`crate::file_state::coherent_observation`] read, compared
@@ -801,8 +801,9 @@ fn decode_resident_shard(
     let placement_error = if file.shard_id.is_flat() {
         None
     } else {
-        view.rows()
-            .find_map(|(path, _)| check_shard_placement(file, file.shard_id.levels(), path).err())
+        view.rows().find_map(|(path, _)| {
+            check_shard_placement(file, file.shard_id.levels(), path.as_str()).err()
+        })
     };
     Ok(ResidentShard {
         view,
@@ -815,7 +816,13 @@ fn decode_resident_shard(
 /// can be repeated for emission without reading or decoding source bytes again.
 fn resident_rows(
     shards: &[ResidentShard],
-) -> impl Iterator<Item = (&str, gat_core::oid::Oid, usize)> {
+) -> impl Iterator<
+    Item = (
+        gat_core::lexical_path::GatPathRef<'_>,
+        gat_core::oid::Oid,
+        usize,
+    ),
+> {
     let mut cursors: Vec<_> = shards.iter().map(|shard| shard.view.rows()).collect();
     let mut heap = BinaryHeap::new();
     for (owner, cursor) in cursors.iter_mut().enumerate() {
@@ -858,6 +865,7 @@ fn certify_resident_shards(shards: &mut [ResidentShard]) -> Result<()> {
     let mut stack: Vec<&str> = Vec::new();
     let mut prefix_error = None;
     for (path, _, _) in resident_rows(shards) {
+        let path = path.as_str();
         if let Some(previous) = previous {
             if previous == path {
                 return Err(LockDomainError::PathInMultipleShards {
@@ -970,13 +978,13 @@ pub(crate) fn visit_lock_rows_validated(
     {
         #[cfg(any(test, feature = "test-support"))]
         super::test_support::record_selected_shard_parse();
-        if keep(path) {
+        if keep(path.as_str()) {
             visit(&super::entry_from_validated_parts(path, oid))?;
         }
     } else {
         // An absent exact path may be a directory selection.
         for (path, oid, _) in resident_rows(&resident) {
-            if keep(path) {
+            if keep(path.as_str()) {
                 visit(&super::entry_from_validated_parts(path, oid))?;
             }
         }

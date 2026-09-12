@@ -13,8 +13,7 @@ use gat_core::selection::Selection;
 use gat_engine::{
     DesiredOperation, HistoryError, PublishError, PublishObject, PublishStatus, RemoteCatalogError,
     RemoteId, RemotePresenceError, RemoteSessionError, Repository, ResolvedRemote, StreamingWindow,
-    UnknownRemoteOverrideError, UploadError, publish_window, visit_current_state_objects,
-    visit_history_objects,
+    UnknownRemoteOverrideError, UploadError, visit_current_state_objects, visit_history_objects,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -114,7 +113,7 @@ pub fn push_with_desired_operation(
     request: PushRequest<'_>,
     progress: &dyn ProgressReporter,
 ) -> Result<PushOutcome, PushError> {
-    let (operation, desired_view) = desired.split_for_selection();
+    let (mut operation, desired_view) = desired.split_for_selection();
     let repo = operation.repo();
     let ResolvedSelection { selection, scope } =
         selection::resolve(request.selection, operation.config())?;
@@ -167,7 +166,7 @@ pub fn push_with_desired_operation(
                 remote,
                 selected_index,
             },
-            |batch| run_push_window(operation, batch.drain(), &mut skipped, &task),
+            |batch| run_push_window(&mut operation, batch.drain(), &mut skipped, &task),
         )
     };
 
@@ -185,8 +184,8 @@ pub fn push_with_desired_operation(
         }
     };
 
-    window.finish(|batch| run_push_window(operation, batch.drain(), &mut skipped, &task))?;
-    pushing.finish();
+    window.finish(|batch| run_push_window(&mut operation, batch.drain(), &mut skipped, &task))?;
+    // Keep progress active while ordering potentially large skipped results.
 
     let total = root_owned_oids.len();
     if total == 0
@@ -213,7 +212,7 @@ struct PushObligation {
 }
 
 fn run_push_window(
-    operation: &mut gat_engine::Operation<'_>,
+    operation: &mut gat_engine::SelectionOperation<'_, '_>,
     obligations: std::vec::Drain<'_, PushObligation>,
     skipped: &mut Vec<(usize, PushSkip)>,
     task: &ProgressHandle,
@@ -238,7 +237,7 @@ fn run_push_window(
             )
         })
         .unzip();
-    let outcome = publish_window(operation, objects, task)?;
+    let outcome = operation.publish_window(objects, task)?;
     debug_assert_eq!(metadata.len(), outcome.statuses.len());
 
     let mut cache_skips = BTreeMap::<Oid, (usize, GatPath, PushSkipReason)>::new();

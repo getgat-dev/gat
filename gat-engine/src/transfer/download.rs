@@ -57,6 +57,7 @@ pub enum DownloadCacheFailureKind {
 /// Everything one bounded download window can fail with.
 #[derive(Debug)]
 pub enum DownloadError {
+    Identity(crate::RemoteIdentityError),
     Cancelled,
     RemoteOpen {
         remote_name: Arc<str>,
@@ -108,6 +109,7 @@ fn write_remote_context(
 impl std::fmt::Display for DownloadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Identity(source) => std::fmt::Display::fmt(source, f),
             Self::Cancelled => f.write_str("transfer cancelled"),
             Self::RemoteOpen {
                 remote_name,
@@ -155,6 +157,7 @@ impl std::fmt::Display for DownloadError {
 impl Error for DownloadError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Identity(source) => Some(source),
             Self::Cancelled => None,
             Self::RemoteOpen { source, .. } => Some(source.as_ref()),
             Self::RemoteRead { source, .. } | Self::Cache { source, .. } => Some(source.as_ref()),
@@ -321,6 +324,13 @@ pub fn download_window(
 ) -> Result<DownloadOutcome, DownloadError> {
     if objects.is_empty() {
         return Ok(DownloadOutcome::default());
+    }
+    for object in &objects {
+        operation
+            .remotes_catalog()
+            .validate_id(object.remote.id())
+            .and_then(|()| operation.policy().validate_remote(&object.remote))
+            .map_err(DownloadError::Identity)?;
     }
     let services = operation.window_services();
     let cache_writer = services.cache_root.writer();

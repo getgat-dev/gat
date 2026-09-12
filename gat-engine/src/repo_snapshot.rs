@@ -343,7 +343,7 @@ fn lock_and_load_config(
     repo: &Repo,
     progress: &dyn ProgressReporter,
 ) -> Result<(RepoLock, gat_core::config::Config)> {
-    let guard = repo.acquire_configuration_lock()?;
+    let guard = repo.acquire_configuration_lock_with_progress(progress)?;
     repo.mounts().recover_pending_locked(&guard, progress)?;
     repo.check_cancelled()?;
     let config = repo.load_config()?;
@@ -408,17 +408,17 @@ pub(crate) fn recover_and_pin_state(
         |_| -> Result<_> {
             let mut store = StateStore::open(repo.layout())?;
             let refreshed = refresh_desired_index(repo, &mut store)?;
+            // Pin the store's SQLite snapshot *before* releasing `_guard` below,
+            // so `config` and every later read through `store` are provably the
+            // same repository generation even if a concurrent mount mutation
+            // commits immediately after this function returns (see
+            // `StateStore::pin_snapshot`) -- without this, `store` was
+            // just a plain connection whose later reads could observe a newer
+            // generation than the identity refresh already returned above.
+            store.pin_snapshot()?;
             Ok((store, refreshed))
         },
     )?;
-    // Pin the store's SQLite snapshot *before* releasing `_guard` below,
-    // so `config` and every later read through `store` are provably the
-    // same repository generation even if a concurrent mount mutation
-    // commits immediately after this function returns (see
-    // `StateStore::pin_snapshot`) -- without this, `store` was
-    // just a plain connection whose later reads could observe a newer
-    // generation than the identity refresh already returned above.
-    store.pin_snapshot()?;
     Ok((config, store, refreshed))
 }
 

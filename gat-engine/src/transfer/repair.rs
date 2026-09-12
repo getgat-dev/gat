@@ -53,6 +53,7 @@ pub enum RepairCacheFailureKind {
 /// One best-effort repair attempt's terminal failure.
 #[derive(Debug)]
 pub enum RepairError {
+    Identity(crate::RemoteIdentityError),
     Cancelled,
     RemoteOpen {
         remote_name: Arc<str>,
@@ -88,6 +89,7 @@ pub enum RepairError {
 impl std::fmt::Display for RepairError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Identity(source) => std::fmt::Display::fmt(source, f),
             Self::Cancelled => f.write_str("repair cancelled"),
             Self::RemoteOpen { path, .. } => {
                 write!(f, "could not open the remote to repair `{path}` from")
@@ -116,6 +118,7 @@ impl std::fmt::Display for RepairError {
 impl Error for RepairError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Identity(source) => Some(source),
             Self::Cancelled => None,
             Self::RemoteOpen { source, .. } => Some(source.as_ref()),
             Self::RemoteRead { source, .. } => Some(source.as_ref()),
@@ -268,6 +271,20 @@ pub fn repair_window(
     #[cfg(any(test, feature = "test-support"))]
     test_support::record_window_size(objects.len());
 
+    if let Some(error) = objects.iter().find_map(|object| {
+        operation
+            .remotes_catalog()
+            .validate_id(object.remote.id())
+            .and_then(|()| operation.policy().validate_remote(&object.remote))
+            .err()
+    }) {
+        return RepairOutcome {
+            results: objects
+                .iter()
+                .map(|_| Err(RepairError::Identity(error)))
+                .collect(),
+        };
+    }
     let services = operation.window_services();
     let cache_writer = services.cache_root.writer();
     let distinct_ids: BTreeSet<RemoteId> =

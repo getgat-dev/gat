@@ -53,6 +53,8 @@ use std::time::Duration;
 /// `crate::progress` itself has no wording method on this type.
 fn operation_line(operation: ProgressOperation) -> UserLine {
     UserLine::authored(match operation {
+        ProgressOperation::WaitingForRepository => "waiting for repository",
+        ProgressOperation::ComparingState => "comparing tracked state",
         ProgressOperation::LoadingState => "loading tracked state",
         ProgressOperation::DiscoveringFiles => "discovering files",
         ProgressOperation::ResolvingSelection => "resolving selection",

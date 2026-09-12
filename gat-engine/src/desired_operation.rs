@@ -54,6 +54,81 @@ pub struct DesiredOperation<'repo> {
     desired: DesiredSnapshot,
 }
 
+/// Transfer access during selection. Reconciliation requires consuming
+/// `DesiredOperation::finish_selection` to release its desired-state snapshot.
+///
+/// ```compile_fail
+/// use gat_engine::{DesiredOperation, SyncOptions, sync_from_snapshot};
+/// fn mutate(desired: &mut DesiredOperation<'_>) {
+///     let (mut transfers, view) = desired.split_for_selection();
+///     sync_from_snapshot(&mut transfers, &SyncOptions::default(), None);
+///     std::hint::black_box(view);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use gat_engine::DesiredOperation;
+/// fn reshape(desired: &mut DesiredOperation<'_>) {
+///     let (mut transfers, _) = desired.split_for_selection();
+///     transfers.reshape_lock_if_needed(|| {});
+/// }
+/// ```
+pub struct SelectionOperation<'op, 'repo> {
+    operation: &'op mut Operation<'repo>,
+}
+
+impl<'repo> SelectionOperation<'_, 'repo> {
+    #[must_use]
+    pub const fn repo(&self) -> &'repo Repo {
+        self.operation.repo()
+    }
+    #[must_use]
+    pub const fn config(&self) -> &gat_core::config::Config {
+        self.operation.config()
+    }
+    #[must_use]
+    pub const fn policy(&self) -> &crate::EffectivePathPolicy {
+        self.operation.policy()
+    }
+    #[must_use]
+    pub const fn remotes_catalog(&self) -> &crate::RemoteCatalog {
+        self.operation.remotes_catalog()
+    }
+    #[must_use]
+    pub const fn limits(&self) -> &crate::ExecutionLimits {
+        self.operation.limits()
+    }
+    pub fn validate_remote(
+        &self,
+        id: crate::RemoteId,
+    ) -> std::result::Result<(), crate::RemoteSessionError> {
+        self.operation.validate_remote(id)
+    }
+    pub fn check_remote_presence_streaming<T: crate::RemotePresenceObligation>(
+        &mut self,
+        obligations: &[T],
+        on_result: impl FnMut(crate::RemotePresenceResult),
+        progress: &gat_core::progress::ProgressHandle,
+    ) -> std::result::Result<(), crate::RemotePresenceError> {
+        self.operation
+            .check_remote_presence_streaming(obligations, on_result, progress)
+    }
+    pub fn download_window(
+        &mut self,
+        objects: Vec<crate::DownloadObject>,
+        progress: &gat_core::progress::ProgressHandle,
+    ) -> std::result::Result<crate::DownloadOutcome, crate::DownloadError> {
+        crate::download_window(self.operation, objects, progress)
+    }
+    pub fn publish_window(
+        &mut self,
+        objects: Vec<crate::PublishObject>,
+        progress: &gat_core::progress::ProgressHandle,
+    ) -> std::result::Result<crate::PublishOutcome, crate::PublishError> {
+        crate::publish_window(self.operation, objects, progress)
+    }
+}
+
 impl<'repo> DesiredOperation<'repo> {
     /// Builds a `DesiredOperation` from an already-captured `operation` and
     /// `desired` snapshot -- the same coherent-generation pair
@@ -116,18 +191,19 @@ impl<'repo> DesiredOperation<'repo> {
         self.desired.view()
     }
 
-    /// Splits this `DesiredOperation` into disjoint mutable/read-only
-    /// borrows of its two fields at once: a
-    /// caller that needs to both stream downloads through the mutable
-    /// `Operation` (opening the shared
-    /// `CacheClient`) *and* read rows through the still-alive
-    /// [`DesiredView`] in the same call cannot do so through two
-    /// sequential `&self`/`&mut self` method calls -- each would borrow
-    /// the whole `DesiredOperation`. Implemented here, inside this type's
-    /// own `impl` block, where the two fields are visibly disjoint to the
-    /// borrow checker.
-    pub const fn split_for_selection(&mut self) -> (&mut Operation<'repo>, DesiredView<'_>) {
-        (&mut self.operation, self.desired.view())
+    /// Borrows transfer access and desired rows together. The transfer
+    /// capability can update caches and remote objects, but cannot reconcile
+    /// the worktree or mutate the pinned desired-state mirror. Obtain the
+    /// full operation through [`Self::finish_selection`] before reconciliation.
+    pub const fn split_for_selection(
+        &mut self,
+    ) -> (SelectionOperation<'_, 'repo>, DesiredView<'_>) {
+        (
+            SelectionOperation {
+                operation: &mut self.operation,
+            },
+            self.desired.view(),
+        )
     }
 
     /// Ends desired-state selection explicitly: drops `self.desired` --

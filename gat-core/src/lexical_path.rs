@@ -29,7 +29,7 @@ pub type Result<T> = std::result::Result<T, LexicalPathError>;
 
 /// A validated, canonical, root-relative, `/`-separated Gat tracked-path.
 ///
-/// `GatPath` is the sole representation of a canonical Gat path: it is never
+/// `GatPath` owns a canonical Gat path; [`GatPathRef`] borrows one. It is never
 /// empty, never rooted, never contains `.`/`..` components, and never uses
 /// `\` as a separator. It is deliberately *not* `AsRef<Path>` or otherwise
 /// implicitly convertible to a host filesystem path -- Gat path identity is
@@ -54,6 +54,65 @@ pub type Result<T> = std::result::Result<T, LexicalPathError>;
 ///   caller's existing allocation instead of copying it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GatPath(String);
+
+/// A borrowed canonical path, certified once at its input boundary.
+///
+/// ```compile_fail
+/// use gat_core::lexical_path::{GatPath, GatPathRef};
+/// let base = GatPath::parse_canonical("data").unwrap();
+/// base.join_rel("../outside");
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct GatPathRef<'a>(&'a str);
+
+impl<'a> GatPathRef<'a> {
+    pub fn parse_canonical(raw: &'a str) -> Result<Self> {
+        validate_canonical_str(raw)?;
+        Ok(Self(raw))
+    }
+
+    pub(crate) const fn from_validated(raw: &'a str) -> Self {
+        Self(raw)
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'a str {
+        self.0
+    }
+
+    /// Copies a certified path once, without validating it again.
+    #[must_use]
+    #[inline]
+    pub fn to_owned(self) -> GatPath {
+        GatPath(self.0.to_owned())
+    }
+}
+
+impl AsRef<str> for GatPathRef<'_> {
+    fn as_ref(&self) -> &str {
+        self.0
+    }
+}
+
+impl std::ops::Deref for GatPathRef<'_> {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.0
+    }
+}
+
+impl PartialEq<&str> for GatPathRef<'_> {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+/// A certified suffix relative to a selection, including an exact scope match.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GatSubpathRef<'a> {
+    Root,
+    Path(GatPathRef<'a>),
+}
 
 impl GatPath {
     /// Normalize a user-supplied path into a canonical [`GatPath`], using
@@ -96,30 +155,17 @@ impl GatPath {
         Ok(Self(raw))
     }
 
-    /// Wraps `raw` as a [`GatPath`] without re-validating it, for callers
-    /// that have already established canonicality by some other proof
-    /// (e.g. `gat.lock` row parsing's non-allocating fast-path check, or a
-    /// prior successful [`GatPath::normalize`]/[`GatPath::parse_canonical`]
-    /// whose exact output text is being re-wrapped). Debug-asserts the
-    /// invariant so a caller that gets the proof wrong is still caught in
-    /// tests/debug builds, without paying for a second full validation
-    /// scan in release. Crate-private: this trades validation for
-    /// allocation-count, so it must never be reachable from a genuinely
-    /// untrusted or unvalidated string.
-    pub(crate) fn from_validated_canonical(raw: String) -> Self {
-        debug_assert!(
-            validate_canonical_str(&raw).is_ok(),
-            "from_validated_canonical called with a non-canonical path: {raw:?}"
-        );
-        Self(raw)
-    }
-
     /// The canonical `/`-separated path text. There is no implicit
     /// conversion to a host [`Path`]/[`std::path::PathBuf`] -- see
     /// `gat_io::WorktreeClient` for the explicit resolver boundary.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    #[must_use]
+    pub fn as_borrowed(&self) -> GatPathRef<'_> {
+        GatPathRef(&self.0)
     }
 
     /// Whether `self` is exactly `prefix` or a directory descendant of it
@@ -180,7 +226,8 @@ impl GatPath {
     /// for owners (e.g. mount-journal staging) that already hold a validated
     /// canonical suffix, not a general string-concatenation API.
     #[must_use]
-    pub fn join_rel(&self, rel: &str) -> Self {
+    pub fn join_rel(&self, rel: GatPathRef<'_>) -> Self {
+        let rel = rel.as_str();
         let mut joined = String::with_capacity(self.0.len() + 1 + rel.len());
         joined.push_str(&self.0);
         joined.push('/');
@@ -586,6 +633,36 @@ mod tests {
             LexicalPath::Path(path) => path.as_str().to_string(),
             LexicalPath::Empty => panic!("expected a canonical path"),
         }
+    }
+
+    #[test]
+    fn borrowed_paths_validate_before_joining_without_copying() {
+        for invalid in [
+            "",
+            ".",
+            "..",
+            "../outside",
+            "/root",
+            "a/../b",
+            "a//b",
+            "a\\b",
+        ] {
+            assert!(GatPathRef::parse_canonical(invalid).is_err(), "{invalid}");
+        }
+        let raw = String::from("nested/file");
+        let suffix = GatPathRef::parse_canonical(&raw).unwrap();
+        assert_eq!(suffix.as_str().as_ptr(), raw.as_ptr());
+        assert_eq!(
+            GatPath::parse_canonical("base")
+                .unwrap()
+                .join_rel(suffix)
+                .as_str(),
+            "base/nested/file"
+        );
+        assert_eq!(
+            std::mem::size_of::<GatPathRef<'_>>(),
+            std::mem::size_of::<&str>()
+        );
     }
 
     #[test]

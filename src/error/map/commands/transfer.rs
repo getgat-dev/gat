@@ -72,8 +72,9 @@ impl From<gat_engine::DownloadError> for Failure {
             path,
             ..
         } = &err
-            && let Some(diagnostic) =
-                super::super::remote::readiness_diagnostic(source.kind(), remote_name)
+            && let Some(diagnostic) = source
+                .kind()
+                .and_then(|kind| super::super::remote::readiness_diagnostic(kind, remote_name))
         {
             return Self::infrastructure(
                 diagnostic.with_subject(UserLine::path_text(path.as_str())),
@@ -83,6 +84,7 @@ impl From<gat_engine::DownloadError> for Failure {
         use gat_engine::{DownloadCacheFailureKind, DownloadError, DownloadRemoteFailureKind};
 
         match &err {
+            DownloadError::Identity(source) => (*source).into(),
             DownloadError::Cancelled => Self::expected(Diagnostic::new(
                 ErrorCode::Interrupted,
                 "Transfer cancelled",
@@ -94,7 +96,9 @@ impl From<gat_engine::DownloadError> for Failure {
                 path,
                 source,
             } => {
-                let code = super::super::remote::remote_open_code(source.kind());
+                let code = source
+                    .kind()
+                    .map_or(ErrorCode::Internal, super::super::remote::remote_open_code);
                 let description = remote_resolution_context_for(
                     remote_name,
                     route_name.as_ref().map(gat_core::name::RouteName::as_str),
@@ -180,8 +184,9 @@ impl From<gat_engine::UploadError> for Failure {
             path,
             ..
         } = &err
-            && let Some(diagnostic) =
-                super::super::remote::readiness_diagnostic(source.kind(), remote_name)
+            && let Some(diagnostic) = source
+                .kind()
+                .and_then(|kind| super::super::remote::readiness_diagnostic(kind, remote_name))
         {
             return Self::infrastructure(
                 diagnostic.with_subject(UserLine::path_text(path.as_str())),
@@ -203,6 +208,7 @@ impl From<gat_engine::UploadError> for Failure {
             primary = cause;
         }
         match primary {
+            UploadError::Identity(source) => (*source).into(),
             UploadError::Cancelled => Self::infrastructure(
                 if cleanup_failed {
                     Diagnostic::new(
@@ -280,7 +286,9 @@ impl From<gat_engine::UploadError> for Failure {
                 path,
                 source,
             } => {
-                let code = super::super::remote::remote_open_code(source.kind());
+                let code = source
+                    .kind()
+                    .map_or(ErrorCode::Internal, super::super::remote::remote_open_code);
                 let description = remote_resolution_context_for(
                     remote_name,
                     route_name.as_ref().map(gat_core::name::RouteName::as_str),
@@ -398,8 +406,9 @@ impl From<gat_engine::RemotePresenceError> for Failure {
             path,
             ..
         } = &err
-            && let Some(diagnostic) =
-                super::super::remote::readiness_diagnostic(source.kind(), remote_name)
+            && let Some(diagnostic) = source
+                .kind()
+                .and_then(|kind| super::super::remote::readiness_diagnostic(kind, remote_name))
         {
             return Self::infrastructure(
                 diagnostic.with_subject(UserLine::path_text(path.as_str())),
@@ -407,6 +416,7 @@ impl From<gat_engine::RemotePresenceError> for Failure {
             );
         }
         let (code, action, remote_name, route_name, route, path) = match &err {
+            gat_engine::RemotePresenceError::Identity(source) => return (*source).into(),
             gat_engine::RemotePresenceError::Cancelled => {
                 return Self::expected(Diagnostic::new(
                     ErrorCode::Interrupted,
@@ -420,7 +430,9 @@ impl From<gat_engine::RemotePresenceError> for Failure {
                 path,
                 source,
             } => (
-                super::super::remote::remote_open_code(source.kind()),
+                source
+                    .kind()
+                    .map_or(ErrorCode::Internal, super::super::remote::remote_open_code),
                 "Could not open ",
                 remote_name,
                 route_name.as_ref(),

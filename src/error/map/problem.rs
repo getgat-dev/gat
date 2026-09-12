@@ -110,12 +110,13 @@ pub fn repair_problem(err: Arc<gat_command::RepairError>) -> UserProblem {
         }
         RepairError::MissingRemoteConfig(_) => "no remote is configured for this path",
         RepairError::DataPlane(source) => match source {
+            gat_engine::RepairError::Identity(_) => "remote or route belongs to another operation",
             gat_engine::RepairError::Cancelled => "repair cancelled",
             gat_engine::RepairError::RemoteOpen { source, .. } => match source.kind() {
-                gat_engine::RemoteOpenFailureKind::ReadinessTimedOut { .. } => {
+                Some(gat_engine::RemoteOpenFailureKind::ReadinessTimedOut { .. }) => {
                     "the remote readiness check timed out; check the credential provider and network access"
                 }
-                gat_engine::RemoteOpenFailureKind::PermissionDenied => {
+                Some(gat_engine::RemoteOpenFailureKind::PermissionDenied) => {
                     "permission denied while checking the remote; credentials must permit listing its root"
                 }
                 _ => "the remote could not be opened",

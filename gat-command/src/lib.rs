@@ -81,8 +81,8 @@ pub use saved_selection::{
 };
 pub use selection::SelectionScope;
 pub use status::{
-    CachePresence, LsFilesError, LsFilesOutcome, LsFilesRequest, StatusError, StatusOutcome,
-    StatusRequest, StatusRow, ls_files, status,
+    CachePresence, LsFilesError, LsFilesOutcome, LsFilesRequest, StatusChange, StatusError,
+    StatusOutcome, StatusRequest, StatusRow, ls_files, status,
 };
 pub use sync::{
     HookRequest, PullRequest, SyncError, SyncOutcome, SyncRequest, hook, pull,

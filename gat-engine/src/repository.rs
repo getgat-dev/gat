@@ -1,6 +1,7 @@
 //! Git repository discovery and semantic repository configuration access.
 
 use gat_core::config::{Config, ConfigScope};
+use gat_core::progress::{ProgressOperation, ProgressReporter, ProgressSpec, with_progress_typed};
 use gat_io::{AtomicError, RepoLock};
 use gat_io::{
     ConfigError, ConfigStore, ConfigWriteError, LockError, LockStore, ScopedConfigError,
@@ -455,6 +456,19 @@ impl Repository {
         visit: impl FnMut(gat_core::lock::Entry),
     ) -> Result<(), crate::RepositoryStateError> {
         crate::desired_snapshot::visit_current_desired_entries(self, selection, visit)
+    }
+
+    /// Report the potentially blocking acquisition separately from recovery,
+    /// which may open its own progress tasks once authority is held.
+    pub(crate) fn acquire_configuration_lock_with_progress(
+        &self,
+        progress: &dyn ProgressReporter,
+    ) -> Result<RepoLock, gat_io::AtomicError> {
+        with_progress_typed(
+            progress,
+            ProgressSpec::indeterminate(ProgressOperation::WaitingForRepository),
+            |_| self.acquire_configuration_lock(),
+        )
     }
 
     pub(crate) fn acquire_configuration_lock(&self) -> Result<RepoLock, gat_io::AtomicError> {

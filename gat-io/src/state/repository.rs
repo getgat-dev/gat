@@ -253,8 +253,9 @@ impl<'repo> DesiredStateSession<'repo> {
                         matches: true,
                         proof,
                         ..
-                    } => proof,
-                    crate::file_state::IdentityCheck::Hashed { matches: false, .. } => {
+                    } => Some(proof),
+                    crate::file_state::IdentityCheck::SizeMismatch
+                    | crate::file_state::IdentityCheck::Hashed { matches: false, .. } => {
                         return Ok(None);
                     }
                 };

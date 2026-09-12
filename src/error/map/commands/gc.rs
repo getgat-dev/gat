@@ -45,6 +45,9 @@ impl From<GcError> for Failure {
             GcError::Engine(engine) => match engine {
                 GcEngineError::Cancelled => Self::expected(Diagnostic::new(ErrorCode::Interrupted, "Garbage collection cancelled")),
                 GcEngineError::RemoteOpen { remote_name, source } => {
+                    let gat_engine::RemoteSessionError::Open { source } = source else {
+                        return source.clone().into();
+                    };
                     if let Some(diagnostic) = super::super::remote::readiness_diagnostic(source.kind(), remote_name.as_str()) {
                         Self::infrastructure(diagnostic, err)
                     } else {

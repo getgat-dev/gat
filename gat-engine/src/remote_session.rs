@@ -34,20 +34,29 @@ use std::sync::Arc;
 /// Everything opening or reusing a remote operator can fail with, without
 /// exposing the physical remote implementation above the engine boundary.
 #[derive(Clone, Debug)]
-pub struct RemoteSessionError {
-    source: Arc<crate::remote_open::RemoteOpenError>,
+pub enum RemoteSessionError {
+    Identity(crate::RemoteIdentityError),
+    Open {
+        source: Arc<crate::remote_open::RemoteOpenError>,
+    },
 }
 
 impl RemoteSessionError {
     /// Original endpoint template, retained without environment expansion.
     #[must_use]
-    pub fn template(&self) -> &gat_core::endpoint::RemoteUrlTemplate {
-        self.source.template()
+    pub fn template(&self) -> Option<&gat_core::endpoint::RemoteUrlTemplate> {
+        match self {
+            Self::Open { source } => Some(source.template()),
+            Self::Identity(_) => None,
+        }
     }
 
     #[must_use]
-    pub fn kind(&self) -> &crate::remote_open::RemoteOpenFailureKind {
-        self.source.kind()
+    pub fn kind(&self) -> Option<&crate::remote_open::RemoteOpenFailureKind> {
+        match self {
+            Self::Open { source } => Some(source.kind()),
+            Self::Identity(_) => None,
+        }
     }
 }
 
@@ -59,7 +68,10 @@ impl std::fmt::Display for RemoteSessionError {
 
 impl std::error::Error for RemoteSessionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.source.as_ref())
+        match self {
+            Self::Open { source } => Some(source.as_ref()),
+            Self::Identity(source) => Some(source),
+        }
     }
 }
 
@@ -175,6 +187,9 @@ impl RemoteSession {
         id: RemoteId,
         progress: Option<&ProgressHandle>,
     ) -> Result<gat_io::RemoteClient> {
+        catalog
+            .validate_id(id)
+            .map_err(RemoteSessionError::Identity)?;
         let resolver = self.resolver.clone();
         let options = self.options;
         self.open_with(id, |request_budget| {
@@ -236,7 +251,7 @@ impl RemoteSession {
             resolver,
             options,
         );
-        let client = result.map_err(|source| RemoteSessionError {
+        let client = result.map_err(|source| RemoteSessionError::Open {
             source: Arc::new(crate::remote_open::RemoteOpenError::from_io(
                 catalog.url(id),
                 source,
@@ -253,7 +268,7 @@ impl RemoteSession {
             if let Some(progress) = progress {
                 progress.set_activity(ProgressActivity::CheckingRemote);
             }
-            checked.map_err(|source| RemoteSessionError {
+            checked.map_err(|source| RemoteSessionError::Open {
                 source: Arc::new(crate::remote_open::RemoteOpenError::from_io(
                     catalog.url(id),
                     source.into(),
@@ -268,8 +283,11 @@ impl RemoteSession {
         id: RemoteId,
         resolver: &gat_io::TemplateResolver,
     ) -> Result<()> {
+        catalog
+            .validate_id(id)
+            .map_err(RemoteSessionError::Identity)?;
         gat_io::RemoteClient::validate(catalog.url(id).as_template_str(), resolver).map_err(
-            |source| RemoteSessionError {
+            |source| RemoteSessionError::Open {
                 source: Arc::new(crate::remote_open::RemoteOpenError::from_io(
                     catalog.url(id),
                     source,
@@ -404,6 +422,34 @@ mod tests {
         )
     }
 
+    #[test]
+    fn foreign_id_is_rejected_before_opening_or_reusing_a_client() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let dir = tempfile::tempdir().unwrap();
+        let url = gat_io::remote_file_url_for_test(dir.path());
+        let (owner, mut pool) = catalog_and_pool(&url);
+        let (foreign, _) = catalog_and_pool("unsupported://SYNTHETIC-SECRET");
+        let id = owner.id_of(&rn("a")).unwrap();
+        let before = test_support::remote_opens();
+        assert!(matches!(
+            pool.open(&foreign, id, None),
+            Err(RemoteSessionError::Identity(
+                crate::RemoteIdentityError::ForeignOwner
+            ))
+        ));
+        assert_eq!(test_support::remote_opens(), before);
+        pool.open(&owner, id, None).unwrap();
+        let after = test_support::remote_opens();
+        assert!(matches!(
+            pool.open(&foreign, id, None),
+            Err(RemoteSessionError::Identity(
+                crate::RemoteIdentityError::ForeignOwner
+            ))
+        ));
+        assert_eq!(test_support::remote_opens(), after);
+    }
+
     /// The whole point of `RemoteSession`: reusing operators by
     /// [`RemoteId`] means a command routing many objects to the same
     /// remote initializes it once, not once per obligation.
@@ -474,7 +520,7 @@ mod tests {
         let budget = std::time::Duration::from_millis(5);
         let first = pool
             .open_with(a, |_| {
-                Err(RemoteSessionError {
+                Err(RemoteSessionError::Open {
                     source: Arc::new(crate::remote_open::RemoteOpenError::from_io(
                         catalog.url(a),
                         gat_io::RemoteError::ReadinessTimedOut { budget }.into(),
@@ -488,9 +534,20 @@ mod tests {
                     panic!("failed readiness must not be attempted again")
                 })
                 .unwrap_err();
-            assert!(Arc::ptr_eq(&first.source, &error.source));
+            let (
+                RemoteSessionError::Open {
+                    source: first_source,
+                },
+                RemoteSessionError::Open {
+                    source: error_source,
+                },
+            ) = (&first, &error)
+            else {
+                panic!("expected opening errors")
+            };
+            assert!(Arc::ptr_eq(first_source, error_source));
             assert_eq!(
-                error.kind(),
+                error.kind().unwrap(),
                 &crate::remote_open::RemoteOpenFailureKind::ReadinessTimedOut { budget }
             );
         }
@@ -519,10 +576,10 @@ mod tests {
         let error = pool.open(&catalog, id, None).unwrap_err();
 
         assert!(matches!(
-            error.kind(),
+            error.kind().unwrap(),
             crate::remote_open::RemoteOpenFailureKind::DisallowedScheme
         ));
-        assert_eq!(error.template(), catalog.url(id));
+        assert_eq!(error.template().unwrap(), catalog.url(id));
         assert!(!format!("{error:?}").contains("SYNTHETIC-SECRET"));
         let chain =
             std::iter::successors(std::error::Error::source(&error), |source| source.source())

@@ -12,7 +12,7 @@ use gat_core::selection::Selection;
 use gat_engine::{
     DesiredOperation, DownloadError, DownloadObject, HistoryError, RemoteCatalogError,
     RemoteSessionError, Repository, SelectedObject, StreamingWindow, UnknownRemoteOverrideError,
-    download_window, visit_current_state_objects, visit_history_objects,
+    visit_current_state_objects, visit_history_objects,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -81,7 +81,7 @@ pub fn fetch_with_desired_operation(
     request: FetchRequest<'_>,
     progress: &dyn ProgressReporter,
 ) -> Result<FetchOutcome, FetchError> {
-    let (operation, desired_view) = desired.split_for_selection();
+    let (mut operation, desired_view) = desired.split_for_selection();
     let repo = operation.repo();
     let ResolvedSelection { selection, scope } =
         selection::resolve(request.selection, operation.config())?;
@@ -107,7 +107,7 @@ pub fn fetch_with_desired_operation(
             || object,
             |batch| {
                 run_fetch_window(
-                    operation,
+                    &mut operation,
                     batch.drain(),
                     request.remote,
                     &mut fetched,
@@ -137,7 +137,7 @@ pub fn fetch_with_desired_operation(
     let saw_any = window.unique_count() > 0;
     window.finish(|batch| {
         run_fetch_window(
-            operation,
+            &mut operation,
             batch.drain(),
             request.remote,
             &mut fetched,
@@ -159,7 +159,7 @@ pub fn fetch_with_desired_operation(
 }
 
 fn run_fetch_window(
-    operation: &mut gat_engine::Operation<'_>,
+    operation: &mut gat_engine::SelectionOperation<'_, '_>,
     objects: std::vec::Drain<'_, SelectedObject>,
     remote: Option<&RemoteName>,
     fetched: &mut usize,
@@ -183,7 +183,7 @@ fn run_fetch_window(
             })
             .collect::<Result<Vec<_>, FetchError>>()?
     };
-    *fetched += download_window(operation, downloads, task)?.downloaded;
+    *fetched += operation.download_window(downloads, task)?.downloaded;
     Ok(())
 }
 

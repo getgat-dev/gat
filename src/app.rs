@@ -566,8 +566,8 @@ pub enum Outcome {
 /// `progress` is the transient progress reporter for this invocation (a
 /// real terminal one, or a no-op) -- built once by the process adapter
 /// via `output::progress::for_environment` and threaded down to whichever
-/// commands can report something meaningful; commands that only need a
-/// generic spinner have it started here at the dispatch boundary instead.
+/// commands can report something meaningful. Acquisition and command
+/// orchestration own their sequential progress tasks.
 pub fn run(cli: Cli, context: &Context, progress: &dyn ProgressReporter) -> Result<Outcome> {
     let repo = &context.repo;
     let lifecycle_sink = &context.lifecycle;

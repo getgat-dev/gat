@@ -36,14 +36,22 @@ pub struct Entry {
 }
 
 /// Materialize an owned entry from a certified canonical path and decoded OID.
-/// An owned path is moved; a borrowed path is copied only at this boundary.
+/// The borrowed path is copied only at this boundary. Kept inlinable for
+/// storage readers that materialize each selected row across the crate boundary.
+///
+/// ```compile_fail
+/// use gat_core::lock::validated::entry_from_validated_parts;
+/// use gat_core::oid::Oid;
+/// entry_from_validated_parts("../outside", Oid::from_bytes([0; 32]));
+/// ```
 #[must_use]
-pub fn entry_from_validated_parts<'a>(
-    path: impl Into<std::borrow::Cow<'a, str>>,
+#[inline]
+pub fn entry_from_validated_parts(
+    path: crate::lexical_path::GatPathRef<'_>,
     oid: crate::oid::Oid,
 ) -> Entry {
     Entry {
-        path: crate::lexical_path::GatPath::from_validated_canonical(path.into().into_owned()),
+        path: path.to_owned(),
         oid,
     }
 }
@@ -237,7 +245,7 @@ impl<F: FnMut(&str) -> bool> Iterator for FilteredRowCursor<'_, F> {
     fn next(&mut self) -> Option<Entry> {
         while let Some((path, oid)) = self.view.row(self.next) {
             self.next += 1;
-            if (self.keep)(path) {
+            if (self.keep)(path.as_str()) {
                 return Some(entry_from_validated_parts(path, oid));
             }
         }
@@ -253,7 +261,7 @@ pub fn visit_rows_validated(
 ) -> Result<()> {
     let view = super::reader::ValidatedLockFile::parse(text)?;
     for (path, oid) in view.rows() {
-        if select(path, oid)? {
+        if select(path.as_str(), oid)? {
             visit(entry_from_validated_parts(path, oid))?;
         }
     }

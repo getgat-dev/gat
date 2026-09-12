@@ -70,8 +70,15 @@ pub fn diff(
             let current = repo.comparisons().current(progress)?;
             let ResolvedSelection { selection, scope } =
                 selection::resolve(selection.as_ref(), current.config())?;
-            let rows = current.revision_with_current(&from, &selection, Unchanged::Drop)?;
-            (scope, annotate_rows(rows, &current.config().mounts))
+            let rows = with_progress_typed(
+                progress,
+                ProgressSpec::indeterminate(ProgressOperation::ComparingState),
+                |_| -> Result<_, DiffError> {
+                    let rows = current.revision_with_current(&from, &selection, Unchanged::Drop)?;
+                    Ok(annotate_rows(rows, &current.config().mounts))
+                },
+            )?;
+            (scope, rows)
         }
         DiffTarget::Revision(revision) => {
             let config = repo.load_config()?;
@@ -79,13 +86,18 @@ pub fn diff(
                 selection::resolve(selection.as_ref(), &config)?;
             let rows = with_progress_typed(
                 progress,
-                ProgressSpec::indeterminate(ProgressOperation::LoadingState),
-                |_| {
-                    repo.comparisons()
-                        .revisions(&from, revision, &selection, Unchanged::Drop)
+                ProgressSpec::indeterminate(ProgressOperation::ComparingState),
+                |_| -> Result<_, DiffError> {
+                    let rows = repo.comparisons().revisions(
+                        &from,
+                        revision,
+                        &selection,
+                        Unchanged::Drop,
+                    )?;
+                    Ok(annotate_rows(rows, &config.mounts))
                 },
             )?;
-            (scope, annotate_rows(rows, &config.mounts))
+            (scope, rows)
         }
     };
 

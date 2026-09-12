@@ -77,6 +77,8 @@ type Result<T> = std::result::Result<T, RemoteCatalogError>;
 /// Every way compiling or resolving against a [`RemoteCatalog`] can fail.
 #[derive(Debug, thiserror::Error)]
 pub enum RemoteCatalogError {
+    #[error(transparent)]
+    Identity(#[from] RemoteIdentityError),
     /// `remotes.default` names a remote absent from `remotes.by_name`.
     #[error("remotes.default `{name}` is not a configured remote")]
     UnknownDefault { name: String },
@@ -90,6 +92,44 @@ pub enum RemoteCatalogError {
     /// configured catalog.
     #[error(transparent)]
     UnknownOverride(#[from] crate::path_policy::UnknownRemoteOverrideError),
+}
+
+/// Failure to use a remote or route identity within its owning snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum RemoteIdentityError {
+    #[error("identity belongs to another operation")]
+    ForeignOwner,
+    #[error("operation identity space exhausted")]
+    Exhausted,
+}
+
+/// Disjoint, never-reused identity ranges keep keys pointer-sized and Copy.
+/// Allocation occurs once per catalog/policy, never per selected row.
+#[derive(Debug)]
+pub(crate) struct IdentityRange {
+    start: usize,
+    len: usize,
+}
+
+impl IdentityRange {
+    pub(crate) fn allocate(len: usize) -> std::result::Result<Self, RemoteIdentityError> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let start = NEXT
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(len.max(1))
+            })
+            .map_err(|_| RemoteIdentityError::Exhausted)?;
+        Ok(Self { start, len })
+    }
+    pub(crate) const fn id(&self, index: usize) -> usize {
+        self.start + index
+    }
+    pub(crate) fn index(&self, id: usize) -> std::result::Result<usize, RemoteIdentityError> {
+        id.checked_sub(self.start)
+            .filter(|index| *index < self.len)
+            .ok_or(RemoteIdentityError::ForeignOwner)
+    }
 }
 
 /// A compact, `Copy`, operation-local identity for one configured remote --
@@ -146,6 +186,7 @@ struct RemoteSpec {
 /// ```
 #[derive(Debug)]
 pub struct RemoteCatalog {
+    identities: IdentityRange,
     specs: Vec<RemoteSpec>,
     by_name: HashMap<Arc<str>, RemoteId>,
     default: Option<RemoteId>,
@@ -171,10 +212,11 @@ impl RemoteCatalog {
                 url: remote.url.clone(),
             })
             .collect();
+        let identities = IdentityRange::allocate(specs.len())?;
         let by_name: HashMap<Arc<str>, RemoteId> = specs
             .iter()
             .enumerate()
-            .map(|(i, spec)| (Arc::clone(&spec.name), RemoteId(i)))
+            .map(|(i, spec)| (Arc::clone(&spec.name), RemoteId(identities.id(i))))
             .collect();
         let default = match remotes
             .default
@@ -189,6 +231,7 @@ impl RemoteCatalog {
             None => None,
         };
         Ok(Self {
+            identities,
             specs,
             by_name,
             default,
@@ -209,16 +252,30 @@ impl RemoteCatalog {
     /// interned exactly once at catalog compilation time.
     #[must_use]
     pub(crate) fn name(&self, id: RemoteId) -> Arc<str> {
-        Arc::clone(&self.specs[id.0].name)
+        Arc::clone(
+            &self.specs[self
+                .identities
+                .index(id.0)
+                .expect("remote identity checked before use")]
+            .name,
+        )
     }
 
     /// Reconstructs the semantic remote name for a command result or
     /// diagnostic boundary. Runtime routing, transfer obligations, and
     /// remote sessions retain [`RemoteId`] or an engine-internal interned
     /// name instead of allocating one typed name per selected object.
-    #[must_use]
-    pub fn remote_name(&self, id: RemoteId) -> RemoteName {
-        RemoteName::from(self.specs[id.0].name.as_ref())
+    /// Rejects identities minted by any other catalog, including an earlier snapshot.
+    pub fn remote_name(
+        &self,
+        id: RemoteId,
+    ) -> std::result::Result<RemoteName, RemoteIdentityError> {
+        let index = self.identities.index(id.0)?;
+        Ok(RemoteName::from(self.specs[index].name.as_ref()))
+    }
+
+    pub(crate) fn validate_id(&self, id: RemoteId) -> std::result::Result<(), RemoteIdentityError> {
+        self.identities.index(id.0).map(|_| ())
     }
 
     /// The raw configured URL for `id` (not yet `$ENV`-interpolated --
@@ -230,7 +287,11 @@ impl RemoteCatalog {
     /// boundary itself.
     #[must_use]
     pub(crate) fn url(&self, id: RemoteId) -> &RemoteUrlTemplate {
-        &self.specs[id.0].url
+        &self.specs[self
+            .identities
+            .index(id.0)
+            .expect("remote identity checked before use")]
+        .url
     }
 
     /// Resolves `explicit` (an optional `--remote` override) to a
@@ -278,6 +339,29 @@ mod tests {
     }
 
     #[test]
+    fn foreign_ids_never_resolve_even_after_the_owner_is_dropped() {
+        let owner = RemoteCatalog::from_config(&remotes(&["a"], None)).unwrap();
+        let id = owner.id_of(&rn("a")).unwrap();
+        for names in [&["a"][..], &["b"][..], &[][..]] {
+            let foreign = RemoteCatalog::from_config(&remotes(names, None)).unwrap();
+            assert_eq!(
+                foreign.remote_name(id),
+                Err(RemoteIdentityError::ForeignOwner)
+            );
+        }
+        drop(owner);
+        let replacement = RemoteCatalog::from_config(&remotes(&["a"], None)).unwrap();
+        assert_eq!(
+            replacement.remote_name(id),
+            Err(RemoteIdentityError::ForeignOwner)
+        );
+        assert_eq!(
+            std::mem::size_of::<RemoteId>(),
+            std::mem::size_of::<usize>()
+        );
+    }
+
+    #[test]
     fn every_configured_remote_gets_a_stable_distinct_id() {
         let catalog = RemoteCatalog::from_config(&remotes(&["a", "b", "c"], Some("b"))).unwrap();
         let a = catalog.id_of(&rn("a")).unwrap();
@@ -290,7 +374,7 @@ mod tests {
         assert_eq!(&*catalog.name(a), "a");
         assert_eq!(&*catalog.name(b), "b");
         assert_eq!(&*catalog.name(c), "c");
-        assert_eq!(catalog.remote_name(b), rn("b"));
+        assert_eq!(catalog.remote_name(b).unwrap(), rn("b"));
     }
 
     /// The catalog carries each remote's
