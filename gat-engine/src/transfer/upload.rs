@@ -60,6 +60,7 @@ pub enum UploadWriteFailureKind {
 /// Everything one bounded upload window can fail with.
 #[derive(Debug)]
 pub enum UploadError {
+    Identity(crate::RemoteIdentityError),
     Cancelled,
     FileWrite {
         kind: UploadWriteFailureKind,
@@ -149,6 +150,7 @@ fn write_remote_context(
 impl std::fmt::Display for UploadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Identity(source) => std::fmt::Display::fmt(source, f),
             Self::Cancelled => f.write_str("transfer cancelled"),
             Self::Cleanup { primary, .. } | Self::FileCleanup { primary, .. } => primary.fmt(f),
             Self::FileWrite { .. } => f.write_str("file upload failed"),
@@ -215,6 +217,7 @@ impl std::fmt::Display for UploadError {
 impl Error for UploadError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Identity(source) => Some(source),
             Self::Cancelled => None,
             Self::Cleanup { primary, .. } | Self::FileCleanup { primary, .. } => {
                 Some(primary.as_ref())

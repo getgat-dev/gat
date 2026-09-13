@@ -40,11 +40,51 @@ pub enum CachePresence {
     Missing,
 }
 
+/// Cache presence exists exactly for rows that still have tracked content.
+///
+/// ```compile_fail
+/// use gat_command::StatusChange;
+/// use gat_core::oid::Oid;
+/// let change = StatusChange::Added { oid: Oid::from_bytes([0; 32]) };
+/// ```
+///
+/// ```compile_fail
+/// use gat_command::{StatusChange, CachePresence};
+/// let change = StatusChange::Removed { cache: CachePresence::Present };
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusChange {
+    Added {
+        oid: gat_core::oid::Oid,
+        cache: CachePresence,
+    },
+    Modified {
+        oid: gat_core::oid::Oid,
+        cache: CachePresence,
+    },
+    Unchanged {
+        oid: gat_core::oid::Oid,
+        cache: CachePresence,
+    },
+    Removed,
+}
+
+impl StatusChange {
+    #[must_use]
+    pub const fn cache_presence(self) -> Option<CachePresence> {
+        match self {
+            Self::Added { cache, .. }
+            | Self::Modified { cache, .. }
+            | Self::Unchanged { cache, .. } => Some(cache),
+            Self::Removed => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StatusRow {
     pub path: GatPath,
-    pub change: RowChange,
-    pub cache_presence: Option<CachePresence>,
+    pub change: StatusChange,
     pub mount: Option<gat_core::name::MountName>,
 }
 
@@ -64,6 +104,8 @@ pub enum StatusOutcome {
 #[derive(Debug, thiserror::Error)]
 pub enum StatusError {
     #[error(transparent)]
+    Policy(#[from] gat_engine::PathPolicyError),
+    #[error(transparent)]
     Snapshot(#[from] gat_engine::RepoSnapshotError),
     #[error(transparent)]
     Repository(#[from] gat_engine::RepositoryError),
@@ -80,7 +122,20 @@ pub fn status(
     let config = current.config();
     let ResolvedSelection { selection, scope } =
         selection::resolve(request.selection.as_ref(), config)?;
-    let rows_by_path = current.staged_with_current(&selection, Unchanged::Keep)?;
+    // Snapshot validation, comparison, and result preparation all scale with
+    // tracked entries even when the desired-state mirror was already current.
+    let (rows_by_path, changes) = with_progress_typed(
+        progress,
+        ProgressSpec::indeterminate(ProgressOperation::ComparingState),
+        |_| -> Result<_, StatusError> {
+            let rows = current.staged_with_current(&selection, Unchanged::Keep)?;
+            let changes = rows
+                .iter()
+                .filter(|row| !matches!(row.change, RowChange::Unchanged { .. }))
+                .count();
+            Ok((rows, changes))
+        },
+    )?;
 
     if rows_by_path.is_empty() {
         return Ok(if scope == super::SelectionScope::Unrestricted {
@@ -90,14 +145,8 @@ pub fn status(
         });
     }
 
-    let ownership = gat_engine::MountOwnership::new(&config.mounts);
+    let ownership = gat_engine::MountOwnership::new(&config.mounts)?;
     let cache = current.cache_presence();
-    // Counting is pure and independent of parallel cache/ownership annotation.
-    // Avoid making every changed row contend on the same atomic counter.
-    let changes = rows_by_path
-        .iter()
-        .filter(|row| !matches!(row.change, RowChange::Unchanged { .. }))
-        .count();
     let rows = with_progress_typed(
         progress,
         ProgressSpec::items(
@@ -111,15 +160,27 @@ pub fn status(
             Ok(rows_by_path
                 .into_par_iter()
                 .map(|ChangedRow { path, change }| {
-                    let cache_presence = match &change {
-                        RowChange::Added { oid }
-                        | RowChange::Modified { oid }
-                        | RowChange::Unchanged { oid } => Some(if presence[oid] {
+                    let cache = |oid| {
+                        if presence[&oid] {
                             CachePresence::Present
                         } else {
                             CachePresence::Missing
-                        }),
-                        RowChange::Removed => None,
+                        }
+                    };
+                    let change = match change {
+                        RowChange::Added { oid } => StatusChange::Added {
+                            oid,
+                            cache: cache(oid),
+                        },
+                        RowChange::Modified { oid } => StatusChange::Modified {
+                            oid,
+                            cache: cache(oid),
+                        },
+                        RowChange::Unchanged { oid } => StatusChange::Unchanged {
+                            oid,
+                            cache: cache(oid),
+                        },
+                        RowChange::Removed => StatusChange::Removed,
                     };
                     inspect.inc(1);
                     StatusRow {
@@ -128,7 +189,6 @@ pub fn status(
                             .map(|owner| owner.name.clone()),
                         path,
                         change,
-                        cache_presence,
                     }
                 })
                 .collect())

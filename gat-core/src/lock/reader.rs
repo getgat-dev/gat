@@ -174,13 +174,20 @@ impl<'a> ValidatedLockFile<'a> {
 
     /// Iterate borrowed semantic rows after complete certification.
     #[must_use]
-    pub fn rows(&self) -> impl ExactSizeIterator<Item = (&str, Oid)> + '_ {
-        self.rows.iter().map(|row| (self.path(row), row.oid))
+    pub fn rows(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (crate::lexical_path::GatPathRef<'_>, Oid)> + '_ {
+        self.rows.iter().map(|row| {
+            (
+                crate::lexical_path::GatPathRef::from_validated(self.path(row)),
+                row.oid,
+            )
+        })
     }
 
     /// Find an exact decoded path in logarithmic time after complete certification.
     #[must_use]
-    pub fn find(&self, path: &str) -> Option<(&str, Oid)> {
+    pub fn find(&self, path: &str) -> Option<(crate::lexical_path::GatPathRef<'_>, Oid)> {
         let index = self
             .rows
             .binary_search_by(|row| self.path(row).cmp(path))
@@ -190,8 +197,13 @@ impl<'a> ValidatedLockFile<'a> {
 
     /// Borrow a certified row by its zero-based index.
     #[must_use]
-    pub fn row(&self, index: usize) -> Option<(&str, Oid)> {
-        self.rows.get(index).map(|row| (self.path(row), row.oid))
+    pub fn row(&self, index: usize) -> Option<(crate::lexical_path::GatPathRef<'_>, Oid)> {
+        self.rows.get(index).map(|row| {
+            (
+                crate::lexical_path::GatPathRef::from_validated(self.path(row)),
+                row.oid,
+            )
+        })
     }
 }
 
@@ -349,7 +361,10 @@ mod tests {
         let text = lock.to_string();
         let view = ValidatedLockFile::parse(&text).unwrap();
         paths.sort_unstable();
-        assert_eq!(view.rows().map(|(p, _)| p).collect::<Vec<_>>(), paths);
+        assert_eq!(
+            view.rows().map(|(p, _)| p.as_str()).collect::<Vec<_>>(),
+            paths
+        );
         for row in &view.rows {
             let path = view.path(row);
             assert_eq!(row.arena, path.bytes().any(|b| b < 32));

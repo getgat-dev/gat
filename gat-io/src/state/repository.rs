@@ -208,15 +208,10 @@ impl<'repo> DesiredStateSession<'repo> {
         } else {
             self.store.desired_rows(DesiredQuery::exact(&unresolved))?
         };
-        let mut desired_oid_by_path = HashMap::with_capacity(candidates.len());
-        for (path, desired_oid) in &candidates {
-            if let Some(oid) = desired_oid {
-                desired_oid_by_path.insert(path, oid);
-            }
-        }
-        for entry in &looked_up {
-            desired_oid_by_path.insert(&entry.path, &entry.oid);
-        }
+        let desired_oid_by_path = looked_up
+            .iter()
+            .map(|entry| (&entry.path, &entry.oid))
+            .collect::<HashMap<_, _>>();
 
         let paths = candidates
             .iter()
@@ -229,8 +224,11 @@ impl<'repo> DesiredStateSession<'repo> {
             .collect::<HashMap<_, _>>();
         let results = candidates
             .par_iter()
-            .map(|(path, _)| {
-                let Some(&desired_oid) = desired_oid_by_path.get(path) else {
+            .map(|(path, desired_oid)| {
+                let Some(desired_oid) = desired_oid
+                    .as_ref()
+                    .or_else(|| desired_oid_by_path.get(path).copied())
+                else {
                     return Ok(None);
                 };
                 let row = materialized_by_path.get(path).copied();
@@ -253,8 +251,9 @@ impl<'repo> DesiredStateSession<'repo> {
                         matches: true,
                         proof,
                         ..
-                    } => proof,
-                    crate::file_state::IdentityCheck::Hashed { matches: false, .. } => {
+                    } => Some(proof),
+                    crate::file_state::IdentityCheck::SizeMismatch
+                    | crate::file_state::IdentityCheck::Hashed { matches: false, .. } => {
                         return Ok(None);
                     }
                 };
@@ -646,10 +645,16 @@ impl<'repo> DesiredMutationSession<'repo> {
                 )?;
             self.full_lock = Some(lock);
         }
-        self.pending_materialized = Some(entries);
+        if let Some(pending) = &mut self.pending_materialized {
+            pending.extend(entries);
+        } else {
+            self.pending_materialized = Some(entries);
+        }
         Ok(())
     }
 
+    /// Record all pending publications. A failed write retains its window and
+    /// the untouched tail for retry; previously committed windows stay settled.
     pub fn record_published_materialized(&mut self) -> Result<(), StateStoreError> {
         let Some(entries) = self.pending_materialized.take() else {
             return Ok(());
@@ -664,7 +669,25 @@ impl<'repo> DesiredMutationSession<'repo> {
             if rows.is_empty() {
                 return Ok(());
             }
-            self.store.upsert_rows(&rows)?;
+            if let Err(error) = self.store.upsert_rows(&rows) {
+                // Keep the failed window and untouched tail retryable. Successful
+                // windows are already committed; ownership moves back only on error.
+                self.pending_materialized = Some(
+                    rows.into_iter()
+                        .map(|row| {
+                            PreparedMaterialization::new(
+                                Entry {
+                                    path: row.path,
+                                    oid: row.oid,
+                                },
+                                row.proof,
+                            )
+                        })
+                        .chain(entries)
+                        .collect(),
+                );
+                return Err(error);
+            }
         }
     }
 
@@ -1071,6 +1094,52 @@ mod tests {
     use crate::state::test_support;
     use std::collections::BTreeSet;
 
+    #[test]
+    fn repeated_publication_records_every_pending_batch() {
+        let (_temp, layout) = layout();
+        let mut session = DesiredMutationSession::acquire(&layout, LockShardLevels::FLAT).unwrap();
+        for path in ["first", "second"] {
+            session
+                .publish_upserts(vec![PreparedMaterialization::new(
+                    Entry {
+                        path: gp(path),
+                        oid: Oid::from_bytes([1; 32]),
+                    },
+                    None,
+                )])
+                .unwrap();
+        }
+        session.record_published_materialized().unwrap();
+        assert_eq!(session.store.load_all().unwrap().entries.len(), 2);
+    }
+
+    #[test]
+    fn failed_recording_retains_the_failed_window_and_tail_for_retry() {
+        let (temp, layout) = layout();
+        let mut session = DesiredMutationSession::acquire(&layout, LockShardLevels::FLAT).unwrap();
+        let entries = (0..4100)
+            .map(|i| {
+                PreparedMaterialization::new(
+                    Entry {
+                        path: gp(&format!("file-{i:05}")),
+                        oid: Oid::from_bytes([1; 32]),
+                    },
+                    None,
+                )
+            })
+            .collect();
+        session.publish_upserts(entries).unwrap();
+        let db = rusqlite::Connection::open(temp.path().join(".gat/state/state.sqlite3")).unwrap();
+        db.execute_batch("CREATE TRIGGER reject_recording BEFORE UPDATE OF materialized_oid ON state WHEN NEW.path = 'file-04097' BEGIN SELECT RAISE(ABORT, 'injected recording failure'); END;").unwrap();
+        assert!(session.record_published_materialized().is_err());
+        assert_eq!(session.store.load_all().unwrap().entries.len(), 4096);
+        db.execute_batch("DROP TRIGGER reject_recording;").unwrap();
+        session.record_published_materialized().unwrap();
+        assert_eq!(session.store.load_all().unwrap().entries.len(), 4100);
+        session.record_published_materialized().unwrap();
+        assert_eq!(session.store.load_all().unwrap().entries.len(), 4100);
+    }
+
     #[derive(Debug, thiserror::Error)]
     enum PublishError {
         #[error(transparent)]
@@ -1104,6 +1173,51 @@ mod tests {
     ) -> Result<(), PublishError> {
         let mut store = StateStore::open(layout)?;
         store.publish_desired_complete::<PublishError>(layout, lock, target)
+    }
+
+    #[test]
+    fn reuse_partition_combines_supplied_and_queried_oids_in_input_order() {
+        let (temp, layout) = layout();
+        let content = b"tracked content";
+        let oid = Oid::from_bytes(*blake3::hash(content).as_bytes());
+        let lock = Lock {
+            entries: ["known", "queried", "changed"]
+                .map(|path| Entry {
+                    path: gp(path),
+                    oid,
+                })
+                .to_vec(),
+        };
+        publish_complete(&layout, &lock, LockShardLevels::FLAT).unwrap();
+        for path in ["known", "queried", "new"] {
+            std::fs::write(temp.path().join(path), content).unwrap();
+        }
+        std::fs::write(temp.path().join("changed"), b"local edits").unwrap();
+        let session = DesiredStateSession::open(&layout).unwrap();
+        let (reused, to_hash) = session
+            .partition_reusable(
+                vec![
+                    (gp("queried"), None),
+                    (gp("new"), None),
+                    (gp("known"), Some(oid)),
+                    (gp("changed"), None),
+                ],
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            reused
+                .iter()
+                .map(|entry| entry.entry().path.as_str())
+                .collect::<Vec<_>>(),
+            ["queried", "known"]
+        );
+        assert!(
+            reused
+                .iter()
+                .all(PreparedMaterialization::unchanged_desired)
+        );
+        assert_eq!(to_hash, [gp("new"), gp("changed")]);
     }
 
     #[test]

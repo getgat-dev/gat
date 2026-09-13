@@ -1,6 +1,6 @@
 mod common;
 
-use common::{RecordingProgress, add_paths, commit_all, repository};
+use common::{RecordingProgress, add_paths, commit_all, git, repository};
 use gat_command::{
     LsFilesError, LsFilesOutcome, LsFilesRequest, StatusError, StatusOutcome, StatusRequest,
     ls_files, status,
@@ -136,7 +136,7 @@ fn status_preserves_lexical_order_after_parallel_cache_annotation() {
 }
 
 #[test]
-fn status_reports_sequential_loading_and_cache_progress() {
+fn status_reports_sequential_acquisition_comparison_and_cache_progress() {
     let (temp, repo) = repository();
     std::fs::write(temp.path().join("a.bin"), b"a").unwrap();
     add_paths(&repo, &[PathBuf::from("a.bin")]);
@@ -144,16 +144,23 @@ fn status_reports_sequential_loading_and_cache_progress() {
 
     run_status(&repo, Selection::root(), &progress).unwrap();
 
-    assert!(
-        progress
-            .operations()
-            .contains(&ProgressOperation::LoadingState)
+    assert_eq!(
+        progress.operations(),
+        vec![
+            ProgressOperation::WaitingForRepository,
+            ProgressOperation::LoadingState,
+            ProgressOperation::ComparingState,
+            ProgressOperation::InspectingCache,
+        ]
     );
-    assert!(
-        progress
-            .operations()
-            .contains(&ProgressOperation::InspectingCache)
-    );
+    for operation in [
+        ProgressOperation::WaitingForRepository,
+        ProgressOperation::ComparingState,
+    ] {
+        let task = progress.only(operation);
+        assert_eq!(task.total, None);
+        assert!(task.finished);
+    }
     assert_eq!(progress.max_active_tasks(), 1);
     let task = progress.only(ProgressOperation::InspectingCache);
     assert_eq!(task.unit, Some(ProgressUnit::Entries));
@@ -186,4 +193,28 @@ fn ls_files_advances_one_open_ended_progress_item_per_path() {
     assert_eq!(task.total, None);
     assert_eq!(task.position, 3);
     assert!(task.finished);
+}
+
+#[test]
+fn status_finishes_comparison_progress_when_staged_lock_validation_fails() {
+    let (temp, repo) = repository();
+    std::fs::write(temp.path().join("a.bin"), b"a").unwrap();
+    add_paths(&repo, &[PathBuf::from("a.bin")]);
+    let lock_path = temp.path().join("gat.lock");
+    let valid = std::fs::read(&lock_path).unwrap();
+    std::fs::write(&lock_path, b"invalid lock\n").unwrap();
+    git(temp.path(), &["add", "gat.lock"]);
+    std::fs::write(&lock_path, valid).unwrap();
+    let progress = RecordingProgress::new();
+
+    let error = run_status(&repo, Selection::root(), &progress).unwrap_err();
+
+    assert!(matches!(error, StatusError::Compare(_)));
+    assert!(progress.only(ProgressOperation::ComparingState).finished);
+    assert!(
+        !progress
+            .operations()
+            .contains(&ProgressOperation::InspectingCache)
+    );
+    assert_eq!(progress.max_active_tasks(), 1);
 }

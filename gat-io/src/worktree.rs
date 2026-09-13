@@ -637,8 +637,10 @@ fn file_status(
             matches: true,
             proof,
             ..
-        } => Ok(WorktreeFileStatus::matches(proof)),
-        IdentityCheck::Hashed { matches: false, .. } => Ok(WorktreeFileStatus::differs()),
+        } => Ok(WorktreeFileStatus::matches(Some(proof))),
+        IdentityCheck::SizeMismatch | IdentityCheck::Hashed { matches: false, .. } => {
+            Ok(WorktreeFileStatus::differs())
+        }
     }
 }
 

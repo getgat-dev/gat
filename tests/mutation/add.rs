@@ -142,6 +142,24 @@ mod tests {
     }
 
     #[test]
+    fn add_reports_discovery_when_opening_the_git_index_fails() {
+        let tmp = test_repo();
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
+        std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
+        std::fs::write(tmp.path().join(".git/index"), [0_u8; 128]).unwrap();
+        let progress = RecordingProgress::new();
+
+        assert!(add(&repo, &[PathBuf::from("a.bin")], &progress).is_err());
+
+        let task = progress.only(gat_core::progress::ProgressOperation::DiscoveringFiles);
+        assert!(task.finished);
+        assert_eq!(progress.active_tasks(), 0);
+        assert_eq!(progress.max_active_tasks(), 1);
+    }
+
+    #[test]
     fn add_reports_loading_and_preparation_before_hashing() {
         let tmp = test_repo();
         let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])

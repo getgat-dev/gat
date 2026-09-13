@@ -2215,16 +2215,15 @@ fn repair_continues_after_missing_and_mismatched_objects_with_one_transfer_slot(
         // One slot forces failures to finish before the valid objects start.
         // Exercise both one shared window and four successive windows.
         let limits = ExecutionLimits::for_test(window, 10_000, 4096, 1, 1);
-        let mut desired =
-            DesiredOperation::acquire_with_limits(&repo, &NoopProgress, limits).unwrap();
+        let desired = DesiredOperation::acquire_with_limits(&repo, &NoopProgress, limits).unwrap();
         let progress = RecordingProgress::new();
         let task = progress.begin(ProgressSpec::items(
             ProgressOperation::Repairing,
             gat_core::progress::ProgressUnit::Entries,
             Some(4),
         ));
-        let (operation, _) = desired.split_for_selection();
-        let outcome = repair_corrupted(operation, None, &corrupted, &task.handle());
+        let mut operation = desired.finish_selection();
+        let outcome = repair_corrupted(&mut operation, None, &corrupted, &task.handle());
         drop(task);
         assert_eq!(outcome.repaired, 2);
         assert_eq!(outcome.failures.len(), 2);
@@ -3458,6 +3457,7 @@ fn fetch_correctly_aligns_verification_across_several_subwindows_within_one_tran
         }
     }
 
+    let opens = gat_engine::test_support::remote_open_count_for("origin");
     let mut desired_op =
         DesiredOperation::acquire_with_limits(&repo, &NoopProgress, limits).unwrap();
     let fetched = fetch_selected(&mut desired_op, &Selection::root(), None, &NoopProgress)
@@ -3469,6 +3469,10 @@ fn fetch_correctly_aligns_verification_across_several_subwindows_within_one_tran
         "exactly the objects removed from the local cache must be \
          redownloaded, regardless of how the transfer window and \
          verification subwindows relate"
+    );
+    assert_eq!(
+        gat_engine::test_support::remote_open_count_for("origin") - opens,
+        1
     );
     for oid in &removed_oids {
         assert!(

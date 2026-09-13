@@ -137,15 +137,15 @@ pub fn move_with_progress(
                 Ok(dst_collisions)
             },
         )?;
-        let dst_collision_paths = dst_collisions
-            .into_iter()
-            .map(|entry| entry.path)
-            .collect::<Vec<_>>();
 
         with_progress_typed(
             progress,
             ProgressSpec::indeterminate(ProgressOperation::ApplyingChanges),
             |_| -> Result<()> {
+                let dst_collision_paths = dst_collisions
+                    .into_iter()
+                    .map(|entry| entry.path)
+                    .collect::<Vec<_>>();
                 move_on_disk(repo, &src, &dst)?;
                 if let Err(error) = desired.publish_move(&src, &dst, &dst_collision_paths) {
                     return Err(rollback_or_report(

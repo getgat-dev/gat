@@ -1409,6 +1409,11 @@ pub mod test_support {
     /// Panics if the test database cannot be opened or updated.
     pub fn insert_raw_materialized_row(path: &Path, gat_path: &str, oid: &[u8]) {
         let connection = Connection::open(path).expect("open state database");
+        // This fixture intentionally simulates corrupt storage below the writer
+        // boundary. The override is confined to this test-only connection.
+        connection
+            .pragma_update(None, "ignore_check_constraints", true)
+            .expect("allow deliberate state corruption in fixture");
         connection
             .execute(
                 "INSERT INTO state(path, materialized_oid) VALUES (?1, ?2)",
@@ -1421,6 +1426,11 @@ pub mod test_support {
     /// Panics if the test database cannot be opened or updated.
     pub fn replace_raw_materialized_oid(path: &Path, gat_path: &str, oid: &[u8]) {
         let connection = Connection::open(path).expect("open state database");
+        // This fixture intentionally simulates corrupt storage below the writer
+        // boundary. The override is confined to this test-only connection.
+        connection
+            .pragma_update(None, "ignore_check_constraints", true)
+            .expect("allow deliberate state corruption in fixture");
         connection
             .execute(
                 "UPDATE state SET materialized_oid = ?1 WHERE path = ?2",
@@ -1614,7 +1624,7 @@ mod tests {
     fn pruned_desired_paths_seek_past_covered_and_materialized_only_rows() {
         let (_tmp, store) = store_with(&["a", "data", "data0", "z"]);
         store.conn.execute_batch("WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i+1 FROM n WHERE i<9999)
-            INSERT INTO state(path, desired_oid) SELECT printf('data/%05d', i), zeroblob(32) FROM n;
+            INSERT INTO state(path, desired_oid, desired_shard_id) SELECT printf('data/%05d', i), zeroblob(32), 'gat.lock' FROM n;
             WITH RECURSIVE n(i) AS (VALUES(0) UNION ALL SELECT i+1 FROM n WHERE i<9999)
             INSERT INTO state(path, materialized_oid) SELECT printf('old/%05d', i), zeroblob(32) FROM n;").unwrap();
         let excluded = DesiredPathExclusions::new([gp("data/sub"), gp("data"), gp("data")]);

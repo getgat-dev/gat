@@ -3,12 +3,12 @@ mod common;
 use common::{
     RecordingProgress, add_paths, commit_all, git, remove_paths, repository, set_lock_shard_levels,
 };
-use gat_command::{DiffError, DiffOutcome, DiffRequest, DiffTarget, diff};
+use gat_command::{DiffChange, DiffError, DiffOutcome, DiffRequest, DiffTarget, diff};
 use gat_core::git::GitRevisionSpec;
 use gat_core::path_scope::normalize_path_scope;
 use gat_core::progress::{NoopProgress, ProgressOperation, ProgressReporter};
 use gat_core::selection::Selection;
-use gat_engine::{Repository, RowChange};
+use gat_engine::Repository;
 use std::path::{Path, PathBuf};
 
 fn scoped_selection(path: &Path) -> Selection {
@@ -58,12 +58,11 @@ enum RowStatus {
     Modified,
 }
 
-fn row_status(change: &RowChange) -> RowStatus {
+const fn row_status(change: &DiffChange) -> RowStatus {
     match change {
-        RowChange::Added { .. } => RowStatus::Added,
-        RowChange::Removed => RowStatus::Deleted,
-        RowChange::Modified { .. } => RowStatus::Modified,
-        RowChange::Unchanged { .. } => unreachable!(),
+        DiffChange::Added { .. } => RowStatus::Added,
+        DiffChange::Removed => RowStatus::Deleted,
+        DiffChange::Modified { .. } => RowStatus::Modified,
     }
 }
 
@@ -74,7 +73,17 @@ fn diff_reports_an_unresolvable_revision_as_a_revision_error() {
     add_paths(&repo, &[PathBuf::from("a.bin")]);
     commit_all(temp.path(), "add a.bin");
 
-    let error = working_diff(&repo, "this-revision-does-not-exist", Selection::root()).unwrap_err();
+    let progress = RecordingProgress::new();
+    let error = run_diff(
+        &repo,
+        revision("this-revision-does-not-exist"),
+        DiffTarget::WorkingTree,
+        Selection::root(),
+        &progress,
+    )
+    .unwrap_err();
+    assert!(progress.only(ProgressOperation::ComparingState).finished);
+    assert_eq!(progress.max_active_tasks(), 1);
     assert!(matches!(
         error,
         DiffError::Compare(source)
@@ -109,7 +118,7 @@ fn diff_against_the_working_tree_reports_a_symlinked_gat_lock_as_a_local_state_e
 }
 
 #[test]
-fn revision_to_working_tree_diff_opens_exactly_one_loading_state_task() {
+fn revision_to_working_tree_diff_reports_loading_then_comparison() {
     let (temp, repo) = repository();
     std::fs::write(temp.path().join("a.bin"), b"before").unwrap();
     add_paths(&repo, &[PathBuf::from("a.bin")]);
@@ -127,7 +136,17 @@ fn revision_to_working_tree_diff_opens_exactly_one_loading_state_task() {
     )
     .unwrap();
 
-    let task = progress.only(ProgressOperation::LoadingState);
+    assert_eq!(
+        progress.operations(),
+        vec![
+            ProgressOperation::WaitingForRepository,
+            ProgressOperation::LoadingState,
+            ProgressOperation::ComparingState,
+        ]
+    );
+    assert!(progress.only(ProgressOperation::LoadingState).finished);
+    let task = progress.only(ProgressOperation::ComparingState);
+    assert_eq!(task.total, None);
     assert!(task.finished);
     assert_eq!(progress.max_active_tasks(), 1);
 }
@@ -230,7 +249,7 @@ fn diff_compares_two_explicit_revisions() {
     assert_eq!(to, DiffTarget::Revision(revision("v2")));
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].path.as_str(), "a.bin");
-    assert!(matches!(rows[0].change, RowChange::Modified { .. }));
+    assert!(matches!(rows[0].change, DiffChange::Modified { .. }));
 }
 
 #[test]
@@ -250,7 +269,7 @@ fn diff_with_one_revision_compares_it_against_the_working_tree() {
     assert_eq!(from.as_str(), "v1");
     assert_eq!(to, DiffTarget::WorkingTree);
     assert_eq!(rows.len(), 1);
-    assert!(matches!(rows[0].change, RowChange::Modified { .. }));
+    assert!(matches!(rows[0].change, DiffChange::Modified { .. }));
 }
 
 #[test]
@@ -397,4 +416,28 @@ fn diff_reads_a_sharded_gat_lock_at_a_revision() {
     };
     assert_eq!(changes, 1);
     assert_eq!(rows[0].path.as_str(), "a.bin");
+}
+
+#[test]
+fn revision_comparison_reports_progress_even_with_no_changes() {
+    let (temp, repo) = repository();
+    std::fs::write(temp.path().join("a.bin"), b"a").unwrap();
+    add_paths(&repo, &[PathBuf::from("a.bin")]);
+    commit_all(temp.path(), "tracked");
+    let progress = RecordingProgress::new();
+    let outcome = run_diff(
+        &repo,
+        revision("HEAD"),
+        DiffTarget::Revision(revision("HEAD")),
+        Selection::root(),
+        &progress,
+    )
+    .unwrap();
+    assert!(matches!(outcome, DiffOutcome::NoChanges { .. }));
+    assert_eq!(
+        progress.operations(),
+        vec![ProgressOperation::ComparingState]
+    );
+    assert!(progress.only(ProgressOperation::ComparingState).finished);
+    assert_eq!(progress.max_active_tasks(), 1);
 }

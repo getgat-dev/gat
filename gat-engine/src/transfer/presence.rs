@@ -59,6 +59,8 @@ pub struct RemotePresenceResult {
 /// Everything a bounded remote-presence probe can fail with.
 #[derive(Debug, thiserror::Error)]
 pub enum RemotePresenceError {
+    #[error(transparent)]
+    Identity(#[from] crate::RemoteIdentityError),
     #[error("presence check cancelled")]
     Cancelled,
     #[error("could not open remote `{remote_name}` for `{path}`")]
@@ -172,6 +174,14 @@ pub(crate) fn check_remote_presence_streaming<T: RemotePresenceObligation>(
     #[cfg(any(test, feature = "test-support"))]
     test_support::record_remote_check(obligations.len());
 
+    for obligation in obligations {
+        operation
+            .remotes_catalog()
+            .validate_id(obligation.resolved_remote().id())?;
+        operation
+            .policy()
+            .validate_remote(obligation.resolved_remote())?;
+    }
     let mut by_remote: BTreeMap<RemoteId, Vec<usize>> = BTreeMap::new();
     for (index, obligation) in obligations.iter().enumerate() {
         by_remote

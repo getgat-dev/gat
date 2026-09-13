@@ -1386,13 +1386,7 @@ mod tests {
         let tmp = git_repo();
         let repo = Repo::at(tmp.path().to_path_buf());
         let store = StateStore::open(&repo).unwrap();
-        store
-            .conn
-            .execute(
-                "INSERT INTO state (path, materialized_oid, materialized_proof) VALUES ('a.bin', ?1, NULL)",
-                [vec![0u8; 31]],
-            )
-            .unwrap();
+        test_support::insert_raw_materialized_row(&repo.materialized_db_path(), "a.bin", &[0; 31]);
 
         let result = store.with_rows_in_scope(None, |mut rows| -> Result<usize> {
             let mut seen = 0usize;

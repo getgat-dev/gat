@@ -6,6 +6,7 @@ use gat_command::DiffError;
 impl From<DiffError> for Failure {
     fn from(err: DiffError) -> Self {
         match err {
+            DiffError::Policy(source) => source.into(),
             DiffError::Snapshot(source) => source.into(),
             DiffError::Repository(source) => source.into(),
             DiffError::Compare(source) => source.into(),

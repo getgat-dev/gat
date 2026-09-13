@@ -378,7 +378,7 @@ pub enum ShardPublishPolicy {
 ///   - Missing: falls straight through to tier 3, no read attempted.
 ///   - Regular file, size differs from `rendered`: a definitive
 ///     zero-content-read inequality shortcut (the same one
-///     [`super::IdentityCheck::Hashed`]'s size-mismatch case uses on the
+///     [`super::IdentityCheck::SizeMismatch`] uses on the
 ///     read side) -- falls through to tier 3 without opening the file.
 ///   - Regular file, size matches: exactly one
 ///     [`crate::file_state::coherent_observation`] read, compared
@@ -801,8 +801,9 @@ fn decode_resident_shard(
     let placement_error = if file.shard_id.is_flat() {
         None
     } else {
-        view.rows()
-            .find_map(|(path, _)| check_shard_placement(file, file.shard_id.levels(), path).err())
+        view.rows().find_map(|(path, _)| {
+            check_shard_placement(file, file.shard_id.levels(), path.as_str()).err()
+        })
     };
     Ok(ResidentShard {
         view,
@@ -815,7 +816,13 @@ fn decode_resident_shard(
 /// can be repeated for emission without reading or decoding source bytes again.
 fn resident_rows(
     shards: &[ResidentShard],
-) -> impl Iterator<Item = (&str, gat_core::oid::Oid, usize)> {
+) -> impl Iterator<
+    Item = (
+        gat_core::lexical_path::GatPathRef<'_>,
+        gat_core::oid::Oid,
+        usize,
+    ),
+> {
     let mut cursors: Vec<_> = shards.iter().map(|shard| shard.view.rows()).collect();
     let mut heap = BinaryHeap::new();
     for (owner, cursor) in cursors.iter_mut().enumerate() {
@@ -858,6 +865,7 @@ fn certify_resident_shards(shards: &mut [ResidentShard]) -> Result<()> {
     let mut stack: Vec<&str> = Vec::new();
     let mut prefix_error = None;
     for (path, _, _) in resident_rows(shards) {
+        let path = path.as_str();
         if let Some(previous) = previous {
             if previous == path {
                 return Err(LockDomainError::PathInMultipleShards {
@@ -970,13 +978,13 @@ pub(crate) fn visit_lock_rows_validated(
     {
         #[cfg(any(test, feature = "test-support"))]
         super::test_support::record_selected_shard_parse();
-        if keep(path) {
+        if keep(path.as_str()) {
             visit(&super::entry_from_validated_parts(path, oid))?;
         }
     } else {
         // An absent exact path may be a directory selection.
         for (path, oid, _) in resident_rows(&resident) {
-            if keep(path) {
+            if keep(path.as_str()) {
                 visit(&super::entry_from_validated_parts(path, oid))?;
             }
         }
@@ -1262,24 +1270,19 @@ fn render_entries_into(entries: &[Entry], out: &mut String) {
 }
 
 /// Reuse ordinary worker/job buffers, but release an oversized allocation before
-/// the next shard. The resident renderer keeps its measured formatting kernel.
+/// the next shard.
 fn render_ordered_entries<'a>(entries: impl Iterator<Item = &'a Entry>, out: &mut String) {
     #[cfg(any(test, feature = "test-support"))]
     super::test_support::record_render_entries_call();
-    use std::fmt::Write;
     if out.capacity() > 1024 * 1024 {
         *out = String::new();
     } else {
         out.clear();
     }
-    let _ = writeln!(out, "{}", super::VERSION);
+    out.push_str(super::VERSION);
+    out.push('\n');
     for entry in entries {
-        let _ = writeln!(
-            out,
-            "{}\t{}",
-            entry.oid,
-            gat_core::lock::EscapedPath(&entry.path)
-        );
+        gat_core::lock::encoding::append_row(out, entry);
     }
 }
 
@@ -1789,11 +1792,9 @@ fn save_sharded_with_publication(
 /// Read an arbitrary lock-format file (used for `gat.lock` itself via
 /// `load`). Empty lock if the file doesn't exist yet.
 pub(super) fn load_file(path: &Path) -> Result<Lock> {
-    if !path.exists() {
+    let Some(text) = read_file_if_present(path)? else {
         return Ok(Lock::default());
-    }
-    let text =
-        std::fs::read_to_string(path).map_err(|source| LockError::io("reading", path, source))?;
+    };
     Lock::parse(&text).map_err(|err| wrap_shard_parse_error(path, err))
 }
 
@@ -2287,14 +2288,11 @@ mod shard {
             if dir == base {
                 break;
             }
-            if std::fs::read_dir(dir)
-                .map_err(|source| LockError::io("reading", dir, source))?
-                .next()
-                .is_some()
-            {
-                break;
+            match std::fs::remove_dir(dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => break,
+                Err(source) => return Err(LockError::io("removing", dir, source)),
             }
-            std::fs::remove_dir(dir).map_err(|source| LockError::io("removing", dir, source))?;
             cur = dir.parent();
         }
         Ok(())
@@ -2306,6 +2304,21 @@ mod shard {
 
         fn gp(s: &str) -> gat_core::lexical_path::GatPath {
             gat_core::lexical_path::GatPath::parse_canonical(s).unwrap()
+        }
+
+        #[test]
+        fn pruning_stops_at_siblings_and_preserves_the_base_directory() {
+            let temp = tempfile::tempdir().unwrap();
+            let base = temp.path();
+            std::fs::create_dir_all(base.join("aa/bb")).unwrap();
+            std::fs::write(base.join("aa/bb/removed.tsv"), b"shard").unwrap();
+            std::fs::write(base.join("aa/kept.tsv"), b"sibling").unwrap();
+            remove_file_and_empty_parents(base, Path::new("aa/bb/removed.tsv")).unwrap();
+            assert!(!base.join("aa/bb").exists());
+            assert!(base.join("aa/kept.tsv").is_file());
+            remove_file_and_empty_parents(base, Path::new("aa/kept.tsv")).unwrap();
+            assert!(!base.join("aa").exists());
+            assert!(base.is_dir());
         }
 
         #[test]
@@ -3650,6 +3663,26 @@ mod tests {
         crate::RepositoryLayout::at(root.to_path_buf())
     }
     use super::*;
+
+    #[test]
+    fn load_file_distinguishes_missing_files_from_read_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            load_file(&temp.path().join("missing")).unwrap(),
+            Lock::default()
+        );
+        assert!(matches!(load_file(temp.path()), Err(LockError::Io { .. })));
+        // Unix reports ENOTDIR here; Windows may report a missing path.
+        #[cfg(unix)]
+        {
+            let blocker = temp.path().join("blocker");
+            std::fs::write(&blocker, b"regular file").unwrap();
+            assert!(matches!(
+                load_file(&blocker.join("gat.lock")),
+                Err(LockError::Io { .. })
+            ));
+        }
+    }
 
     fn gp(s: &str) -> gat_core::lexical_path::GatPath {
         gat_core::lexical_path::GatPath::parse_canonical(s).unwrap()

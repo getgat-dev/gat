@@ -16,7 +16,6 @@ mod mount;
 #[path = "move.rs"]
 mod move_cmd;
 mod ownership;
-mod parallel;
 mod push;
 mod remote;
 mod remote_status;
@@ -35,7 +34,7 @@ pub use config::{
     ConfigAction, ConfigError, ConfigOutcome, ConfigRequest, ConfigScalarValue, ConfigSource,
     config, config_with_lifecycle_observer,
 };
-pub use diff::{DiffError, DiffOutcome, DiffRequest, DiffRow, DiffTarget, diff};
+pub use diff::{DiffChange, DiffError, DiffOutcome, DiffRequest, DiffRow, DiffTarget, diff};
 pub use fetch::{
     FetchError, FetchOutcome, FetchRequest, FetchSource, fetch, fetch_with_desired_operation,
 };
@@ -81,8 +80,8 @@ pub use saved_selection::{
 };
 pub use selection::SelectionScope;
 pub use status::{
-    CachePresence, LsFilesError, LsFilesOutcome, LsFilesRequest, StatusError, StatusOutcome,
-    StatusRequest, StatusRow, ls_files, status,
+    CachePresence, LsFilesError, LsFilesOutcome, LsFilesRequest, StatusChange, StatusError,
+    StatusOutcome, StatusRequest, StatusRow, ls_files, status,
 };
 pub use sync::{
     HookRequest, PullRequest, SyncError, SyncOutcome, SyncRequest, hook, pull,

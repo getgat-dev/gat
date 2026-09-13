@@ -74,10 +74,16 @@ fn create_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS state (
              path              TEXT PRIMARY KEY,
-             desired_oid       BLOB,
+             desired_oid       BLOB CHECK (
+                 desired_oid IS NULL OR (typeof(desired_oid) = 'blob' AND length(desired_oid) = 32)
+             ),
              desired_shard_id  TEXT,
-             materialized_oid  BLOB,
-             materialized_proof BLOB,
+             materialized_oid  BLOB CHECK (
+                 materialized_oid IS NULL OR (typeof(materialized_oid) = 'blob' AND length(materialized_oid) = 32)
+             ),
+             materialized_proof BLOB CHECK (
+                 materialized_proof IS NULL OR materialized_oid IS NOT NULL
+             ),
              dirty INTEGER GENERATED ALWAYS AS (
                  CASE
                    WHEN desired_oid IS NULL AND materialized_oid IS NULL THEN 0
@@ -85,7 +91,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
                    WHEN desired_oid != materialized_oid THEN 1
                    ELSE 0
                  END
-             ) STORED
+             ) STORED,
+             CHECK ((desired_oid IS NULL) = (desired_shard_id IS NULL))
          ) WITHOUT ROWID;
 
          CREATE INDEX IF NOT EXISTS state_dirty_path ON state(path) WHERE dirty = 1;
@@ -114,7 +121,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
          -- `crate::file_state::coherent_observation`).
          CREATE TABLE IF NOT EXISTS lock_shards (
              shard_id      TEXT PRIMARY KEY,
-             identity      BLOB NOT NULL CHECK (length(identity) = 32),
+             identity      BLOB NOT NULL CHECK (typeof(identity) = 'blob' AND length(identity) = 32),
              proof         BLOB
          ) WITHOUT ROWID;
 
@@ -164,12 +171,18 @@ fn create_schema(conn: &Connection) -> Result<()> {
          -- is reset but the reduced-trust condition isn't yet durable.
          CREATE TABLE IF NOT EXISTS reconciliation_meta (
              id                    INTEGER PRIMARY KEY CHECK (id = 1),
-             desired_fingerprint   BLOB NOT NULL CHECK (length(desired_fingerprint) = 32),
-             exclude_fingerprint   BLOB,
-             exclude_count         INTEGER NOT NULL DEFAULT 0,
-             exclude_block_identity BLOB,
-             exclude_proof         BLOB,
-             validation_required   INTEGER NOT NULL DEFAULT 0
+             desired_fingerprint   BLOB NOT NULL CHECK (typeof(desired_fingerprint) = 'blob' AND length(desired_fingerprint) = 32),
+             exclude_fingerprint   BLOB CHECK (
+                 exclude_fingerprint IS NULL OR (typeof(exclude_fingerprint) = 'blob' AND length(exclude_fingerprint) = 32)
+             ),
+             exclude_count         INTEGER NOT NULL DEFAULT 0 CHECK (typeof(exclude_count) = 'integer' AND exclude_count >= 0),
+             exclude_block_identity BLOB CHECK (
+                 exclude_block_identity IS NULL OR (typeof(exclude_block_identity) = 'blob' AND length(exclude_block_identity) = 32)
+             ),
+             exclude_proof         BLOB CHECK (exclude_proof IS NULL OR exclude_block_identity IS NOT NULL),
+             validation_required   INTEGER NOT NULL DEFAULT 0 CHECK (validation_required IN (0, 1)),
+             CHECK ((exclude_fingerprint IS NULL) = (exclude_block_identity IS NULL)),
+             CHECK (exclude_fingerprint IS NOT NULL OR exclude_count = 0)
          );
 
          INSERT OR IGNORE INTO reconciliation_meta (id, desired_fingerprint)
@@ -208,4 +221,91 @@ pub(super) fn check_schema_version(conn: &Connection, db_path: &Path) -> Result<
         "CREATE INDEX IF NOT EXISTS state_desired_path ON state(path) WHERE desired_oid IS NOT NULL;"
     ).state_context("ensuring desired-path index")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn database() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        create_schema(&conn).unwrap();
+        conn
+    }
+
+    fn rejects_check(conn: &Connection, sql: &str) {
+        let error = conn.execute_batch(sql).unwrap_err();
+        assert!(
+            matches!(error, rusqlite::Error::SqliteFailure(code, _)
+            if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn state_rejects_invalid_oid_types_widths_and_unpaired_columns() {
+        let conn = database();
+        for sql in [
+            "INSERT INTO state(path, desired_oid, desired_shard_id) VALUES('a', zeroblob(31), 'gat.lock')",
+            "INSERT INTO state(path, desired_oid, desired_shard_id) VALUES('a', zeroblob(33), 'gat.lock')",
+            "INSERT INTO state(path, desired_oid, desired_shard_id) VALUES('a', '01234567890123456789012345678901', 'gat.lock')",
+            "INSERT INTO state(path, materialized_oid) VALUES('a', zeroblob(31))",
+            "INSERT INTO state(path, materialized_oid) VALUES('a', zeroblob(33))",
+            "INSERT INTO state(path, materialized_oid) VALUES('a', '01234567890123456789012345678901')",
+            "INSERT INTO state(path, desired_oid) VALUES('a', zeroblob(32))",
+            "INSERT INTO state(path, desired_shard_id) VALUES('a', 'gat.lock')",
+            "INSERT INTO state(path, materialized_proof) VALUES('a', zeroblob(25))",
+        ] {
+            rejects_check(&conn, sql);
+        }
+    }
+
+    #[test]
+    fn state_allows_valid_partial_states_and_atomic_clearing() {
+        let conn = database();
+        conn.execute_batch("INSERT INTO state(path, desired_oid, desired_shard_id) VALUES('a', zeroblob(32), 'gat.lock');
+            INSERT INTO state(path, materialized_oid) VALUES('b', zeroblob(32));
+            UPDATE state SET materialized_oid = zeroblob(32), materialized_proof = zeroblob(25) WHERE path = 'a';").unwrap();
+        let dirty: i64 = conn
+            .query_row("SELECT dirty FROM state WHERE path = 'a'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(dirty, 0);
+        rejects_check(
+            &conn,
+            "UPDATE state SET desired_oid = NULL WHERE path = 'a'",
+        );
+        rejects_check(
+            &conn,
+            "UPDATE state SET materialized_oid = NULL WHERE path = 'a'",
+        );
+        conn.execute_batch("UPDATE state SET desired_oid = NULL, desired_shard_id = NULL, materialized_oid = NULL, materialized_proof = NULL WHERE path = 'a';").unwrap();
+    }
+
+    #[test]
+    fn metadata_rejects_invalid_hashes_and_incomplete_exclude_records() {
+        let conn = database();
+        for sql in [
+            "INSERT INTO lock_shards(shard_id, identity) VALUES('gat.lock', zeroblob(31))",
+            "INSERT INTO lock_shards(shard_id, identity) VALUES('gat.lock', '01234567890123456789012345678901')",
+            "UPDATE reconciliation_meta SET desired_fingerprint = zeroblob(31)",
+            "UPDATE reconciliation_meta SET desired_fingerprint = '01234567890123456789012345678901'",
+            "UPDATE reconciliation_meta SET exclude_fingerprint = zeroblob(32)",
+            "UPDATE reconciliation_meta SET exclude_block_identity = zeroblob(32)",
+            "UPDATE reconciliation_meta SET exclude_proof = zeroblob(25)",
+            "UPDATE reconciliation_meta SET exclude_count = 1",
+            "UPDATE reconciliation_meta SET exclude_count = -1",
+            "UPDATE reconciliation_meta SET exclude_count = 0.5",
+            "UPDATE reconciliation_meta SET validation_required = 2",
+            "UPDATE reconciliation_meta SET exclude_fingerprint = zeroblob(31), exclude_block_identity = zeroblob(32)",
+            "UPDATE reconciliation_meta SET exclude_fingerprint = zeroblob(32), exclude_block_identity = '01234567890123456789012345678901'",
+        ] {
+            rejects_check(&conn, sql);
+        }
+        conn.execute_batch("INSERT INTO lock_shards(shard_id, identity) VALUES('gat.lock', zeroblob(32));
+            UPDATE reconciliation_meta SET exclude_fingerprint = zeroblob(32), exclude_block_identity = zeroblob(32), exclude_count = 3;
+            UPDATE reconciliation_meta SET exclude_proof = zeroblob(25), validation_required = 1;
+            UPDATE reconciliation_meta SET exclude_fingerprint = NULL, exclude_block_identity = NULL, exclude_count = 0, exclude_proof = NULL;").unwrap();
+    }
 }

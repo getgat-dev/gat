@@ -516,7 +516,7 @@ impl<'repo> MountService<'repo> {
     ) -> Result<(), MountWorkflowError> {
         let guard = self
             .repo
-            .acquire_configuration_lock()
+            .acquire_configuration_lock_with_progress(progress)
             .map_err(MountWorkflowError::acquire)?;
         recover_pending_mount_transaction_locked(self.repo, &guard, progress).map(|_| ())
     }
@@ -544,7 +544,7 @@ impl<'repo> MountService<'repo> {
     {
         let guard = self
             .repo
-            .acquire_configuration_lock()
+            .acquire_configuration_lock_with_progress(progress)
             .map_err(MountWorkflowError::acquire)
             .map_err(E::from)?;
         drop(
@@ -585,7 +585,7 @@ impl<'repo> MountService<'repo> {
     {
         let guard = self
             .repo
-            .acquire_configuration_lock()
+            .acquire_configuration_lock_with_progress(progress)
             .map_err(MountWorkflowError::acquire)
             .map_err(E::from)?;
         // Recovery finishes using its recorded layout. The new operation must
@@ -638,15 +638,31 @@ impl<'repo> LockedMount<'repo, '_> {
     }
 
     pub fn desired_count(&mut self, target: &GatPath) -> Result<u64, MountWorkflowError> {
-        self.state()?
-            .desired_count_subtree(target)
-            .map_err(MountWorkflowError::read_state)
+        let progress = self.progress;
+        let state = self.state()?;
+        with_progress_typed(
+            progress,
+            ProgressSpec::indeterminate(ProgressOperation::ResolvingSelection),
+            |_| {
+                state
+                    .desired_count_subtree(target)
+                    .map_err(MountWorkflowError::read_state)
+            },
+        )
     }
 
     pub fn desired_any(&mut self, target: &GatPath) -> Result<bool, MountWorkflowError> {
-        self.state()?
-            .desired_any_subtree(target)
-            .map_err(MountWorkflowError::read_state)
+        let progress = self.progress;
+        let state = self.state()?;
+        with_progress_typed(
+            progress,
+            ProgressSpec::indeterminate(ProgressOperation::ResolvingSelection),
+            |_| {
+                state
+                    .desired_any_subtree(target)
+                    .map_err(MountWorkflowError::read_state)
+            },
+        )
     }
 
     pub fn has_root_owned_assets(
@@ -654,9 +670,17 @@ impl<'repo> LockedMount<'repo, '_> {
         target: &GatPath,
         exclude_prefix: Option<&GatPath>,
     ) -> Result<bool, MountWorkflowError> {
-        self.state()?
-            .has_desired_outside(target, exclude_prefix)
-            .map_err(MountWorkflowError::read_state)
+        let progress = self.progress;
+        let state = self.state()?;
+        with_progress_typed(
+            progress,
+            ProgressSpec::indeterminate(ProgressOperation::ResolvingSelection),
+            |_| {
+                state
+                    .has_desired_outside(target, exclude_prefix)
+                    .map_err(MountWorkflowError::read_state)
+            },
+        )
     }
 
     pub fn add(

@@ -427,10 +427,9 @@ impl MountJournal {
                     return Ok(());
                 };
                 rows.push(StagedRow {
-                    path: if relative.is_empty() {
-                        target.clone()
-                    } else {
-                        target.join_rel(relative)
+                    path: match relative {
+                        gat_core::lexical_path::GatSubpathRef::Root => target.clone(),
+                        gat_core::lexical_path::GatSubpathRef::Path(path) => target.join_rel(path),
                     },
                     oid: entry.oid,
                 });

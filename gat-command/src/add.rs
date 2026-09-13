@@ -170,6 +170,8 @@ fn add_with_limits(
                          added: &mut AddedEntries|
              -> Result<()> { flush_pending_files(context, pending, added) };
 
+            // Opening the Git index/ignore lookup can itself be expensive.
+            context.discovery_activity(ProgressActivity::ClassifyingSelectors);
             desired.with_git_path_status_lookup(|lookup| -> Result<()> {
                 let mut selectors = HashSet::new();
                 for scope in &request.paths {
@@ -276,10 +278,9 @@ fn add_with_limits(
                 }
                 flush(&mut context, &mut pending_unique_files, &mut added)
             })?;
+            context.exclusions.sort_unstable_by_key(|item| item.reason);
             (added, rows, added_count)
         };
-
-        exclusions.sort_unstable_by_key(|item| item.reason);
         if added.is_empty() {
             return Ok(AddOutcome {
                 rows,
@@ -288,10 +289,10 @@ fn add_with_limits(
             });
         }
 
-        let mut desired = desired.into_mutation().map_err(Box::new)?;
         let applying = progress.begin(ProgressSpec::indeterminate(
             ProgressOperation::ApplyingChanges,
         ));
+        let mut desired = desired.into_mutation().map_err(Box::new)?;
         applying
             .handle()
             .set_activity(ProgressActivity::PublishingDesiredState);

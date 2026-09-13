@@ -440,6 +440,8 @@ impl LockSnapshot {
         outcome.map_err(|error| self.invalid(error))
     }
 
+    /// Returns selected rows in certified path order; malformed or unordered
+    /// shard contents are rejected before any rows are returned.
     pub fn shard_rows_selected(
         &self,
         shard: &SnapshotShard,

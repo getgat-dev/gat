@@ -573,6 +573,7 @@ impl Read for CacheObjectReader {
 pub struct CacheClient {
     root: Arc<crate::cache::root::CacheRootInner>,
     index: CacheState,
+    verification_generation: std::cell::RefCell<Arc<()>>,
     memo: std::cell::RefCell<std::collections::HashMap<Oid, CacheObservation>>,
 }
 
@@ -582,6 +583,7 @@ pub struct CacheClient {
 /// value is safe to move into a blocking worker because it contains no cache
 /// client, proof database connection, or operation-scoped memo state.
 pub struct PreparedCacheVerification {
+    generation: Arc<()>,
     oids: Vec<Oid>,
     known: std::collections::HashMap<Oid, ObjectVerification>,
     pending: Vec<PreparedCacheObjectVerification>,
@@ -596,6 +598,7 @@ struct PreparedCacheObjectVerification {
 /// Completed filesystem verification awaiting coordinator-side memo and
 /// proof-database commit.
 pub struct CompletedCacheVerification {
+    generation: Arc<()>,
     oids: Vec<Oid>,
     known: std::collections::HashMap<Oid, ObjectVerification>,
     results: Vec<(Oid, CacheObservation, Option<CachePublication>)>,
@@ -654,6 +657,7 @@ impl PreparedCacheVerification {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(CompletedCacheVerification {
+            generation: self.generation,
             oids: self.oids,
             known: self.known,
             results,
@@ -681,6 +685,7 @@ impl CacheClient {
         Self {
             root,
             index,
+            verification_generation: std::cell::RefCell::new(Arc::new(())),
             memo: std::cell::RefCell::new(std::collections::HashMap::new()),
         }
     }
@@ -735,8 +740,13 @@ impl CacheClient {
     /// phase to remember to invalidate the memo itself.
     fn forget_memo(&self, oids: impl Iterator<Item = Oid>) {
         let mut memo = self.memo.borrow_mut();
+        let mut invalidated = false;
         for oid in oids {
+            invalidated = true;
             memo.remove(&oid);
+        }
+        if invalidated {
+            *self.verification_generation.borrow_mut() = Arc::new(());
         }
     }
 
@@ -830,6 +840,7 @@ impl CacheClient {
             .collect();
 
         PreparedCacheVerification {
+            generation: Arc::clone(&self.verification_generation.borrow()),
             oids: oids.to_vec(),
             known,
             pending,
@@ -840,12 +851,25 @@ impl CacheClient {
     ///
     /// Fresh statuses enter the operation memo before proof deltas are
     /// persisted. Proof persistence remains best-effort because it is only
-    /// an accelerator for later verification.
+    /// an accelerator for later verification. Tickets from another client or
+    /// predating invalidation are verified again against this client's state;
+    /// filesystem failures from that verification are returned to the caller.
     pub fn commit_verification(
         &self,
         completed: CompletedCacheVerification,
-    ) -> Vec<ObjectVerification> {
+    ) -> std::result::Result<Vec<ObjectVerification>, CacheVerificationFailure> {
+        // Foreign or invalidated tickets are observations of another state.
+        // Re-prepare only on this cold path; ordinary batches need one pointer check.
+        let completed = if Arc::ptr_eq(
+            &completed.generation,
+            &self.verification_generation.borrow(),
+        ) {
+            completed
+        } else {
+            self.prepare_verification(&completed.oids).verify()?
+        };
         let CompletedCacheVerification {
+            generation: _,
             oids,
             known,
             results,
@@ -875,7 +899,7 @@ impl CacheClient {
             .collect();
         drop(memo);
         let _ = self.index.apply_many(&deltas);
-        statuses
+        Ok(statuses)
     }
 
     /// Verify `oids` in bounded windows, invoking `on_window` with each
@@ -895,7 +919,9 @@ impl CacheClient {
             let completed = prepared
                 .verify()
                 .map_err(CacheVerificationFailure::into_source)?;
-            let statuses = self.commit_verification(completed);
+            let statuses = self
+                .commit_verification(completed)
+                .map_err(CacheVerificationFailure::into_source)?;
             on_window(window, &statuses)?;
         }
         Ok(())
@@ -3067,7 +3093,7 @@ mod tests {
                     let status = if staged {
                         let completed = cache.prepare_verification(&[oid, oid]).verify().unwrap();
                         assert_eq!(cache.object(&oid).verified_size(), None);
-                        let statuses = cache.commit_verification(completed);
+                        let statuses = cache.commit_verification(completed).unwrap();
                         assert_eq!(statuses.len(), 2);
                         assert_eq!(statuses[0], statuses[1]);
                         statuses[0]
@@ -3141,7 +3167,7 @@ mod tests {
                     assert_eq!(cache.object(&oid).verified_size(), None);
                     let status = if staged {
                         let completed = cache.prepare_verification(&[oid]).verify().unwrap();
-                        cache.commit_verification(completed)[0]
+                        cache.commit_verification(completed).unwrap()[0]
                     } else {
                         cache.verify(&oid).unwrap()
                     };
@@ -3386,7 +3412,7 @@ mod tests {
                 .verify()
                 .unwrap();
             assert_eq!(
-                cache.commit_verification(completed),
+                cache.commit_verification(completed).unwrap(),
                 vec![
                     ObjectVerification::Valid,
                     ObjectVerification::Valid,
@@ -3415,7 +3441,7 @@ mod tests {
             let before = test_support::snapshot();
             let completed = cache.prepare_verification(&[oid, oid]).verify().unwrap();
             assert_eq!(
-                cache.commit_verification(completed),
+                cache.commit_verification(completed).unwrap(),
                 vec![ObjectVerification::Valid; 2]
             );
             let after_first = test_support::snapshot();
@@ -3427,7 +3453,7 @@ mod tests {
 
             let completed = cache.prepare_verification(&[oid]).verify().unwrap();
             assert_eq!(
-                cache.commit_verification(completed),
+                cache.commit_verification(completed).unwrap(),
                 vec![ObjectVerification::Valid]
             );
             let after_second = test_support::snapshot();
@@ -3449,7 +3475,7 @@ mod tests {
                 cache.break_database_for_test();
                 let completed = cache.prepare_verification(&[oid]).verify().unwrap();
                 assert_eq!(
-                    cache.commit_verification(completed),
+                    cache.commit_verification(completed).unwrap(),
                     vec![ObjectVerification::Valid]
                 );
                 hash_file_call_count()

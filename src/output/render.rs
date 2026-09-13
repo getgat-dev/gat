@@ -499,14 +499,11 @@ fn render_route_details(
 /// Authors the CLI-facing label/wording for one `gat diff` row's change,
 /// keeping "new"/"removed"/"changed" prose in root presentation rather
 /// than the command crate that only computes the typed change.
-fn diff_row_metadata(change: &gat_engine::RowChange) -> (rows::ListStatus, &'static str) {
+const fn diff_row_metadata(change: &gat_command::DiffChange) -> (rows::ListStatus, &'static str) {
     match change {
-        gat_engine::RowChange::Added { .. } => (rows::ListStatus::Added, "new"),
-        gat_engine::RowChange::Removed => (rows::ListStatus::Deleted, "removed"),
-        gat_engine::RowChange::Modified { .. } => (rows::ListStatus::Modified, "changed"),
-        gat_engine::RowChange::Unchanged { .. } => {
-            unreachable!("`Unchanged::Drop` comparisons never yield unchanged rows")
-        }
+        gat_command::DiffChange::Added { .. } => (rows::ListStatus::Added, "new"),
+        gat_command::DiffChange::Removed => (rows::ListStatus::Deleted, "removed"),
+        gat_command::DiffChange::Modified { .. } => (rows::ListStatus::Modified, "changed"),
     }
 }
 
@@ -541,11 +538,15 @@ fn with_mount_metadata(metadata: UserLine, mount: Option<&gat_core::name::MountN
 /// presentation rather than the command crate that only computes the typed
 /// change and cache presence.
 fn status_row_to_list_row(row: &gat_command::StatusRow) -> rows::ListRow {
-    let (status, prefix) = match row.change {
-        gat_engine::RowChange::Added { .. } => (rows::ListStatus::Added, "new, "),
-        gat_engine::RowChange::Modified { .. } => (rows::ListStatus::Modified, ""),
-        gat_engine::RowChange::Unchanged { .. } => (rows::ListStatus::Success, ""),
-        gat_engine::RowChange::Removed => {
+    let (status, prefix, cache) = match row.change {
+        gat_command::StatusChange::Added { cache, .. } => (rows::ListStatus::Added, "new, ", cache),
+        gat_command::StatusChange::Modified { cache, .. } => {
+            (rows::ListStatus::Modified, "", cache)
+        }
+        gat_command::StatusChange::Unchanged { cache, .. } => {
+            (rows::ListStatus::Success, "", cache)
+        }
+        gat_command::StatusChange::Removed => {
             return match &row.mount {
                 Some(mount) => rows::ListRow::with_metadata(
                     rows::ListStatus::Deleted,
@@ -558,10 +559,7 @@ fn status_row_to_list_row(row: &gat_command::StatusRow) -> rows::ListRow {
             };
         }
     };
-    let cache_note = match row
-        .cache_presence
-        .expect("a non-removed row has an oid to check the cache for")
-    {
+    let cache_note = match cache {
         gat_command::CachePresence::Present => "cached",
         gat_command::CachePresence::Missing => "uncached",
     };
@@ -1370,10 +1368,9 @@ pub fn render(output: &mut Output<'_>, outcome: Outcome) -> Result<(), WriteFail
                 }
                 render_projected_rows(output, rows.iter(), Stream::Stdout, status_row_to_list_row)?;
                 let mut hints: Vec<_> = selection_scope_note(scope).into_iter().collect();
-                if rows
-                    .iter()
-                    .any(|row| row.cache_presence == Some(gat_command::CachePresence::Missing))
-                {
+                if rows.iter().any(|row| {
+                    row.change.cache_presence() == Some(gat_command::CachePresence::Missing)
+                }) {
                     hints.push(UserLine::compose([
                         UserLine::authored("Run "),
                         UserLine::authored("`gat fetch`").unbroken(),
@@ -2720,23 +2717,33 @@ mod outcome_tests {
     fn mount_metadata_follows_existing_status_details_and_is_dimmed() {
         let path = GatPath::parse_canonical("vendor/data.bin").unwrap();
         let oid = gat_core::oid::Oid::from_bytes([0xaa; 32]);
-        for (change, cache_presence, expected) in [
+        for (change, expected) in [
             (
-                gat_engine::RowChange::Added { oid },
-                Some(gat_command::CachePresence::Present),
+                gat_command::StatusChange::Added {
+                    oid,
+                    cache: gat_command::CachePresence::Present,
+                },
                 "new, cached (mount models)",
             ),
             (
-                gat_engine::RowChange::Unchanged { oid },
-                Some(gat_command::CachePresence::Missing),
+                gat_command::StatusChange::Unchanged {
+                    oid,
+                    cache: gat_command::CachePresence::Missing,
+                },
                 "uncached (mount models)",
             ),
-            (gat_engine::RowChange::Removed, None, "(mount models)"),
+            (
+                gat_command::StatusChange::Modified {
+                    oid,
+                    cache: gat_command::CachePresence::Present,
+                },
+                "cached (mount models)",
+            ),
+            (gat_command::StatusChange::Removed, "(mount models)"),
         ] {
             let row = status_row_to_list_row(&gat_command::StatusRow {
                 path: path.clone(),
                 change,
-                cache_presence,
                 mount: Some("models".into()),
             });
             let mut stdout = Vec::new();
@@ -2918,12 +2925,14 @@ mod outcome_tests {
         let rows = (0..25)
             .map(|index| gat_command::StatusRow {
                 path: GatPath::parse_canonical(&format!("file-{index:02}.bin")).unwrap(),
-                change: gat_engine::RowChange::Unchanged { oid },
-                cache_presence: Some(if index == 24 {
-                    gat_command::CachePresence::Missing
-                } else {
-                    gat_command::CachePresence::Present
-                }),
+                change: gat_command::StatusChange::Unchanged {
+                    oid,
+                    cache: if index == 24 {
+                        gat_command::CachePresence::Missing
+                    } else {
+                        gat_command::CachePresence::Present
+                    },
+                },
                 mount: None,
             })
             .collect();
@@ -2975,10 +2984,10 @@ mod outcome_tests {
             scope: gat_command::SelectionScope::Unrestricted,
             rows: vec![gat_command::StatusRow {
                 path: GatPath::parse_canonical("data.bin").unwrap(),
-                change: gat_engine::RowChange::Unchanged {
+                change: gat_command::StatusChange::Unchanged {
                     oid: gat_core::oid::Oid::from_bytes([0xaa; 32]),
+                    cache: gat_command::CachePresence::Missing,
                 },
-                cache_presence: Some(gat_command::CachePresence::Missing),
                 mount: None,
             }],
             changes: 0,
@@ -2992,6 +3001,38 @@ mod outcome_tests {
             .unwrap();
         assert!(row.contains("\x1b[2muncached"));
         assert_eq!(crate::output::strip_ansi(row), "✓  data.bin  uncached");
+    }
+
+    #[test]
+    fn diff_renders_every_constructible_change() {
+        let oid = gat_core::oid::Oid::from_bytes([7; 32]);
+        for (change, label) in [
+            (gat_command::DiffChange::Added { oid }, "new"),
+            (gat_command::DiffChange::Removed, "removed"),
+            (gat_command::DiffChange::Modified { oid }, "changed"),
+        ] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            render(
+                &mut Output::new(&mut stdout, &mut stderr),
+                Outcome::Diff(DiffOutcome::Changes {
+                    scope: gat_command::SelectionScope::Unrestricted,
+                    from: gat_core::git::GitRevisionSpec::from_string("HEAD".into()),
+                    to: DiffTarget::WorkingTree,
+                    rows: vec![gat_command::DiffRow {
+                        path: GatPath::parse_canonical("data.bin").unwrap(),
+                        change,
+                        mount: None,
+                    }],
+                    changes: 1,
+                }),
+            )
+            .unwrap();
+            let text = String::from_utf8(stdout).unwrap();
+            assert!(text.contains("data.bin"));
+            assert!(text.contains(label));
+            assert!(stderr.is_empty());
+        }
     }
 
     #[test]
@@ -3026,7 +3067,7 @@ mod outcome_tests {
                         to: DiffTarget::WorkingTree,
                         rows: vec![gat_command::DiffRow {
                             path: GatPath::parse_canonical("data.bin").unwrap(),
-                            change: gat_engine::RowChange::Removed,
+                            change: gat_command::DiffChange::Removed,
                             mount: None,
                         }],
                         changes: 1,

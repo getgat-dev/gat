@@ -6,6 +6,7 @@ use gat_command::RemoteStatusError;
 impl From<RemoteStatusError> for Failure {
     fn from(err: RemoteStatusError) -> Self {
         match err {
+            RemoteStatusError::Identity(source) => source.into(),
             RemoteStatusError::Repository(source) => (*source).into(),
             RemoteStatusError::Acquisition(source) => (*source).into(),
             RemoteStatusError::DesiredState(source) => source.into(),

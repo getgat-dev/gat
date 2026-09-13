@@ -72,8 +72,10 @@ impl CacheSession {
         &mut self,
         cache_root: &CacheRoot,
         completed: CompletedCacheVerification,
-    ) -> Vec<ObjectVerification> {
-        self.cache(cache_root).commit_verification(completed)
+    ) -> Result<Vec<ObjectVerification>, CacheVerificationError> {
+        self.cache(cache_root)
+            .commit_verification(completed)
+            .map_err(Into::into)
     }
 
     /// Create a lazy reader without exposing physical paths.

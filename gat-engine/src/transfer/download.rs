@@ -9,7 +9,6 @@ use gat_core::oid::Oid;
 use gat_core::progress::{ProgressActivity, ProgressHandle};
 use gat_io::RemoteError;
 use gat_io::{CacheError, CachePublication, ObjectVerification};
-use std::collections::{BTreeMap, btree_map::Entry};
 use std::error::Error;
 use std::sync::Arc;
 
@@ -57,6 +56,7 @@ pub enum DownloadCacheFailureKind {
 /// Everything one bounded download window can fail with.
 #[derive(Debug)]
 pub enum DownloadError {
+    Identity(crate::RemoteIdentityError),
     Cancelled,
     RemoteOpen {
         remote_name: Arc<str>,
@@ -108,6 +108,7 @@ fn write_remote_context(
 impl std::fmt::Display for DownloadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Identity(source) => std::fmt::Display::fmt(source, f),
             Self::Cancelled => f.write_str("transfer cancelled"),
             Self::RemoteOpen {
                 remote_name,
@@ -155,6 +156,7 @@ impl std::fmt::Display for DownloadError {
 impl Error for DownloadError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Identity(source) => Some(source),
             Self::Cancelled => None,
             Self::RemoteOpen { source, .. } => Some(source.as_ref()),
             Self::RemoteRead { source, .. } | Self::Cache { source, .. } => Some(source.as_ref()),
@@ -322,6 +324,13 @@ pub fn download_window(
     if objects.is_empty() {
         return Ok(DownloadOutcome::default());
     }
+    for object in &objects {
+        operation
+            .remotes_catalog()
+            .validate_id(object.remote.id())
+            .and_then(|()| operation.policy().validate_remote(&object.remote))
+            .map_err(DownloadError::Identity)?;
+    }
     let services = operation.window_services();
     let cache_writer = services.cache_root.writer();
     let window_oids: Vec<Oid> = objects.iter().map(|object| object.oid).collect();
@@ -336,39 +345,29 @@ pub fn download_window(
             let object_window = &objects[verified_offset..verified_offset + verify_oids.len()];
             verified_offset += verify_oids.len();
 
-            let job_indices: Vec<usize> = status_window
+            let missing = status_window
                 .iter()
-                .enumerate()
-                .filter_map(|(index, status)| match status {
-                    ObjectVerification::Valid => None,
-                    ObjectVerification::Missing | ObjectVerification::Corrupt => Some(index),
-                })
-                .collect();
-
-            let mut handles = BTreeMap::new();
-            for &index in &job_indices {
-                let object = &object_window[index];
-                if let Entry::Vacant(entry) = handles.entry(object.remote.id()) {
-                    let handle = services
-                        .remotes
-                        .open_handle(services.remotes_catalog, object.remote.id(), Some(task))
-                        .map_err(|source| {
-                            remote_open(services.remotes_catalog, services.policy, object, source)
-                        })?;
-                    entry.insert(handle);
+                .filter(|status| **status != ObjectVerification::Valid)
+                .count();
+            let mut jobs = Vec::with_capacity(missing);
+            for (index, status) in status_window.iter().enumerate() {
+                if *status == ObjectVerification::Valid {
+                    continue;
                 }
+                let object = &object_window[index];
+                let handle = services
+                    .remotes
+                    .open_handle(services.remotes_catalog, object.remote.id(), Some(task))
+                    .map_err(|source| {
+                        remote_open(services.remotes_catalog, services.policy, object, source)
+                    })?;
+                jobs.push(RemoteJob::new(handle, index));
             }
-
-            let jobs: Vec<RemoteJob<usize>> = job_indices
-                .iter()
-                .map(|&index| {
-                    RemoteJob::new(handles[&object_window[index].remote.id()].clone(), index)
-                })
-                .collect();
             let results = services.remote_executor.run_download_window(
                 &jobs,
                 |handle, index| {
-                    let object = object_window[*index].clone();
+                    let object = &object_window[*index];
+                    let oid = object.oid;
                     let client = handle.client().clone();
                     let cache_writer = cache_writer.clone();
                     let task = task.clone();
@@ -377,8 +376,7 @@ pub fn download_window(
                     });
                     async move {
                         let publication =
-                            receive(services.remote_executor, client, cache_writer, object.oid)
-                                .await?;
+                            receive(services.remote_executor, client, cache_writer, oid).await?;
                         task.inc(1);
                         Ok(publication)
                     }
@@ -387,7 +385,7 @@ pub fn download_window(
             );
 
             let mut publications = Vec::<CachePublication>::new();
-            for (&index, result) in job_indices.iter().zip(results) {
+            for (job, result) in jobs.iter().zip(results) {
                 let Some(result) = result else { continue };
                 match result {
                     Ok(publication) => {
@@ -400,7 +398,7 @@ pub fn download_window(
                         return Err(worker_error(
                             services.remotes_catalog,
                             services.policy,
-                            &object_window[index],
+                            &object_window[job.payload],
                             source,
                         )
                         .into());

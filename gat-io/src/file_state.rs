@@ -184,29 +184,20 @@ where
     })
 }
 
-/// The outcome of [`check_known_oid`]: whether `expected_oid` was
-/// trusted purely from a stat match, or had to be (re-)established by
-/// actually hashing `path`.
+/// The outcome of [`check_known_oid`]: identity proven by a prior stat,
+/// a size-only mismatch, or a coherent hash with its observation proof.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityCheck {
     /// The current stat exactly matched the prior proof: `expected_oid`
     /// is trusted without reading the file's content at all.
     Proven,
-    /// The stat alone couldn't prove identity (missing/mismatched proof,
-    /// or an unreadable/non-regular-file path), so `path` was actually
-    /// hashed. `oid` is the freshly computed hash; `matches` records
-    /// whether it confirmed `expected_oid`; `proof` is `Some` whenever a
-    /// coherent observation was actually performed to produce `oid` (see
-    /// `coherent_observation`), or `None` for the definitive
-    /// size-mismatch shortcut below, which never reads or hashes `path`
-    /// at all. A pre/post mutation observed while (re-)hashing `path`
-    /// fails this call outright (see `coherent_observation`) rather
-    /// than returning any `Hashed` variant; there is no
-    /// proof-less-but-still-trustworthy `Hashed` outcome.
+    /// A different size proves a mismatch without reading or hashing content.
+    SizeMismatch,
+    /// A coherent content read produced this digest and reusable stat evidence.
     Hashed {
         oid: gat_core::oid::Oid,
         matches: bool,
-        proof: Option<StatProof>,
+        proof: StatProof,
     },
 }
 
@@ -283,11 +274,7 @@ where
             return Ok(IdentityCheck::Proven);
         }
         if current.size != prior.size {
-            return Ok(IdentityCheck::Hashed {
-                oid: gat_core::oid::Oid::from_bytes([0; 32]),
-                matches: false,
-                proof: None,
-            });
+            return Ok(IdentityCheck::SizeMismatch);
         }
     }
     let observation = coherent_observation(path, || hash(path))?;
@@ -295,7 +282,7 @@ where
     Ok(IdentityCheck::Hashed {
         oid: observation.value,
         matches,
-        proof: Some(observation.proof),
+        proof: observation.proof,
     })
 }
 
@@ -418,10 +405,7 @@ mod tests {
             Ok::<_, FileStateError>(test_oid())
         })
         .unwrap();
-        assert!(matches!(
-            result,
-            IdentityCheck::Hashed { matches: false, .. }
-        ));
+        assert!(matches!(result, IdentityCheck::SizeMismatch));
         assert_eq!(
             hash_calls, 0,
             "a size mismatch alone already proves the content differs -- no read is needed"
@@ -481,9 +465,11 @@ mod tests {
         match result {
             IdentityCheck::Hashed { matches, proof, .. } => {
                 assert!(matches);
-                assert!(proof.is_some());
+                assert!(proof.matches(&observe_regular_file_no_follow(&path).unwrap()));
             }
-            IdentityCheck::Proven => panic!("expected a hash to have been required"),
+            IdentityCheck::Proven | IdentityCheck::SizeMismatch => {
+                panic!("expected a hash to have been required")
+            }
         }
     }
 
