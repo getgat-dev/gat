@@ -232,8 +232,16 @@ mod tests {
     #[test]
     fn deletion_validation_preserves_input_order() {
         let temp = tempfile::tempdir().unwrap();
-        std::fs::write(temp.path().join("a"), b"blocker").unwrap();
-        std::fs::write(temp.path().join("z"), b"blocker").unwrap();
+        // Windows can report a child of a regular file as missing, which is
+        // valid for deletion. Native drive prefixes fail before filesystem I/O.
+        #[cfg(windows)]
+        let invalid = ["Z:/child/leaf", "A:/child/leaf"];
+        #[cfg(not(windows))]
+        let invalid = {
+            std::fs::write(temp.path().join("a"), b"blocker").unwrap();
+            std::fs::write(temp.path().join("z"), b"blocker").unwrap();
+            ["z/child/leaf", "a/child/leaf"]
+        };
         let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
             .unwrap()
             .repository_at(temp.path().to_path_buf());
@@ -249,15 +257,21 @@ mod tests {
                         .map(|i| GatPath::normalize(format!("file-{i}")).unwrap())
                         .collect::<Vec<_>>();
                     assert!(validate_deletion_paths(&repo, &paths).is_ok());
-                    for (first, second) in [("z", "a"), ("a", "z")] {
-                        paths[count / 2 + 1] =
-                            GatPath::normalize(format!("{first}/child/leaf")).unwrap();
-                        paths[count - 1] =
-                            GatPath::normalize(format!("{second}/child/leaf")).unwrap();
+                    for [first, second] in [invalid, [invalid[1], invalid[0]]] {
+                        paths[count / 2 + 1] = GatPath::parse_canonical(first).unwrap();
+                        paths[count - 1] = GatPath::parse_canonical(second).unwrap();
+                        let error = validate_deletion_paths(&repo, &paths).unwrap_err();
+                        #[cfg(windows)]
                         assert!(matches!(
-                            validate_deletion_paths(&repo, &paths),
-                            Err(RemoveError::Path(WorktreePathError::Io { path, .. }))
-                                if path == temp.path().join(first).join("child")
+                            error,
+                            RemoveError::Path(WorktreePathError::NotMaterializable { path })
+                                if path == first
+                        ));
+                        #[cfg(not(windows))]
+                        assert!(matches!(
+                            error,
+                            RemoveError::Path(WorktreePathError::Io { path, .. })
+                                if path == temp.path().join(first).parent().unwrap()
                         ));
                     }
                 }
