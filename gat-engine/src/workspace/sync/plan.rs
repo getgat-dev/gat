@@ -7,6 +7,8 @@
 //! file metadata/content and the local object cache's directory listing.
 //! Only `super::execute` is allowed to write.
 
+use std::borrow::Borrow;
+
 use super::{ConflictResolution, PlanSink, Result, SyncAction, SyncError, SyncPlan, Validation};
 use crate::repository::Repository as Repo;
 use gat_core::lexical_path::GatPath;
@@ -348,10 +350,10 @@ impl<'a> MergeBuffer<'a> {
 /// Returns a [`PendingCache`] rather than resolving it immediately: the
 /// caller enqueues it into the current bounded verification window
 /// instead of this function calling into the cache one oid at a time.
-fn desired_only_pending<D: DesiredSide>(
+fn desired_only_pending(
     worktree: WorktreeClient<'_>,
     cache: &CacheClient,
-    d: &D,
+    d: &Entry,
     validation: Validation,
 ) -> Result<PendingCache> {
     if validation == Validation::TrustState {
@@ -363,7 +365,7 @@ fn desired_only_pending<D: DesiredSide>(
         // so a pre-existing user-owned file is never silently destroyed on
         // an error.
         return Ok(PendingCache::new(
-            d.to_entry(),
+            d.clone(),
             MaterializationIntent::Materialize,
         ));
     }
@@ -375,67 +377,15 @@ fn desired_only_pending<D: DesiredSide>(
     // `confine_read`: adding its ancestor-symlink filesystem walk here
     // would cost an extra `symlink_metadata` pass per validated sync
     // candidate; no separate materialized row is added.
-    // Desired-only existing files have no trusted prior proof: pass `None`
-    // so the shared resolver hashes when it needs exact identity. Passing
-    // `d` itself (rather than a pre-encoded hex string) means an absent
-    // destination -- common for a brand-new path -- never hex-encodes
-    // `d`'s oid at all, since `file_status` returns `Absent` before
-    // `check_known_oid` ever inspects the expected oid.
-    let status =
-        file_status_without_prior(worktree, cache, d.path(), &d.to_entry().oid, validation)?;
+    // With no prior stat proof, compare directly against the native OID.
+    let status = file_status_without_prior(worktree, cache, &d.path, &d.oid, validation)?;
     Ok(match status.kind() {
-        FileStatus::Absent => PendingCache::new(d.to_entry(), MaterializationIntent::Materialize),
-        FileStatus::Matches => PendingCache::new(d.to_entry(), MaterializationIntent::Replace),
+        FileStatus::Absent => PendingCache::new(d.clone(), MaterializationIntent::Materialize),
+        FileStatus::Matches => PendingCache::new(d.clone(), MaterializationIntent::Replace),
         FileStatus::Differs => {
-            PendingCache::new(d.to_entry(), MaterializationIntent::ConflictOrReplace)
+            PendingCache::new(d.clone(), MaterializationIntent::ConflictOrReplace)
         }
     })
-}
-
-/// Abstracts over how a desired-side comparison row's oid is represented,
-/// so the merge loop below can classify a row -- and decide whether it
-/// even needs to touch the working tree at all under
-/// `Validation::TrustState` -- without hex-encoding a native `SQLite`
-/// `Oid` except where an actual `Entry` (an emitted action, or a
-/// `file_status` hash comparison) is genuinely required. Mirrors the
-/// `RightRow` pattern in the command comparison coordinator applied to comparison
-/// output rows.
-trait DesiredSide {
-    fn path(&self) -> &GatPath;
-    /// Whether this row's oid matches a materialized row's native `Oid`,
-    /// without ever allocating a hex string.
-    fn oid_matches(&self, prior_oid: &Oid) -> bool;
-    /// Converts to the persistence-boundary [`Entry`] form -- only ever
-    /// called where a [`SyncAction`] actually needs to carry one.
-    fn to_entry(&self) -> Entry;
-}
-
-impl DesiredSide for &Entry {
-    fn path(&self) -> &GatPath {
-        &self.path
-    }
-
-    fn oid_matches(&self, prior_oid: &Oid) -> bool {
-        *prior_oid == self.oid
-    }
-
-    fn to_entry(&self) -> Entry {
-        (*self).clone()
-    }
-}
-
-impl DesiredSide for DesiredRow {
-    fn path(&self) -> &GatPath {
-        &self.path
-    }
-
-    fn oid_matches(&self, prior_oid: &Oid) -> bool {
-        *prior_oid == self.oid
-    }
-
-    fn to_entry(&self) -> Entry {
-        self.clone().into_entry()
-    }
 }
 
 fn filter_desired_entries<'a>(entries: &'a [Entry], selection: &Selection) -> Vec<&'a Entry> {
@@ -462,17 +412,6 @@ fn debug_assert_sorted_entries(entries: &[&Entry]) {
             .windows(2)
             .all(|window| window[0].path < window[1].path)
     );
-}
-
-/// Adapts the shared desired-query cursor to the merge loop's
-/// [`DesiredSide`] abstraction, yielding the native
-/// [`gat_io::DesiredRow`] directly instead of
-/// eagerly hex-encoding it into an [`Entry`] -- see [`DesiredSide`] for
-/// where (and whether) that conversion actually happens.
-fn next_matching_desired(
-    next: &mut impl FnMut() -> std::result::Result<Option<DesiredRow>, StateStoreError>,
-) -> Result<Option<DesiredRow>> {
-    Ok(next()?)
 }
 
 /// Classify a materialized-only row (no corresponding desired entry, i.e.
@@ -679,13 +618,12 @@ pub(crate) fn plan_into_sink(
         // authority; see `DesiredQuery::for_selection`.
         store.with_desired_rows(DesiredQuery::for_selection(selection), |mut desired| {
             store.with_rows_in_scope(scope, |mut materialized| {
-                let mut next_desired = || desired.next();
                 let mut next_prior = || materialized.next();
                 merge_desired_with_prior(
                     repo,
                     cache,
                     policy,
-                    &mut || next_matching_desired(&mut next_desired),
+                    &mut || Ok(desired.next()?.map(DesiredRow::into_entry)),
                     &mut || next_matching_prior(&mut next_prior, selection),
                     merge_window,
                     sink,
@@ -724,16 +662,16 @@ pub(crate) fn plan_with_store(
 /// `Some`/`None`-store branches: `next_prior` yields the next materialized
 /// row in `path` order (or `None` once exhausted, including when there was
 /// never a materialized-state database to begin with). Generic over
-/// [`DesiredSide`] so the same merge drives both the `Lock`-based
+/// [`Borrow<Entry>`] so the same merge drives both the `Lock`-based
 /// (`&Entry`) and SQLite-streamed native
-/// ([`gat_io::DesiredRow`]) desired sources.
+/// desired sources without cloning unchanged borrowed entries.
 ///
 /// Every classification is delivered to `sink` -- a bounded
 /// [`MergeBuffer`] window at a time (see [`MergeBuffer::flush`]) -- rather
 /// than collected into a whole-operation `Vec<SyncAction>` here: the merge
 /// itself never has to know (or care) whether its caller wants a complete
 /// [`SyncPlan`] or an immediately-applied bounded action batch.
-fn merge_desired_with_prior<D: DesiredSide>(
+fn merge_desired_with_prior<D: Borrow<Entry>>(
     repo: &Repo,
     cache: &CacheClient,
     policy: crate::ReconciliationPolicy,
@@ -765,11 +703,11 @@ fn merge_desired_with_prior<D: DesiredSide>(
             if let Some(r) = &row {
                 if let Some(last) = &last_desired_path {
                     debug_assert!(
-                        last < r.path(),
+                        last < &r.borrow().path,
                         "desired rows must be strictly ordered by path"
                     );
                 }
-                last_desired_path = Some(r.path().clone());
+                last_desired_path = Some(r.borrow().path.clone());
             }
             row
         }};
@@ -806,15 +744,18 @@ fn merge_desired_with_prior<D: DesiredSide>(
     let mut current_prior = next_prior_checked!();
 
     loop {
-        match (current_desired.as_ref(), current_prior.as_ref()) {
-            (Some(d), Some(prior)) if d.path() == prior.path() => {
-                let path = d.path();
+        match (
+            current_desired.as_ref().map(Borrow::borrow),
+            current_prior.as_ref(),
+        ) {
+            (Some(d), Some(prior)) if &d.path == prior.path() => {
+                let path = &d.path;
                 // Reconciliation identity is OID-only: size is never part
                 // of the semantic comparison here. Comparing via the
                 // native `Oid` (rather than hex) means a desired row
                 // whose oid matches its prior materialized row never
                 // gets hex-encoded just to make that determination.
-                let target_matches_prior = d.oid_matches(&prior.oid());
+                let target_matches_prior = d.oid == prior.oid();
                 if validation == Validation::TrustState {
                     // `file_status` under `TrustState` always reports
                     // `Matches { proof_refresh: None }` without touching
@@ -823,10 +764,7 @@ fn merge_desired_with_prior<D: DesiredSide>(
                     // mismatched-oid `replace` action below -- skip
                     // building `dest`/hex-encoding anything else.
                     if !target_matches_prior {
-                        enqueue!(PendingCache::new(
-                            d.to_entry(),
-                            MaterializationIntent::Replace
-                        ));
+                        enqueue!(PendingCache::new(d.clone(), MaterializationIntent::Replace));
                     }
                 } else {
                     // The stat proof recorded alongside `prior.oid` is
@@ -844,7 +782,7 @@ fn merge_desired_with_prior<D: DesiredSide>(
                         match status.kind() {
                             FileStatus::Absent => {
                                 enqueue!(PendingCache::new(
-                                    d.to_entry(),
+                                    d.clone(),
                                     MaterializationIntent::Materialize
                                 ));
                             }
@@ -859,7 +797,7 @@ fn merge_desired_with_prior<D: DesiredSide>(
                                     // making any proof observed here
                                     // immediately stale.
                                     enqueue!(PendingCache::new(
-                                        d.to_entry(),
+                                        d.clone(),
                                         MaterializationIntent::Rematerialize
                                     ));
                                 } else if let Some(mutation) =
@@ -869,7 +807,7 @@ fn merge_desired_with_prior<D: DesiredSide>(
                                 }
                             }
                             FileStatus::Differs => {
-                                let entry = d.to_entry();
+                                let entry = d.clone();
                                 enqueue!(if policy.rematerialize() {
                                     PendingCache::new(
                                         entry,
@@ -887,19 +825,19 @@ fn merge_desired_with_prior<D: DesiredSide>(
                         match status.kind() {
                             FileStatus::Absent => {
                                 enqueue!(PendingCache::new(
-                                    d.to_entry(),
+                                    d.clone(),
                                     MaterializationIntent::Materialize
                                 ));
                             }
                             FileStatus::Matches => {
                                 enqueue!(PendingCache::new(
-                                    d.to_entry(),
+                                    d.clone(),
                                     MaterializationIntent::Replace
                                 ));
                             }
                             FileStatus::Differs => {
                                 enqueue!(PendingCache::new(
-                                    d.to_entry(),
+                                    d.clone(),
                                     MaterializationIntent::ConflictOrReplace
                                 ));
                             }
@@ -909,7 +847,7 @@ fn merge_desired_with_prior<D: DesiredSide>(
                 current_desired = next_desired_checked!();
                 current_prior = next_prior_checked!();
             }
-            (Some(d), Some(prior)) if d.path() < prior.path() => {
+            (Some(d), Some(prior)) if &d.path < prior.path() => {
                 let kind = desired_only_pending(worktree, cache, d, validation)?;
                 enqueue!(kind);
                 current_desired = next_desired_checked!();

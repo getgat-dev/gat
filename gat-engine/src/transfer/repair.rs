@@ -331,10 +331,10 @@ pub fn repair_window(
     let worker_results = services.remote_executor.run_repair_window(
         &jobs,
         |handle, index| {
-            let object = objects[*index].clone();
+            let oid = objects[*index].oid;
             let client = handle.client().clone();
             let cache_writer = cache_writer.clone();
-            async move { receive(services.remote_executor, client, cache_writer, object.oid).await }
+            async move { receive(services.remote_executor, client, cache_writer, oid).await }
         },
         || WorkerError::Cancelled,
     );

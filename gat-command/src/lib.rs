@@ -16,7 +16,6 @@ mod mount;
 #[path = "move.rs"]
 mod move_cmd;
 mod ownership;
-mod parallel;
 mod push;
 mod remote;
 mod remote_status;

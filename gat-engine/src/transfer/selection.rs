@@ -44,40 +44,15 @@ pub fn visit_history_objects<E>(
 where
     E: From<HistoryError> + From<LockError>,
 {
-    enum Bridge<E> {
-        History(HistoryError),
-        Lock(LockError),
-        Callback(E),
-    }
-
-    impl<E> From<HistoryError> for Bridge<E> {
-        fn from(error: HistoryError) -> Self {
-            Self::History(error)
-        }
-    }
-
-    impl<E> From<LockError> for Bridge<E> {
-        fn from(error: LockError) -> Self {
-            Self::Lock(error)
-        }
-    }
-
-    let stats = repo
-        .visit_history_lock_entries::<Bridge<E>>(
-            history,
-            |path| selection.matches_str(path),
-            |entry| {
-                sink(SelectedObject {
-                    oid: entry.oid,
-                    representative_path: entry.path.clone(),
-                })
-                .map_err(Bridge::Callback)
-            },
-        )
-        .map_err(|error| match error {
-            Bridge::History(error) => E::from(error),
-            Bridge::Lock(error) => E::from(error),
-            Bridge::Callback(error) => error,
-        })?;
+    let stats = repo.visit_history_lock_entries::<E>(
+        history,
+        |path| selection.matches_str(path),
+        |entry| {
+            sink(SelectedObject {
+                oid: entry.oid,
+                representative_path: entry.path.clone(),
+            })
+        },
+    )?;
     Ok(stats.shallow)
 }

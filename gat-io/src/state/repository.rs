@@ -208,15 +208,10 @@ impl<'repo> DesiredStateSession<'repo> {
         } else {
             self.store.desired_rows(DesiredQuery::exact(&unresolved))?
         };
-        let mut desired_oid_by_path = HashMap::with_capacity(candidates.len());
-        for (path, desired_oid) in &candidates {
-            if let Some(oid) = desired_oid {
-                desired_oid_by_path.insert(path, oid);
-            }
-        }
-        for entry in &looked_up {
-            desired_oid_by_path.insert(&entry.path, &entry.oid);
-        }
+        let desired_oid_by_path = looked_up
+            .iter()
+            .map(|entry| (&entry.path, &entry.oid))
+            .collect::<HashMap<_, _>>();
 
         let paths = candidates
             .iter()
@@ -229,8 +224,11 @@ impl<'repo> DesiredStateSession<'repo> {
             .collect::<HashMap<_, _>>();
         let results = candidates
             .par_iter()
-            .map(|(path, _)| {
-                let Some(&desired_oid) = desired_oid_by_path.get(path) else {
+            .map(|(path, desired_oid)| {
+                let Some(desired_oid) = desired_oid
+                    .as_ref()
+                    .or_else(|| desired_oid_by_path.get(path).copied())
+                else {
                     return Ok(None);
                 };
                 let row = materialized_by_path.get(path).copied();
@@ -1175,6 +1173,51 @@ mod tests {
     ) -> Result<(), PublishError> {
         let mut store = StateStore::open(layout)?;
         store.publish_desired_complete::<PublishError>(layout, lock, target)
+    }
+
+    #[test]
+    fn reuse_partition_combines_supplied_and_queried_oids_in_input_order() {
+        let (temp, layout) = layout();
+        let content = b"tracked content";
+        let oid = Oid::from_bytes(*blake3::hash(content).as_bytes());
+        let lock = Lock {
+            entries: ["known", "queried", "changed"]
+                .map(|path| Entry {
+                    path: gp(path),
+                    oid,
+                })
+                .to_vec(),
+        };
+        publish_complete(&layout, &lock, LockShardLevels::FLAT).unwrap();
+        for path in ["known", "queried", "new"] {
+            std::fs::write(temp.path().join(path), content).unwrap();
+        }
+        std::fs::write(temp.path().join("changed"), b"local edits").unwrap();
+        let session = DesiredStateSession::open(&layout).unwrap();
+        let (reused, to_hash) = session
+            .partition_reusable(
+                vec![
+                    (gp("queried"), None),
+                    (gp("new"), None),
+                    (gp("known"), Some(oid)),
+                    (gp("changed"), None),
+                ],
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            reused
+                .iter()
+                .map(|entry| entry.entry().path.as_str())
+                .collect::<Vec<_>>(),
+            ["queried", "known"]
+        );
+        assert!(
+            reused
+                .iter()
+                .all(PreparedMaterialization::unchanged_desired)
+        );
+        assert_eq!(to_hash, [gp("new"), gp("changed")]);
     }
 
     #[test]

@@ -1792,11 +1792,9 @@ fn save_sharded_with_publication(
 /// Read an arbitrary lock-format file (used for `gat.lock` itself via
 /// `load`). Empty lock if the file doesn't exist yet.
 pub(super) fn load_file(path: &Path) -> Result<Lock> {
-    if !path.exists() {
+    let Some(text) = read_file_if_present(path)? else {
         return Ok(Lock::default());
-    }
-    let text =
-        std::fs::read_to_string(path).map_err(|source| LockError::io("reading", path, source))?;
+    };
     Lock::parse(&text).map_err(|err| wrap_shard_parse_error(path, err))
 }
 
@@ -2290,14 +2288,11 @@ mod shard {
             if dir == base {
                 break;
             }
-            if std::fs::read_dir(dir)
-                .map_err(|source| LockError::io("reading", dir, source))?
-                .next()
-                .is_some()
-            {
-                break;
+            match std::fs::remove_dir(dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => break,
+                Err(source) => return Err(LockError::io("removing", dir, source)),
             }
-            std::fs::remove_dir(dir).map_err(|source| LockError::io("removing", dir, source))?;
             cur = dir.parent();
         }
         Ok(())
@@ -2309,6 +2304,21 @@ mod shard {
 
         fn gp(s: &str) -> gat_core::lexical_path::GatPath {
             gat_core::lexical_path::GatPath::parse_canonical(s).unwrap()
+        }
+
+        #[test]
+        fn pruning_stops_at_siblings_and_preserves_the_base_directory() {
+            let temp = tempfile::tempdir().unwrap();
+            let base = temp.path();
+            std::fs::create_dir_all(base.join("aa/bb")).unwrap();
+            std::fs::write(base.join("aa/bb/removed.tsv"), b"shard").unwrap();
+            std::fs::write(base.join("aa/kept.tsv"), b"sibling").unwrap();
+            remove_file_and_empty_parents(base, Path::new("aa/bb/removed.tsv")).unwrap();
+            assert!(!base.join("aa/bb").exists());
+            assert!(base.join("aa/kept.tsv").is_file());
+            remove_file_and_empty_parents(base, Path::new("aa/kept.tsv")).unwrap();
+            assert!(!base.join("aa").exists());
+            assert!(base.is_dir());
         }
 
         #[test]
@@ -3653,6 +3663,26 @@ mod tests {
         crate::RepositoryLayout::at(root.to_path_buf())
     }
     use super::*;
+
+    #[test]
+    fn load_file_distinguishes_missing_files_from_read_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            load_file(&temp.path().join("missing")).unwrap(),
+            Lock::default()
+        );
+        assert!(matches!(load_file(temp.path()), Err(LockError::Io { .. })));
+        // Unix reports ENOTDIR here; Windows may report a missing path.
+        #[cfg(unix)]
+        {
+            let blocker = temp.path().join("blocker");
+            std::fs::write(&blocker, b"regular file").unwrap();
+            assert!(matches!(
+                load_file(&blocker.join("gat.lock")),
+                Err(LockError::Io { .. })
+            ));
+        }
+    }
 
     fn gp(s: &str) -> gat_core::lexical_path::GatPath {
         gat_core::lexical_path::GatPath::parse_canonical(s).unwrap()

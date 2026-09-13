@@ -3457,6 +3457,7 @@ fn fetch_correctly_aligns_verification_across_several_subwindows_within_one_tran
         }
     }
 
+    let opens = gat_engine::test_support::remote_open_count_for("origin");
     let mut desired_op =
         DesiredOperation::acquire_with_limits(&repo, &NoopProgress, limits).unwrap();
     let fetched = fetch_selected(&mut desired_op, &Selection::root(), None, &NoopProgress)
@@ -3468,6 +3469,10 @@ fn fetch_correctly_aligns_verification_across_several_subwindows_within_one_tran
         "exactly the objects removed from the local cache must be \
          redownloaded, regardless of how the transfer window and \
          verification subwindows relate"
+    );
+    assert_eq!(
+        gat_engine::test_support::remote_open_count_for("origin") - opens,
+        1
     );
     for oid in &removed_oids {
         assert!(

@@ -190,64 +190,18 @@ impl Unchanged {
     }
 }
 
-/// Abstracts over how a right/"to"-side comparison row's oid is
-/// represented, letting [`merge_ordered`] classify a row without
-/// hex-encoding its oid except when the row is actually retained in the
-/// output. Both persisted [`Entry`] and current [`DesiredRow`] values
-/// already carry native [`Oid`] values, so retained rows preserve that
-/// representation and dropped rows never encode textual hashes.
-trait RightRow {
-    fn path(&self) -> &GatPath;
-    /// Whether this row's oid matches a persisted [`Entry`]'s oid.
-    fn oid_eq(&self, left_oid: Oid) -> bool;
-    /// Consumes the row into its final `(path, oid)` output form -- only
-    /// ever called for a row that ends up in [`ChangedRow`].
-    fn into_parts(self) -> (GatPath, Oid);
-}
-
-impl RightRow for Entry {
-    fn path(&self) -> &GatPath {
-        &self.path
-    }
-
-    fn oid_eq(&self, left_oid: Oid) -> bool {
-        self.oid == left_oid
-    }
-
-    fn into_parts(self) -> (GatPath, Oid) {
-        (self.path, self.oid)
-    }
-}
-
-impl RightRow for DesiredRow {
-    fn path(&self) -> &GatPath {
-        &self.path
-    }
-
-    fn oid_eq(&self, left_oid: Oid) -> bool {
-        self.oid == left_oid
-    }
-
-    fn into_parts(self) -> (GatPath, Oid) {
-        (self.path, self.oid)
-    }
-}
-
-/// Merge-walk two path-ordered row sources, emitting one [`ChangedRow`]
-/// per path present on either side. Holds at most one row per side, so
-/// memory scales with the retained output, not with either input. `left`
-/// is always a persisted [`Entry`] (`gat.lock` only ever has a hex oid to
-/// give); `right` is generic over [`RightRow`] so a native-`Oid` current
-/// row never gets hex-encoded for a path this merge ends up dropping.
-fn merge_ordered<R: RightRow>(
+/// Merge two path-ordered sources, retaining at most one pending row per side.
+/// Both persisted and current rows carry native OIDs; conversion from a
+/// desired-state row moves its fields without allocation.
+fn merge_ordered(
     mut left: impl FnMut() -> Result<Option<Entry>>,
-    mut right: impl FnMut() -> Result<Option<R>>,
+    mut right: impl FnMut() -> Result<Option<Entry>>,
     unchanged: Unchanged,
     out: &mut Vec<ChangedRow>,
 ) -> Result<()> {
     let mut l = left()?;
     let mut r = right()?;
-    while let Some(pair) = take_ordered(&mut l, &mut r, |from, to| from.path.cmp(to.path())) {
+    while let Some(pair) = take_ordered(&mut l, &mut r, |from, to| from.path.cmp(&to.path)) {
         match pair {
             OrderedPair::Left(from) => {
                 out.push(ChangedRow {
@@ -257,7 +211,7 @@ fn merge_ordered<R: RightRow>(
                 l = left()?;
             }
             OrderedPair::Right(to) => {
-                let (path, oid) = to.into_parts();
+                let Entry { path, oid } = to;
                 out.push(ChangedRow {
                     path,
                     change: RowChange::Added { oid },
@@ -265,9 +219,9 @@ fn merge_ordered<R: RightRow>(
                 r = right()?;
             }
             OrderedPair::Both(from, to) => {
-                let same = to.oid_eq(from.oid);
+                let same = to.oid == from.oid;
                 if !same || unchanged.keeps() {
-                    let (_, oid) = to.into_parts();
+                    let oid = to.oid;
                     out.push(ChangedRow {
                         path: from.path,
                         change: if same {
@@ -316,23 +270,7 @@ fn take_ordered<L, R>(
     }
 }
 
-/// One shard's rows, selection-filtered and path-ordered.
-///
-/// Shards are written path-ordered, but a hand-edited lock file need not
-/// be, and the merge below depends on ordering for correctness rather
-/// than performance -- so ordering is established per shard (bounded by
-/// one shard's size), never over the whole state.
-fn shard_rows(
-    snapshot: &LockSnapshot,
-    shard: &SnapshotShard,
-    selection: &Selection,
-) -> Result<Vec<Entry>> {
-    let mut entries = snapshot.shard_rows_selected(shard, selection)?;
-    entries.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(entries)
-}
-
-fn vec_source<R>(entries: Vec<R>) -> impl FnMut() -> Result<Option<R>> {
+fn entry_source(entries: impl IntoIterator<Item = Entry>) -> impl FnMut() -> Result<Option<Entry>> {
     let mut iter = entries.into_iter();
     move || Ok(iter.next())
 }
@@ -354,7 +292,7 @@ fn vec_source<R>(entries: Vec<R>) -> impl FnMut() -> Result<Option<R>> {
 ///
 /// `None` means "no such shortcut": the caller must visit shards.
 ///
-/// This is one filtered parse of the single flat shard (`shard_rows`,
+/// This is one filtered parse of the single flat shard (`LockSnapshot::shard_rows_selected`,
 /// `keep = selection.matches`), not an existence check followed by a
 /// second, separately-filtered parse: `selection` already selects the
 /// scope path *and* its descendants, so checking `entry_for_path(scope)`
@@ -372,7 +310,7 @@ fn exact_scope_rows(snapshot: &LockSnapshot, selection: &Selection) -> Result<Op
     let Some(shard) = snapshot.shards().first() else {
         return Ok(Some(Vec::new()));
     };
-    Ok(Some(shard_rows(snapshot, shard, selection)?))
+    Ok(Some(snapshot.shard_rows_selected(shard, selection)?))
 }
 
 /// Which logical shard each side's shard vector holds for one id, or
@@ -481,7 +419,7 @@ fn compare_snapshots(
             exact_scope_rows(to, selection)?,
         )
     {
-        merge_ordered(vec_source(left), vec_source(right), unchanged, &mut out)?;
+        merge_ordered(entry_source(left), entry_source(right), unchanged, &mut out)?;
         return Ok(out);
     }
     if from.shard_levels() == to.shard_levels() {
@@ -508,7 +446,6 @@ fn compare_snapshots(
                     &mut out,
                 )?;
             }
-            out.sort_by(|a, b| a.path.cmp(&b.path));
             return Ok(out);
         }
         for (left, right) in merge_shards_by_id(from.shards(), to.shards()) {
@@ -522,16 +459,16 @@ fn compare_snapshots(
                 continue;
             }
             let left_rows = match left {
-                Some(shard) => shard_rows(from, shard, selection)?,
+                Some(shard) => from.shard_rows_selected(shard, selection)?,
                 None => Vec::new(),
             };
             let right_rows = match right {
-                Some(shard) => shard_rows(to, shard, selection)?,
+                Some(shard) => to.shard_rows_selected(shard, selection)?,
                 None => Vec::new(),
             };
             merge_ordered(
-                vec_source(left_rows),
-                vec_source(right_rows),
+                entry_source(left_rows),
+                entry_source(right_rows),
                 unchanged,
                 &mut out,
             )?;
@@ -542,8 +479,8 @@ fn compare_snapshots(
         // compared as one full logical state. Deliberately isolated here
         // so same-shape comparisons above never pay for it.
         merge_ordered(
-            vec_source(from.rows_sorted(selection)?),
-            vec_source(to.rows_sorted(selection)?),
+            entry_source(from.rows_sorted(selection)?),
+            entry_source(to.rows_sorted(selection)?),
             unchanged,
             &mut out,
         )?;
@@ -568,11 +505,11 @@ fn compare_snapshots(
 /// (`BTreeMap`-backed) scoped current read and an unbounded full
 /// traversal that only ever holds one shard's rows in memory
 /// (the state capability's grouped pull operation).
-fn merge_persisted_shards_with_current_groups<R: RightRow>(
+fn merge_persisted_shards_with_current_groups(
     from: &LockSnapshot,
     selection: &Selection,
     unchanged: Unchanged,
-    mut next_current_group: impl FnMut() -> Result<Option<(LockShardId, Vec<R>)>>,
+    mut next_current_group: impl FnMut() -> Result<Option<(LockShardId, Vec<DesiredRow>)>>,
     out: &mut Vec<ChangedRow>,
 ) -> Result<()> {
     let mut persisted = from.shards().iter();
@@ -582,21 +519,26 @@ fn merge_persisted_shards_with_current_groups<R: RightRow>(
         match pair {
             OrderedPair::Left(shard) => {
                 merge_ordered(
-                    vec_source(shard_rows(from, shard, selection)?),
-                    vec_source(Vec::<R>::new()),
+                    entry_source(from.shard_rows_selected(shard, selection)?),
+                    entry_source(Vec::new()),
                     unchanged,
                     out,
                 )?;
                 left = persisted.next();
             }
             OrderedPair::Right((_, rows)) => {
-                merge_ordered(vec_source(Vec::new()), vec_source(rows), unchanged, out)?;
+                merge_ordered(
+                    entry_source(Vec::new()),
+                    entry_source(rows.into_iter().map(DesiredRow::into_entry)),
+                    unchanged,
+                    out,
+                )?;
                 right = next_current_group()?;
             }
             OrderedPair::Both(shard, (_, rows)) => {
                 merge_ordered(
-                    vec_source(shard_rows(from, shard, selection)?),
-                    vec_source(rows),
+                    entry_source(from.shard_rows_selected(shard, selection)?),
+                    entry_source(rows.into_iter().map(DesiredRow::into_entry)),
                     unchanged,
                     out,
                 )?;
@@ -765,8 +707,8 @@ fn compare_snapshot_with_current(
     if let Some(left_rows) = exact_scope_rows(from, selection)? {
         store.with_desired_rows(DesiredQuery::for_selection(selection), |mut rows| {
             merge_ordered(
-                vec_source(left_rows),
-                || Ok(rows.next()?),
+                entry_source(left_rows),
+                || Ok(rows.next()?.map(DesiredRow::into_entry)),
                 unchanged,
                 &mut out,
             )
@@ -781,8 +723,7 @@ fn compare_snapshot_with_current(
             // Stream both sides directly instead of buffering either as
             // a whole-state `Vec<Entry>`: the persisted shard is pulled
             // via `with_shard_rows_pull` (bounded-memory streaming for
-            // the canonical `path`-ordered case, an internal
-            // materialize-and-sort fallback otherwise), and the current
+            // the certified `path`-ordered case), and the current
             // side is one ordinary `path`-ordered SQLite cursor -- so a
             // full flat comparison holds at most one pending row per side
             // in the common case, not a repository-sized collection on
@@ -794,7 +735,7 @@ fn compare_snapshot_with_current(
             store.with_desired_rows(
                 DesiredQuery::for_selection(selection),
                 |mut rows| -> Result<()> {
-                    let mut next_current = || Ok(rows.next()?);
+                    let mut next_current = || Ok(rows.next()?.map(DesiredRow::into_entry));
                     from.with_shard_rows_pull(shard, selection, |next_left| {
                         merge_ordered(next_left, &mut next_current, unchanged, &mut out)
                     })
@@ -856,8 +797,8 @@ fn compare_snapshot_with_current(
         let left_rows = from.rows_sorted(selection)?;
         store.with_desired_rows(DesiredQuery::for_selection(selection), |mut rows| {
             merge_ordered(
-                vec_source(left_rows),
-                || Ok(rows.next()?),
+                entry_source(left_rows),
+                || Ok(rows.next()?.map(DesiredRow::into_entry)),
                 unchanged,
                 &mut out,
             )
@@ -930,7 +871,7 @@ mod tests {
 
     fn merge(left: Vec<Entry>, right: Vec<Entry>, unchanged: Unchanged) -> Vec<ChangedRow> {
         let mut out = Vec::new();
-        merge_ordered(vec_source(left), vec_source(right), unchanged, &mut out).unwrap();
+        merge_ordered(entry_source(left), entry_source(right), unchanged, &mut out).unwrap();
         out
     }
 

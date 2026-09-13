@@ -408,10 +408,12 @@ fn desired_shard_paths_tx(
         .state_context("preparing desired-shard path query")?
         .query_map([shard_id.as_str()], |row| row.get::<_, String>(0))
         .state_context("querying desired-shard paths")?
-        .collect::<rusqlite::Result<Vec<String>>>()
-        .state_context("reading desired-shard paths")?
-        .into_iter()
-        .map(|s| super::decode_path(s, "desired-shard row"))
+        .map(|row| {
+            super::decode_path(
+                row.state_context("reading desired-shard paths")?,
+                "desired-shard row",
+            )
+        })
         .collect()
 }
 
@@ -641,29 +643,29 @@ pub(super) fn apply_shard_entries_tx(
     // and binding the same canonical string once per row.
     let shard_buf = CanonicalShardIdBuf::encode(shard_id);
     let chunk_size = sql_chunk_size_with_shared_binds(2, 1);
-    let mut params: Vec<rusqlite::types::ToSqlOutput<'_>> = Vec::with_capacity(chunk_size * 2 + 1);
     for chunk in entries.chunks(chunk_size) {
         // Bind the shared value first. A high-numbered parameter in the first
         // tuple makes SQLite search its growing variable list for subsequent
         // lower-numbered parameters, causing quadratic statement preparation.
         // Anonymous row parameters advance monotonically; repeated ?1 lookups
         // always find the first variable.
-        let row_placeholders = vec!["(?1, ?, ?)"; chunk.len()];
+        let placeholders = sql_placeholders("(?1, ?, ?)", chunk.len());
         let sql = format!(
             "INSERT INTO state (desired_shard_id, path, desired_oid)
-             VALUES {}
+             VALUES {placeholders}
              ON CONFLICT(path) DO UPDATE SET
                  desired_oid = excluded.desired_oid,
-                 desired_shard_id = excluded.desired_shard_id",
-            row_placeholders.join(", ")
+                 desired_shard_id = excluded.desired_shard_id"
         );
-        params.clear();
-        params.push(shard_buf.as_str().into());
-        for e in chunk {
-            params.push(e.path.as_str().into());
-            params.push(e.oid.as_bytes().as_slice().into());
-        }
-        tx.execute(&sql, params_from_iter(params.iter()))
+        let params = std::iter::once(rusqlite::types::ToSqlOutput::from(shard_buf.as_str())).chain(
+            chunk.iter().flat_map(|entry| {
+                [
+                    rusqlite::types::ToSqlOutput::from(entry.path.as_str()),
+                    rusqlite::types::ToSqlOutput::from(entry.oid.as_bytes().as_slice()),
+                ]
+            }),
+        );
+        tx.execute(&sql, params_from_iter(params))
             .with_state_context(|| format!("upserting {} desired-state row(s)", chunk.len()))?;
     }
     Ok(())
@@ -1023,5 +1025,30 @@ impl StateStore {
             .state_context("opening desired-path cursor")
             .map_err(E::from)?;
         f(DesiredPaths { rows })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shard_refresh_binds_shared_id_across_chunks_and_clears_stale_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let layout = crate::RepositoryLayout::at(temp.path().to_path_buf());
+        let mut store = StateStore::open(&layout).unwrap();
+        let shard = LockShardId::flat();
+        let entries = (0..sql_chunk_size_with_shared_binds(2, 1) + 3)
+            .map(|index| Entry {
+                path: GatPath::parse_canonical(&format!("file-{index:06}")).unwrap(),
+                oid: gat_core::oid::Oid::from_bytes(*blake3::hash(&index.to_le_bytes()).as_bytes()),
+            })
+            .collect::<Vec<_>>();
+        for expected in [entries.as_slice(), &entries[..3], &entries[..0]] {
+            let tx = store.conn.transaction().unwrap();
+            apply_shard_entries_tx(&tx, shard, expected).unwrap();
+            tx.commit().unwrap();
+            assert_eq!(store.load_desired_as_lock().unwrap().entries, expected);
+        }
     }
 }
