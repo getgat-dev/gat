@@ -333,7 +333,7 @@ impl RemoteExecutor {
         let mut active = FuturesUnordered::new();
         let mut results: Vec<Option<R>> = (0..jobs.len()).map(|_| None).collect();
         let mut frontier = jobs.len();
-        let mut refresh_timer: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
+        let mut refresh_timer = None;
         loop {
             let changed = self.transfer.notified();
             tokio::pin!(changed);
@@ -381,20 +381,7 @@ impl RemoteExecutor {
             }
             observer.report(active.len(), false);
             let deadline = observer.deadline();
-            if let Some(deadline) = deadline {
-                let timer = refresh_timer
-                    .get_or_insert_with(|| Box::pin(tokio::time::sleep_until(deadline)));
-                if timer.deadline() != deadline {
-                    timer.as_mut().reset(deadline);
-                }
-            }
-            let refresh = async {
-                if let Some(timer) = refresh_timer.as_mut() {
-                    timer.as_mut().await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            };
+            let refresh = crate::progress_reporting::wait_for_refresh(&mut refresh_timer, deadline);
             let completed = tokio::select! {
                 biased;
                 () = self.cancellation.cancelled(), if cancelled.is_some() && !self.is_cancelled() => continue,

@@ -1,9 +1,8 @@
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use gat_core::progress::{ProgressActivity, ProgressHandle, PublicationProgress};
-use std::pin::Pin;
 #[cfg(test)]
 use tokio::time::Duration;
-use tokio::time::{Instant, Sleep};
+use tokio::time::Instant;
 
 use crate::progress_reporting;
 #[cfg(test)]
@@ -15,9 +14,9 @@ use crate::progress_reporting::REFRESH_INTERVAL;
 /// window boundaries. Workers must not update its task's publication activity.
 pub struct PublishProgress {
     pub(super) task: ProgressHandle,
-    pub(super) counts: PublicationProgress,
+    counts: PublicationProgress,
     enabled: bool,
-    pub(super) completed: u64,
+    completed: u64,
     last: Option<(PublicationProgress, Instant)>,
 }
 
@@ -33,6 +32,53 @@ impl PublishProgress {
         }
     }
 
+    pub(super) const fn checking_started(&mut self) {
+        if self.enabled {
+            self.counts.checking += 1;
+        }
+    }
+
+    pub(super) const fn checking_finished(&mut self, success: bool) {
+        if self.enabled {
+            self.counts.checking -= 1;
+            if success {
+                self.counts.checked += 1;
+            }
+        }
+    }
+
+    pub(super) const fn uploading_started(&mut self) {
+        if self.enabled {
+            self.counts.uploading += 1;
+        }
+    }
+
+    pub(super) const fn uploading_finished(&mut self) {
+        if self.enabled {
+            self.counts.uploading -= 1;
+        }
+    }
+
+    pub(super) const fn verifying(&mut self, count: usize) {
+        if self.enabled {
+            self.counts.verifying = count as u64;
+        }
+    }
+
+    pub(super) const fn complete(&mut self, status: super::PublishStatus) {
+        if !self.enabled {
+            return;
+        }
+        self.completed += 1;
+        match status {
+            super::PublishStatus::AlreadyPresent => self.counts.already_present += 1,
+            super::PublishStatus::Uploaded => self.counts.uploaded += 1,
+            super::PublishStatus::CacheMissing | super::PublishStatus::CacheCorrupt => {
+                self.counts.rejected += 1;
+            }
+        }
+    }
+
     /// Wait for useful work, publishing a deferred snapshot if I/O stalls.
     ///
     /// The caller retains one lazily allocated timer for the window. Reusing
@@ -41,23 +87,9 @@ impl PublishProgress {
     pub(super) async fn next_completion<S: Stream + Unpin>(
         &mut self,
         completions: &mut S,
-        timer: &mut Option<Pin<Box<Sleep>>>,
+        timer: &mut progress_reporting::RefreshTimer,
     ) -> Option<S::Item> {
-        loop {
-            let Some(deadline) = self.refresh_deadline() else {
-                return completions.next().await;
-            };
-            let sleep = timer.get_or_insert_with(|| Box::pin(tokio::time::sleep_until(deadline)));
-            if sleep.deadline() != deadline {
-                sleep.as_mut().reset(deadline);
-            }
-            tokio::select! {
-                // Prefer publishing an expired snapshot to draining more work.
-                biased;
-                () = sleep.as_mut() => self.report(true),
-                completion = completions.next() => return completion,
-            }
-        }
+        progress_reporting::next_with_refresh(self, completions, timer).await
     }
 
     pub(super) fn report(&mut self, force: bool) {
@@ -89,6 +121,15 @@ impl PublishProgress {
                 .set_activity(ProgressActivity::Publishing(self.counts));
             self.last = Some((self.counts, now));
         }
+    }
+}
+
+impl progress_reporting::Refresh for PublishProgress {
+    fn deadline(&self) -> Option<Instant> {
+        self.refresh_deadline()
+    }
+    fn flush(&mut self) {
+        self.report(true);
     }
 }
 
@@ -199,7 +240,14 @@ mod tests {
         use gat_core::progress::{NoopProgress, ProgressOperation, ProgressReporter, ProgressSpec};
         let task = NoopProgress.begin(ProgressSpec::indeterminate(ProgressOperation::Pushing));
         let mut progress = PublishProgress::new(task.handle());
-        progress.counts.verifying = 12;
+        progress.checking_started();
+        progress.checking_finished(true);
+        progress.uploading_started();
+        progress.uploading_finished();
+        progress.verifying(12);
+        progress.complete(super::super::PublishStatus::Uploaded);
+        assert_eq!(progress.counts, PublicationProgress::default());
+        assert_eq!(progress.completed, 0);
         progress.report(false);
         assert!(progress.last.is_none());
         assert!(progress.refresh_deadline().is_none());

@@ -440,10 +440,7 @@ pub fn publish_window(
             for completion in ready.drain(..) {
                 match completion {
                     RemoteCompletion::Presence { index, result } => {
-                        progress.counts.checking -= 1;
-                        if result.is_ok() {
-                            progress.counts.checked += 1;
-                        }
+                        progress.checking_finished(result.is_ok());
                         match result {
                             Ok(true) => {
                                 complete_obligation(
@@ -484,7 +481,7 @@ pub fn publish_window(
                         }
                     }
                     RemoteCompletion::Upload { upload } => {
-                        progress.counts.uploading -= 1;
+                        progress.uploading_finished();
                         let (object, index, result) = upload.into_parts();
                         match result {
                             Ok(()) => {
@@ -508,7 +505,7 @@ pub fn publish_window(
                     }
                     RemoteCompletion::Verification { oids, result } => {
                         state.verification_active = false;
-                        progress.counts.verifying = 0;
+                        progress.verifying(0);
                         let error_index = state.verification_error_index(&oids);
                         let result = result.and_then(|completed| {
                             services
@@ -593,7 +590,7 @@ pub fn publish_window(
             if !state.verification_active && !services.remote_executor.is_cancelled() {
                 let oids = state.take_verification_batch();
                 if !oids.is_empty() {
-                    progress.counts.verifying = oids.len() as u64;
+                    progress.verifying(oids.len());
                     progress.report(false);
                     let prepared = services
                         .cache_session
@@ -652,7 +649,7 @@ fn refill_remote_work<'a>(
     while let Some(work) = state.next_admissible_work(scheduler) {
         match work {
             AdmittedWork::Upload { upload, lease } => {
-                progress.counts.uploading += 1;
+                progress.uploading_started();
                 completions.push(
                     async move {
                         let _lease = lease;
@@ -668,7 +665,7 @@ fn refill_remote_work<'a>(
                 index,
                 lease,
             } => {
-                progress.counts.checking += 1;
+                progress.checking_started();
                 let oid = scheduler.objects[index].oid;
                 let limit = scheduler.handles[&remote_id]
                     .client()
@@ -764,12 +761,7 @@ fn complete_obligation(
         statuses[index].replace(status).is_none(),
         "publication obligation completed more than once"
     );
-    progress.completed += 1;
-    match status {
-        PublishStatus::AlreadyPresent => progress.counts.already_present += 1,
-        PublishStatus::Uploaded => progress.counts.uploaded += 1,
-        PublishStatus::CacheMissing | PublishStatus::CacheCorrupt => progress.counts.rejected += 1,
-    }
+    progress.complete(status);
 }
 
 #[cfg(test)]

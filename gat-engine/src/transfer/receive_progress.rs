@@ -3,6 +3,12 @@ use crate::remote_executor::TransferObserver;
 use gat_core::progress::{ProgressActivity, ProgressHandle, ReceiveProgress};
 use tokio::time::Instant;
 
+#[derive(Clone, Copy)]
+enum ReceiveKind {
+    Fetch,
+    Repair,
+}
+
 /// Operation-scoped receive reporting, retained across bounded windows.
 ///
 /// Fetch positions count successful downloads. Repair positions count original
@@ -10,7 +16,7 @@ use tokio::time::Instant;
 pub struct DownloadProgress {
     pub(crate) task: ProgressHandle,
     counts: ReceiveProgress,
-    repair: bool,
+    kind: ReceiveKind,
     enabled: bool,
     completed: u64,
     last: Option<(ReceiveProgress, Instant)>,
@@ -19,19 +25,19 @@ pub struct DownloadProgress {
 impl DownloadProgress {
     #[must_use]
     pub fn fetch(task: ProgressHandle) -> Self {
-        Self::new(task, false)
+        Self::new(task, ReceiveKind::Fetch)
     }
 
     #[must_use]
     pub fn repair(task: ProgressHandle) -> Self {
-        Self::new(task, true)
+        Self::new(task, ReceiveKind::Repair)
     }
 
-    fn new(task: ProgressHandle, repair: bool) -> Self {
+    fn new(task: ProgressHandle, kind: ReceiveKind) -> Self {
         Self {
             enabled: task.is_enabled(),
             task,
-            repair,
+            kind,
             counts: ReceiveProgress::default(),
             completed: 0,
             last: None,
@@ -39,11 +45,17 @@ impl DownloadProgress {
     }
 
     pub(super) fn verifying(&mut self, count: usize) {
+        if !self.enabled {
+            return;
+        }
         self.counts.verifying = count as u64;
         self.report(false);
     }
 
     pub(super) fn verified(&mut self, checked: usize, cached: usize) {
+        if !self.enabled {
+            return;
+        }
         self.counts.verifying = 0;
         self.counts.checked += checked as u64;
         self.counts.cached += cached as u64;
@@ -65,7 +77,7 @@ impl DownloadProgress {
         } else {
             self.counts.failed += 1;
         }
-        if self.repair || success {
+        if matches!(self.kind, ReceiveKind::Repair) || success {
             self.completed += entries;
         }
     }
@@ -98,10 +110,9 @@ impl DownloadProgress {
             if self.completed != 0 {
                 self.task.inc(std::mem::take(&mut self.completed));
             }
-            self.task.set_activity(if self.repair {
-                ProgressActivity::Repairing(self.counts)
-            } else {
-                ProgressActivity::Fetching(self.counts)
+            self.task.set_activity(match self.kind {
+                ReceiveKind::Repair => ProgressActivity::Repairing(self.counts),
+                ReceiveKind::Fetch => ProgressActivity::Fetching(self.counts),
             });
             self.last = Some((self.counts, now));
         }
@@ -135,6 +146,9 @@ impl<T, E, W: Fn(usize) -> u64> TransferObserver<Result<T, E>> for ReceiveObserv
         }
     }
     fn report(&mut self, active: usize, force: bool) {
+        if !self.progress.enabled {
+            return;
+        }
         self.progress.counts.downloading = active as u64;
         self.progress.report(force);
     }
@@ -225,5 +239,6 @@ mod tests {
         progress.flush();
         assert!(progress.deadline().is_none());
         assert!(progress.last.is_none());
+        assert_eq!(progress.counts, ReceiveProgress::default());
     }
 }

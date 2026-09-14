@@ -1,8 +1,7 @@
 use crate::progress_reporting;
-use futures::{Stream, StreamExt};
+use futures::Stream;
 use gat_core::progress::{ProgressActivity, ProgressHandle};
-use std::pin::Pin;
-use tokio::time::{Instant, Sleep};
+use tokio::time::Instant;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct Counts {
@@ -89,22 +88,18 @@ impl PresenceProgress {
     pub(super) async fn next<S: Stream + Unpin>(
         &mut self,
         stream: &mut S,
-        timer: &mut Option<Pin<Box<Sleep>>>,
+        timer: &mut progress_reporting::RefreshTimer,
     ) -> Option<S::Item> {
-        loop {
-            let Some(deadline) = self.deadline() else {
-                return stream.next().await;
-            };
-            let sleep = timer.get_or_insert_with(|| Box::pin(tokio::time::sleep_until(deadline)));
-            if sleep.deadline() != deadline {
-                sleep.as_mut().reset(deadline);
-            }
-            tokio::select! {
-                biased;
-                () = sleep.as_mut() => self.report(true),
-                item = stream.next() => return item,
-            }
-        }
+        progress_reporting::next_with_refresh(self, stream, timer).await
+    }
+}
+
+impl progress_reporting::Refresh for PresenceProgress {
+    fn deadline(&self) -> Option<Instant> {
+        self.deadline()
+    }
+    fn flush(&mut self) {
+        self.report(true);
     }
 }
 

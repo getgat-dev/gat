@@ -218,9 +218,6 @@ pub(crate) fn activity_line(activity: &ProgressActivity) -> UserLine {
         ProgressActivity::ScanningLock => UserLine::authored("scanning gat.lock"),
         ProgressActivity::MatchingSourcePath => UserLine::authored("matching source path"),
         ProgressActivity::CheckingDestination => UserLine::authored("checking destination"),
-        ProgressActivity::CloningSource { location } => UserLine::redacted_url(
-            &crate::redaction::RedactedUrl::render(location.as_location_str()),
-        ),
         ProgressActivity::LoadingMaterializedState => {
             UserLine::authored("loading materialized state")
         }
@@ -689,35 +686,14 @@ mod tests {
 
     #[test]
     fn activity_line_escapes_control_characters_instead_of_collapsing_them() {
-        // `UserLine`'s construction-time escaping is the single
-        // place control characters are neutralized. A validated path is a
-        // `GatPath` now, which structurally rejects control characters
-        // at construction time (see `gat_core::lexical_path`), so this
-        // test exercises the escaping contract through
-        // `ExpandingPattern`'s still-free-text `pattern` field instead.
+        // Selector patterns are the only free-form text in the activity
+        // protocol; escaping belongs to UserLine construction.
         let line = activity_line(&ProgressActivity::ExpandingPattern {
             pattern: "line one\nline two\r\ttabbed".to_string(),
         });
         assert!(!line.as_str().contains('\n'));
         assert!(!line.as_str().contains('\r'));
         assert!(!line.as_str().contains('\t'));
-    }
-
-    #[test]
-    fn cloning_source_activity_line_never_reaches_the_original_credential_bearing_url() {
-        // A credential-bearing clone URL must never reach the rendered
-        // activity line unredacted. `activity_line` itself performs the
-        // redaction (via `RedactedUrl::render`) from the neutral,
-        // unvalidated `GitLocationSpec` the protocol carries -- built
-        // via format! (not a literal) so the synthetic, never-dialed
-        // test secret below isn't mistaken for a real credential.
-        let secret_marker = "s3cr3t-token";
-        // hygiene-ok: synthetic never-dialed test URL with a fake secret.
-        let raw = format!("https://alice:{secret_marker}@example.com/repo.git");
-        let location = gat_core::git_location::GitLocationSpec::from_string(raw);
-        let line = activity_line(&ProgressActivity::CloningSource { location });
-        assert!(!line.as_str().contains(secret_marker));
-        assert!(!line.as_str().contains("alice:"));
     }
 
     #[test]

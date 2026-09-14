@@ -38,7 +38,6 @@
 mod work;
 pub use work::{WorkCounts, WorkItem, WorkProgress};
 
-use crate::git_location::GitLocationSpec;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// One semantic operation a command can report progress for. Deliberately
@@ -151,12 +150,9 @@ pub struct ReceiveProgress {
 ///
 /// This type is a neutral protocol value -- it has no wording method of
 /// its own. The root `output::progress` module alone owns the mapping
-/// from a variant to its rendered presentation line. Dynamic fields
-/// carry only already-validated core semantic values (e.g. [`crate::lexical_path::GatPath`],
-/// [`GitLocationSpec`]) or plain display text (`pattern`) -- never a
-/// presentation-layer/security-sensitive type such as a redacted URL:
-/// that redaction happens only at the root renderer, from
-/// [`ProgressActivity::CloningSource`]'s [`GitLocationSpec`].
+/// from a variant to its rendered presentation line. Dynamic fields contain
+/// aggregate counts or selector text, never remote credentials or per-worker
+/// file identities. The renderer escapes free-form selector text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProgressActivity {
     /// Reshaping `gat.lock`'s on-disk shard layout.
@@ -228,13 +224,6 @@ pub enum ProgressActivity {
     MatchingSourcePath,
     /// Checking a `gat mv` destination for collisions.
     CheckingDestination,
-    /// Cloning a remote source repository, identified only by its
-    /// exact, unvalidated, potentially credential-bearing configured
-    /// location -- the same value the root `gat` crate already stores
-    /// in `gat.yaml`. Only the root renderer, at the presentation
-    /// boundary, is permitted to turn this into human-readable
-    /// (redacted) text.
-    CloningSource { location: GitLocationSpec },
     /// Loading the materialized-state store (`gat sync`'s own phase,
     /// distinct from [`ProgressActivity::OpeningMaterializedState`]'s
     /// `gat add` wording).
