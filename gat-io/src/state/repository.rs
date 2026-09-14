@@ -318,8 +318,7 @@ impl<'repo> DesiredStateSession<'repo> {
         files: &[GatPath],
         strategy: IngestStrategy,
         large_file_threshold: u64,
-        on_progress: impl Fn(&GatPath, Option<u8>) + Sync,
-        on_complete: impl Fn() + Sync,
+        progress: &gat_core::progress::WorkProgress,
     ) -> Result<Vec<PreparedMaterialization>, MaterializationPreparationError> {
         if !files.is_empty() {
             cache.prepare_write()?;
@@ -330,24 +329,15 @@ impl<'repo> DesiredStateSession<'repo> {
             let results = window
                 .par_iter()
                 .map(|path| {
-                    on_progress(path, None);
-                    let last_percent = std::sync::atomic::AtomicU64::new(u64::MAX);
+                    let item = progress.start();
                     let result = worktree::ingest_file(
                         self.layout.root_path(),
                         objects_dir,
                         path,
                         strategy,
                         large_file_threshold,
-                        |read, len| {
-                            let percent = read.saturating_mul(100).checked_div(len).unwrap_or(0);
-                            if percent
-                                != last_percent.swap(percent, std::sync::atomic::Ordering::Relaxed)
-                            {
-                                on_progress(path, u8::try_from(percent).ok());
-                            }
-                        },
                     )?;
-                    on_complete();
+                    item.complete();
                     Ok((
                         PreparedMaterialization::new(
                             Entry {

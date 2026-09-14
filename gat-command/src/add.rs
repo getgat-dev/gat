@@ -4,8 +4,7 @@ use gat_core::lexical_path::{GatPath, LexicalPathError};
 use gat_core::lifecycle::Surface;
 use gat_core::path_scope::PathScope;
 use gat_core::progress::{
-    ProgressActivity, ProgressHandle, ProgressOperation, ProgressReporter, ProgressSpec,
-    ProgressTask, ProgressUnit,
+    ProgressActivity, ProgressOperation, ProgressReporter, ProgressSpec, ProgressTask, ProgressUnit,
 };
 use gat_engine::{
     AddCandidate, AddExclusion, DesiredState, EffectivePathPolicy, EntryKind,
@@ -315,6 +314,12 @@ fn add_with_limits(
     })
 }
 
+struct HashingProgress {
+    // Join the sampler before the task clears its terminal row.
+    reporting: gat_engine::ParallelProgress,
+    task: ProgressTask,
+}
+
 struct AddContext<'a, 'repo, 'config, 'materialization> {
     exclusions: &'a mut Vec<AddExclusion>,
     limits: &'a AddLimits,
@@ -322,7 +327,7 @@ struct AddContext<'a, 'repo, 'config, 'materialization> {
     directories: Vec<Option<GatPath>>,
     progress: &'a dyn ProgressReporter,
     discovering: Option<ProgressTask>,
-    hashing: Option<ProgressTask>,
+    hashing: Option<HashingProgress>,
     observe: &'a dyn Fn(Surface<'_>),
     desired: &'materialization DesiredState<'repo, 'config>,
     materialization: MaterializationSession<'materialization, 'repo, 'config>,
@@ -331,7 +336,7 @@ struct AddContext<'a, 'repo, 'config, 'materialization> {
 impl AddContext<'_, '_, '_, '_> {
     fn discovery_activity(&mut self, activity: ProgressActivity) {
         let task = if let Some(hashing) = &self.hashing {
-            hashing
+            &hashing.task
         } else {
             self.discovering.get_or_insert_with(|| {
                 self.progress.begin(ProgressSpec::indeterminate(
@@ -340,21 +345,6 @@ impl AddContext<'_, '_, '_, '_> {
             })
         };
         task.set_activity(activity);
-    }
-
-    fn hashing_handle(&mut self) -> ProgressHandle {
-        // Selection and reuse classification continue between hashing windows,
-        // so the whole-operation hash count has no known total up front.
-        self.discovering.take();
-        self.hashing
-            .get_or_insert_with(|| {
-                self.progress.begin(ProgressSpec::items(
-                    ProgressOperation::Hashing,
-                    ProgressUnit::Files,
-                    None,
-                ))
-            })
-            .handle()
     }
 }
 
@@ -418,18 +408,24 @@ fn ingest_files(
         key: "cache.ingest_strategy",
         value: strategy.as_str(),
     });
-    let handle = context.hashing_handle();
-    Ok(context.materialization.ingest_materialized_entries(
-        files,
-        strategy,
-        |path, percent| {
-            handle.set_activity(ProgressActivity::HashingFile {
-                path: path.clone(),
-                percent,
-            });
-        },
-        || handle.inc(1),
-    )?)
+    // Discovery and reuse continue between windows, so no whole-task total
+    // is known. Keep one task and one sampler for every hashing window.
+    context.discovering.take();
+    let hashing = context.hashing.get_or_insert_with(|| {
+        let task = context.progress.begin(ProgressSpec::items(
+            ProgressOperation::Hashing,
+            ProgressUnit::Files,
+            None,
+        ));
+        let reporting =
+            gat_engine::ParallelProgress::new(task.handle(), gat_engine::ParallelWork::Hashing);
+        HashingProgress { reporting, task }
+    });
+    Ok(hashing.reporting.run(|work| {
+        context
+            .materialization
+            .ingest_materialized_entries(files, strategy, work)
+    })?)
 }
 
 fn add_dir(

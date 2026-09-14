@@ -96,16 +96,17 @@ impl CacheSession {
         cache_root: &CacheRoot,
         oids: &[Oid],
         mut on_window: impl FnMut(
-            &[Oid],
-            &[ObjectVerification],
+            gat_io::VerificationEvent<'_>,
         ) -> std::result::Result<Vec<CachePublication>, E>,
     ) -> std::result::Result<(), E> {
         let cache = self.cache(cache_root);
-        cache.verify_windows_unmemoized(oids, |oids, status| {
-            let publications = on_window(oids, status)?;
+        cache.verify_windows_unmemoized_observed(oids, |event| {
+            let publications = on_window(event)?;
             // Best-effort: publications accelerate later verification;
             // the object bytes are already durably present.
-            let _ = cache.apply_publications(&publications);
+            if !publications.is_empty() {
+                let _ = cache.apply_publications(&publications);
+            }
             Ok(())
         })
     }
@@ -137,16 +138,14 @@ impl CacheSession {
         cache_root: &CacheRoot,
         files: &[GatPath],
         strategy: IngestStrategy,
-        on_progress: impl Fn(&GatPath, Option<u8>) + Sync,
-        on_complete: impl Fn() + Sync,
+        progress: &gat_core::progress::WorkProgress,
     ) -> Result<Vec<PreparedMaterialization>, MaterializationPreparationError> {
         state.ingest_materializations(
             self.cache(cache_root),
             files,
             strategy,
-            crate::repository_mutation::LARGE_FILE_PROGRESS_THRESHOLD,
-            on_progress,
-            on_complete,
+            crate::repository_mutation::LARGE_FILE_INGEST_THRESHOLD,
+            progress,
         )
     }
 }

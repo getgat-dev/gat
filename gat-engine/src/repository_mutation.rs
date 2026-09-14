@@ -22,9 +22,9 @@ use gat_io::{
 
 type BoxedSource = Box<dyn std::error::Error + Send + Sync + 'static>;
 
-/// Below this size, coarse whole-percent activity updates add more noise than
-/// useful feedback.
-pub const LARGE_FILE_PROGRESS_THRESHOLD: u64 = 64 * 1024 * 1024;
+/// Below this size, buffered streaming avoids the setup cost of the
+/// configured large-file copy/hash strategy.
+pub const LARGE_FILE_INGEST_THRESHOLD: u64 = 64 * 1024 * 1024;
 
 /// Git's semantic status for one root-relative path.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -435,8 +435,7 @@ impl MaterializationSession<'_, '_, '_> {
         &mut self,
         files: &[GatPath],
         strategy: IngestStrategy,
-        on_progress: impl Fn(&GatPath, Option<u8>) + Sync,
-        on_complete: impl Fn() + Sync,
+        progress: &gat_core::progress::WorkProgress,
     ) -> Result<Vec<MaterializedEntry>, RepositoryStateError> {
         self.cache
             .ingest_materializations(
@@ -444,8 +443,7 @@ impl MaterializationSession<'_, '_, '_> {
                 &self.cache_root,
                 files,
                 strategy,
-                on_progress,
-                on_complete,
+                progress,
             )
             .map(|entries| entries.into_iter().map(MaterializedEntry).collect())
             .map_err(RepositoryStateError::ingest)

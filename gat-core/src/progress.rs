@@ -35,8 +35,9 @@
 //!   progress is cleared before final outcomes/errors are
 //!   rendered.
 
-use crate::git_location::GitLocationSpec;
-use crate::lexical_path::GatPath;
+mod work;
+pub use work::{WorkCounts, WorkItem, WorkProgress};
+
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// One semantic operation a command can report progress for. Deliberately
@@ -111,6 +112,35 @@ pub enum ProgressOperation {
     CloningSource,
 }
 
+/// Counters for one push operation.
+///
+/// Checked/present/uploaded/rejected count remote-object obligations. Active
+/// checks and uploads count admitted, unfinished operations. Verifying counts
+/// distinct OIDs in the outstanding verification batch, including proof reuse
+/// and work waiting for a local worker, rather than simultaneous hash calls.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PublicationProgress {
+    pub checked: u64,
+    pub already_present: u64,
+    pub uploaded: u64,
+    pub rejected: u64,
+    pub checking: u64,
+    pub verifying: u64,
+    pub uploading: u64,
+}
+
+/// Receive-side work. Totals count distinct selected objects, while the
+/// task's item counter retains its command-specific meaning.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReceiveProgress {
+    pub verifying: u64,
+    pub downloading: u64,
+    pub checked: u64,
+    pub cached: u64,
+    pub received: u64,
+    pub failed: u64,
+}
+
 /// One activity a command can be doing while a [`ProgressOperation`] is
 /// underway -- the closed set of things worth telling the user about,
 /// deliberately independent of [`ProgressOperation`] so the same
@@ -120,12 +150,9 @@ pub enum ProgressOperation {
 ///
 /// This type is a neutral protocol value -- it has no wording method of
 /// its own. The root `output::progress` module alone owns the mapping
-/// from a variant to its rendered presentation line. Dynamic fields
-/// carry only already-validated core semantic values (e.g. [`GatPath`],
-/// [`GitLocationSpec`]) or plain display text (`pattern`) -- never a
-/// presentation-layer/security-sensitive type such as a redacted URL:
-/// that redaction happens only at the root renderer, from
-/// [`ProgressActivity::CloningSource`]'s [`GitLocationSpec`].
+/// from a variant to its rendered presentation line. Dynamic fields contain
+/// aggregate counts or selector text, never remote credentials or per-worker
+/// file identities. The renderer escapes free-form selector text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProgressActivity {
     /// Reshaping `gat.lock`'s on-disk shard layout.
@@ -156,9 +183,10 @@ pub enum ProgressActivity {
     RegeneratingExcludes,
     /// Checking whether a candidate can reuse an existing OID.
     CheckingReuseStatus,
-    /// Hashing one specific file (e.g. a large file whose byte-level
-    /// progress is tracked separately via `percent`).
-    HashingFile { path: GatPath, percent: Option<u8> },
+    /// Concurrent file ingestion, including copy, hashing, and cache publication.
+    HashingFiles(WorkCounts),
+    /// Concurrent preparation and history inspection of additional repositories.
+    InspectingRepositories(WorkCounts),
     /// Walking a directory to discover candidate files.
     WalkingDirectory,
     /// Expanding a glob pattern to discover candidate files.
@@ -173,8 +201,18 @@ pub enum ProgressActivity {
     LoadingState,
     /// Checking remote object presence for the current window.
     CheckingRemote,
-    /// The most recently completed remote-presence check.
-    CheckedRemoteObject { path: GatPath },
+    /// Enumerating object identifiers after remote readiness.
+    ListingRemoteObjects,
+    /// Streaming validation and application of working-tree changes.
+    ReconcilingWorkingTree,
+    /// Concurrent publication work and cumulative results.
+    Publishing(PublicationProgress),
+    /// Cache verification and downloads during fetch.
+    Fetching(ReceiveProgress),
+    /// Best-effort downloads of damaged objects during repair.
+    Repairing(ReceiveProgress),
+    /// Remote presence results across the operation.
+    RemotePresence { present: u64, missing: u64 },
     /// Classifying user-supplied selectors (literal path vs. glob).
     ClassifyingSelectors,
     /// Scanning desired state for matching rows.
@@ -186,15 +224,6 @@ pub enum ProgressActivity {
     MatchingSourcePath,
     /// Checking a `gat mv` destination for collisions.
     CheckingDestination,
-    /// Cloning a remote source repository, identified only by its
-    /// exact, unvalidated, potentially credential-bearing configured
-    /// location -- the same value the root `gat` crate already stores
-    /// in `gat.yaml`. Only the root renderer, at the presentation
-    /// boundary, is permitted to turn this into human-readable
-    /// (redacted) text.
-    CloningSource { location: GitLocationSpec },
-    /// Streaming bytes for one specific file during an upload/download.
-    TransferringFile { path: GatPath },
     /// Loading the materialized-state store (`gat sync`'s own phase,
     /// distinct from [`ProgressActivity::OpeningMaterializedState`]'s
     /// `gat add` wording).
@@ -313,6 +342,11 @@ impl ProgressSpec {
 /// concrete implementations necessarily live in the root `gat` crate,
 /// a separate workspace member.
 pub trait ActivityBackend: Send + Sync {
+    /// Whether this backend consumes progress, including test observers.
+    fn is_enabled(&self) -> bool {
+        true
+    }
+
     fn inc(&self, delta: u64);
     fn set_activity(&self, activity: &ProgressActivity);
     fn finish(&self);
@@ -324,6 +358,10 @@ pub trait ActivityBackend: Send + Sync {
 struct NoopBackend;
 
 impl ActivityBackend for NoopBackend {
+    fn is_enabled(&self) -> bool {
+        false
+    }
+
     fn inc(&self, _delta: u64) {}
     fn set_activity(&self, _activity: &ProgressActivity) {}
     fn finish(&self) {}
@@ -340,6 +378,12 @@ pub struct ProgressHandle {
 }
 
 impl ProgressHandle {
+    /// Whether reporting work is needed for this task.
+    #[must_use]
+    pub fn is_enabled(&self) -> bool {
+        self.backend.is_enabled()
+    }
+
     /// Advance the logical item position by `delta` (e.g. one more file
     /// hashed, one more object fetched). Cheap: a thread-safe counter
     /// update only, never a direct terminal redraw.
@@ -554,16 +598,10 @@ mod tests {
             Some(3),
         ));
         task.inc(1);
-        task.set_activity(ProgressActivity::HashingFile {
-            path: GatPath::parse_canonical("a.bin").unwrap(),
-            percent: None,
-        });
+        task.set_activity(ProgressActivity::HashingFiles(Default::default()));
         let handle = task.handle();
         handle.inc(1);
-        handle.set_activity(ProgressActivity::HashingFile {
-            path: GatPath::parse_canonical("a.bin").unwrap(),
-            percent: Some(50),
-        });
+        handle.set_activity(ProgressActivity::HashingFiles(Default::default()));
         task.finish();
         NoopProgress.finish_all();
     }

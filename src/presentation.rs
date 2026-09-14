@@ -261,6 +261,11 @@ impl UserLine {
     /// `UserLine::identifier`: numbers are never a leak vector on
     /// their own, but keeping construction explicit avoids an implicit
     /// `impl From<i64>`/`Display` conversion path.
+    pub(crate) fn unsigned_number(value: u64) -> Self {
+        Self::raw(value.to_string())
+    }
+
+    /// A signed numeric value rendered in decimal.
     pub(crate) fn number(value: i64) -> Self {
         Self::raw(value.to_string())
     }

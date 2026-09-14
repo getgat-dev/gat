@@ -23,6 +23,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 
 [dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 test-support-git = { path = "../test-support-git" }
 gat-core = { path = "../gat-core", features = ["test-support"] }
 gat-io = { path = "../gat-io", features = ["test-support"] }

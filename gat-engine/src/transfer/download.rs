@@ -1,3 +1,4 @@
+use super::FetchProgress;
 use crate::operation::Operation;
 use crate::path_policy::{EffectivePathPolicy, ResolvedRemote};
 use crate::remote_catalog::RemoteCatalog;
@@ -6,7 +7,6 @@ use crate::remote_session::RemoteSessionError;
 use gat_core::lexical_path::GatPath;
 use gat_core::name::RouteName;
 use gat_core::oid::Oid;
-use gat_core::progress::{ProgressActivity, ProgressHandle};
 use gat_io::RemoteError;
 use gat_io::{CacheError, CachePublication, ObjectVerification};
 use std::error::Error;
@@ -319,7 +319,7 @@ fn worker_error(
 pub fn download_window(
     operation: &mut Operation<'_>,
     objects: Vec<DownloadObject>,
-    task: &ProgressHandle,
+    progress: &mut FetchProgress,
 ) -> Result<DownloadOutcome, DownloadError> {
     if objects.is_empty() {
         return Ok(DownloadOutcome::default());
@@ -341,7 +341,14 @@ pub fn download_window(
     let result: Result<(), WindowError> = services.cache_session.verify_windows_unmemoized(
         services.cache_root,
         &window_oids,
-        |verify_oids, status_window| {
+        |event| {
+            let (verify_oids, status_window) = match event {
+                gat_io::VerificationEvent::Started { oids } => {
+                    progress.verifying(oids.len());
+                    return Ok(Vec::new());
+                }
+                gat_io::VerificationEvent::Completed { oids, statuses } => (oids, statuses),
+            };
             let object_window = &objects[verified_offset..verified_offset + verify_oids.len()];
             verified_offset += verify_oids.len();
 
@@ -349,6 +356,7 @@ pub fn download_window(
                 .iter()
                 .filter(|status| **status != ObjectVerification::Valid)
                 .count();
+            progress.verified(status_window.len(), status_window.len() - missing);
             let mut jobs = Vec::with_capacity(missing);
             for (index, status) in status_window.iter().enumerate() {
                 if *status == ObjectVerification::Valid {
@@ -357,8 +365,13 @@ pub fn download_window(
                 let object = &object_window[index];
                 let handle = services
                     .remotes
-                    .open_handle(services.remotes_catalog, object.remote.id(), Some(task))
+                    .open_handle(
+                        services.remotes_catalog,
+                        object.remote.id(),
+                        Some(progress.task()),
+                    )
                     .map_err(|source| {
+                        progress.rejected();
                         remote_open(services.remotes_catalog, services.policy, object, source)
                     })?;
                 jobs.push(RemoteJob::new(handle, index));
@@ -370,18 +383,12 @@ pub fn download_window(
                     let oid = object.oid;
                     let client = handle.client().clone();
                     let cache_writer = cache_writer.clone();
-                    let task = task.clone();
-                    task.set_activity(ProgressActivity::TransferringFile {
-                        path: object.representative_path.clone(),
-                    });
                     async move {
-                        let publication =
-                            receive(services.remote_executor, client, cache_writer, oid).await?;
-                        task.inc(1);
-                        Ok(publication)
+                        receive(services.remote_executor, client, cache_writer, oid).await
                     }
                 },
                 || WorkerError::Cancelled,
+                &mut progress.observe(),
             );
 
             let mut publications = Vec::<CachePublication>::new();
@@ -409,6 +416,7 @@ pub fn download_window(
         },
     );
 
+    progress.flush();
     match result {
         Ok(()) => Ok(DownloadOutcome { downloaded }),
         Err(WindowError::Download(source)) => Err(source),

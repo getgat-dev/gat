@@ -18,15 +18,22 @@ pub struct RepairObject {
     oid: Oid,
     representative_path: GatPath,
     remote: ResolvedRemote,
+    entries: u64,
 }
 
 impl RepairObject {
     #[must_use]
-    pub const fn new(oid: Oid, representative_path: GatPath, remote: ResolvedRemote) -> Self {
+    pub const fn new(
+        oid: Oid,
+        representative_path: GatPath,
+        remote: ResolvedRemote,
+        entries: u64,
+    ) -> Self {
         Self {
             oid,
             representative_path,
             remote,
+            entries,
         }
     }
 
@@ -261,7 +268,7 @@ fn worker_error(
 pub fn repair_window(
     operation: &mut Operation<'_>,
     objects: Vec<RepairObject>,
-    progress: &gat_core::progress::ProgressHandle,
+    progress: &mut super::RepairProgress,
 ) -> RepairOutcome {
     if objects.is_empty() {
         return RepairOutcome::default();
@@ -278,6 +285,10 @@ pub fn repair_window(
             .and_then(|()| operation.policy().validate_remote(&object.remote))
             .err()
     }) {
+        for object in &objects {
+            progress.rejected(object.entries);
+        }
+        progress.flush();
         return RepairOutcome {
             results: objects
                 .iter()
@@ -294,7 +305,7 @@ pub fn repair_window(
     for id in distinct_ids {
         match services
             .remotes
-            .open_handle(services.remotes_catalog, id, Some(progress))
+            .open_handle(services.remotes_catalog, id, Some(progress.task()))
         {
             Ok(handle) => {
                 handles.insert(id, handle);
@@ -313,6 +324,7 @@ pub fn repair_window(
         if let Some(source) = unavailable.get(&object.remote.id()) {
             let (remote_name, route_name, route) =
                 diagnostic_remote(services.remotes_catalog, services.policy, object);
+            progress.rejected(object.entries);
             results[index] = Some(Err(RepairError::RemoteOpen {
                 remote_name,
                 route_name,
@@ -337,6 +349,7 @@ pub fn repair_window(
             async move { receive(services.remote_executor, client, cache_writer, oid).await }
         },
         || WorkerError::Cancelled,
+        &mut progress.observe(|index| objects[jobs[index].payload].entries),
     );
 
     let mut publications = Vec::<CachePublication>::new();
@@ -362,6 +375,7 @@ pub fn repair_window(
             .apply_publications(services.cache_root, &publications);
     }
 
+    progress.flush();
     RepairOutcome {
         results: results
             .into_iter()

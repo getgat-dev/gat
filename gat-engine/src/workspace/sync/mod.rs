@@ -604,8 +604,7 @@ fn execute_mutating_sync(
     // `gat.lock`: once the desired mirror is refreshed, planning streams
     // desired rows straight from SQLite, so a warm validated sync reads
     // zero `gat.lock` bytes on the planning hot path.
-    set_phase(progress, ProgressActivity::ValidatingWorkingTree);
-    set_phase(progress, ProgressActivity::ApplyingChanges);
+    set_phase(progress, ProgressActivity::ReconcilingWorkingTree);
     // Bounded plan/apply: the merge streams each classified
     // action straight into `ExecutePlanSink`, which applies it to the
     // working tree and persists its materialized-state delta in the same

@@ -61,6 +61,16 @@ impl<T> RemoteJob<T> {
     }
 }
 
+/// Coordinator-only observation; never runs in a transfer worker.
+pub(crate) trait TransferObserver<R> {
+    fn completed(&mut self, _index: usize, _result: &R) {}
+    fn report(&mut self, _active: usize, _force: bool) {}
+    fn deadline(&self) -> Option<tokio::time::Instant> {
+        None
+    }
+}
+impl<R> TransferObserver<R> for () {}
+
 /// Fair, bounded async dispatcher for one operation's remote-I/O jobs.
 /// Distinct from the transfer-planning window
 /// ([`super::limits::TransferLimits::window`]): this bounds
@@ -244,7 +254,7 @@ impl RemoteExecutor {
         F: Fn(&RemoteHandle, &T) -> Fut,
         Fut: Future<Output = R>,
     {
-        self.run_transfer_window_until(jobs, job, |_| false, None)
+        self.run_transfer_window_until(jobs, job, |_| false, None, &mut ())
             .await
             .into_iter()
             .map(|result| result.expect("all best-effort jobs complete"))
@@ -256,6 +266,7 @@ impl RemoteExecutor {
         jobs: &[RemoteJob<T>],
         job: F,
         cancelled: impl Fn() -> E,
+        observer: &mut impl TransferObserver<Result<R, E>>,
     ) -> Vec<Result<R, E>>
     where
         F: Fn(&RemoteHandle, &T) -> Fut,
@@ -267,6 +278,7 @@ impl RemoteExecutor {
                 job,
                 |_| false,
                 Some(&|| Err(cancelled())),
+                observer,
             ))
             .into_iter()
             .map(|result| result.expect("every repair job completes or is cancelled"))
@@ -278,6 +290,7 @@ impl RemoteExecutor {
         jobs: &[RemoteJob<T>],
         job: F,
         cancelled: impl Fn() -> E,
+        observer: &mut impl TransferObserver<Result<R, E>>,
     ) -> Vec<Option<Result<R, E>>>
     where
         F: Fn(&RemoteHandle, &T) -> Fut,
@@ -288,6 +301,7 @@ impl RemoteExecutor {
             job,
             Result::is_err,
             Some(&|| Err(cancelled())),
+            observer,
         ))
     }
 
@@ -297,6 +311,7 @@ impl RemoteExecutor {
         job: F,
         failed: impl Fn(&R) -> bool,
         cancelled: Option<&dyn Fn() -> R>,
+        observer: &mut impl TransferObserver<R>,
     ) -> Vec<Option<R>>
     where
         F: Fn(&RemoteHandle, &T) -> Fut,
@@ -318,6 +333,7 @@ impl RemoteExecutor {
         let mut active = FuturesUnordered::new();
         let mut results: Vec<Option<R>> = (0..jobs.len()).map(|_| None).collect();
         let mut frontier = jobs.len();
+        let mut refresh_timer = None;
         loop {
             let changed = self.transfer.notified();
             tokio::pin!(changed);
@@ -327,7 +343,9 @@ impl RemoteExecutor {
             {
                 for (id, queue) in &mut queues {
                     for index in queue.drain(..) {
-                        results[index] = Some(cancelled());
+                        let result = cancelled();
+                        observer.completed(index, &result);
+                        results[index] = Some(result);
                     }
                     self.transfer.forget_waiter(*id);
                 }
@@ -361,15 +379,23 @@ impl RemoteExecutor {
                     break;
                 }
             }
+            observer.report(active.len(), false);
+            let deadline = observer.deadline();
+            let refresh = crate::progress_reporting::wait_for_refresh(&mut refresh_timer, deadline);
             let completed = tokio::select! {
                 biased;
                 () = self.cancellation.cancelled(), if cancelled.is_some() && !self.is_cancelled() => continue,
+                () = refresh, if deadline.is_some() => {
+                    observer.report(active.len(), true);
+                    continue;
+                },
                 completed = active.next() => completed,
             };
             if let Some((index, result)) = completed {
                 if failed(&result) {
                     frontier = frontier.min(index);
                 }
+                observer.completed(index, &result);
                 results[index] = Some(result);
             } else if queues.iter().all(|(_, queue)| queue.is_empty()) {
                 break;
@@ -381,6 +407,7 @@ impl RemoteExecutor {
                 }
             }
         }
+        observer.report(0, true);
         results
     }
 
@@ -696,6 +723,73 @@ mod tests {
         });
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn transfer_observer_refreshes_while_a_download_is_stalled() {
+        struct Observer {
+            completed: Vec<usize>,
+            active: usize,
+            deadline: Option<tokio::time::Instant>,
+            release: Option<tokio::sync::oneshot::Sender<()>>,
+        }
+        impl TransferObserver<Result<usize, ()>> for Observer {
+            fn completed(&mut self, index: usize, _: &Result<usize, ()>) {
+                self.completed.push(index);
+                if index == 1 {
+                    self.deadline =
+                        Some(tokio::time::Instant::now() + std::time::Duration::from_millis(100));
+                }
+            }
+            fn report(&mut self, active: usize, force: bool) {
+                self.active = active;
+                if force && self.deadline.take().is_some() {
+                    assert_eq!(active, 1);
+                    assert_eq!(self.completed, [1]);
+                    self.release.take().unwrap().send(()).unwrap();
+                }
+            }
+            fn deadline(&self) -> Option<tokio::time::Instant> {
+                self.deadline
+            }
+        }
+        let executor = executor(2, 1);
+        let (_dir, handles) =
+            crate::remote_session::test_support::open_handles_on_current_runtime(&["a", "b"]);
+        let jobs: Vec<_> = handles
+            .into_iter()
+            .enumerate()
+            .map(|(index, handle)| RemoteJob::new(handle, index))
+            .collect();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let released = Mutex::new(Some(released));
+        let mut observer = Observer {
+            completed: Vec::new(),
+            active: 0,
+            deadline: None,
+            release: Some(release),
+        };
+        let results = executor
+            .run_transfer_window_until(
+                &jobs,
+                |_, index| {
+                    let gate = (*index == 0).then(|| released.lock().unwrap().take().unwrap());
+                    let index = *index;
+                    async move {
+                        if let Some(gate) = gate {
+                            gate.await.unwrap();
+                        }
+                        Ok(index)
+                    }
+                },
+                Result::is_err,
+                None,
+                &mut observer,
+            )
+            .await;
+        assert_eq!(results, [Some(Ok(0)), Some(Ok(1))]);
+        assert_eq!(observer.completed, [1, 0]);
+        assert_eq!(observer.active, 0);
+    }
+
     #[test]
     fn cancellation_wakes_capacity_waiters_without_starting_queued_jobs() {
         with_runtime(|| {
@@ -704,11 +798,13 @@ mod tests {
             let held = executor.try_transfer(jobs[0].handle.id(), 1).unwrap();
             tokio::runtime::Handle::current().block_on(async {
                 let cancelled = || Err::<(), _>("cancelled");
+                let mut observer = ();
                 let window = executor.run_transfer_window_until(
                     &jobs,
                     |_, _| async { panic!("queued work must not start") },
                     Result::is_err,
                     Some(&cancelled),
+                    &mut observer,
                 );
                 tokio::pin!(window);
                 assert!(futures::poll!(&mut window).is_pending());
@@ -772,6 +868,7 @@ mod tests {
                 let (release, released) = tokio::sync::oneshot::channel();
                 let released = Mutex::new(Some(released));
                 let cancelled = || Err("cancelled");
+                let mut observer = ();
                 let window = executor.run_transfer_window_until(
                     &jobs,
                     |_, index| {
@@ -785,6 +882,7 @@ mod tests {
                     },
                     Result::is_err,
                     Some(&cancelled),
+                    &mut observer,
                 );
                 tokio::pin!(window);
                 assert!(futures::poll!(&mut window).is_pending());
@@ -805,6 +903,7 @@ mod tests {
             tokio::runtime::Handle::current().block_on(async {
                 let (release, released) = tokio::sync::oneshot::channel();
                 let released = Mutex::new(Some(released));
+                let mut observer = ();
                 let window = executor.run_transfer_window_until(
                     &jobs,
                     |_, index| {
@@ -820,6 +919,7 @@ mod tests {
                     },
                     Result::is_err,
                     None,
+                    &mut observer,
                 );
                 tokio::pin!(window);
                 assert!(futures::poll!(&mut window).is_pending());

@@ -705,6 +705,11 @@ fn remote_gc_keeps_explicit_peer_and_reuses_one_listing_pass() {
         ]
     );
     assert_eq!(state.max_active, 1);
+    assert!(
+        state
+            .activities
+            .contains(&ProgressActivity::ListingRemoteObjects)
+    );
     assert_eq!(state.positions[1], 3);
     assert_eq!(state.totals[2], Some(state.positions[1]));
     assert_eq!(state.positions[2], 3);
@@ -718,7 +723,7 @@ fn remote_gc_keeps_explicit_peer_and_reuses_one_listing_pass() {
         state
             .activities
             .iter()
-            .any(|activity| matches!(activity, ProgressActivity::CloningSource { .. }))
+            .any(|activity| matches!(activity, ProgressActivity::InspectingRepositories(counts) if counts.active() == 0 && counts.succeeded() == 1 && counts.failed() == 0))
     );
 }
 

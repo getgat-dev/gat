@@ -9,22 +9,41 @@ use gat_core::selection::Selection;
 use gat_engine::{ChangedRow, CompareError, Repository, RowChange, Unchanged};
 use rayon::prelude::*;
 
+struct CacheProbe {
+    entries: u64,
+    present: bool,
+}
+
 fn probe_cache(
     rows_by_path: &[ChangedRow],
     contains: impl Fn(&gat_core::oid::Oid) -> bool + Sync,
-) -> std::collections::HashMap<gat_core::oid::Oid, bool> {
-    let mut presence: std::collections::HashMap<_, _> = rows_by_path
-        .iter()
-        .filter_map(|row| match row.change {
+    checked: impl Fn(u64) + Sync,
+) -> std::collections::HashMap<gat_core::oid::Oid, CacheProbe> {
+    let mut presence = std::collections::HashMap::<_, CacheProbe>::new();
+    let mut removed = 0;
+    for row in rows_by_path {
+        match row.change {
             RowChange::Added { oid }
             | RowChange::Modified { oid }
-            | RowChange::Unchanged { oid } => Some((oid, false)),
-            RowChange::Removed => None,
-        })
-        .collect();
-    presence
-        .par_iter_mut()
-        .for_each(|(oid, present)| *present = contains(oid));
+            | RowChange::Unchanged { oid } => {
+                presence
+                    .entry(oid)
+                    .or_insert(CacheProbe {
+                        entries: 0,
+                        present: false,
+                    })
+                    .entries += 1;
+            }
+            RowChange::Removed => removed += 1,
+        }
+    }
+    if removed != 0 {
+        checked(removed);
+    }
+    presence.par_iter_mut().for_each(|(oid, probe)| {
+        probe.present = contains(oid);
+        checked(probe.entries);
+    });
     presence
 }
 
@@ -155,13 +174,17 @@ pub fn status(
             Some(rows_by_path.len() as u64),
         ),
         |inspect| -> Result<Vec<StatusRow>, StatusError> {
-            let presence = probe_cache(&rows_by_path, |oid| cache.contains(oid));
             let inspect = inspect.handle();
+            let presence = probe_cache(
+                &rows_by_path,
+                |oid| cache.contains(oid),
+                |count| inspect.inc(count),
+            );
             Ok(rows_by_path
                 .into_par_iter()
                 .map(|ChangedRow { path, change }| {
                     let cache = |oid| {
-                        if presence[&oid] {
+                        if presence[&oid].present {
                             CachePresence::Present
                         } else {
                             CachePresence::Missing
@@ -182,7 +205,6 @@ pub fn status(
                         },
                         RowChange::Removed => StatusChange::Removed,
                     };
-                    inspect.inc(1);
                     StatusRow {
                         mount: ownership
                             .owner_for_path(&path)
@@ -267,12 +289,62 @@ mod tests {
             },
         ];
         let probes = std::sync::atomic::AtomicUsize::new(0);
-        let result = probe_cache(&rows, |_| {
-            probes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            false
-        });
+        let checked = std::sync::atomic::AtomicU64::new(0);
+        let result = probe_cache(
+            &rows,
+            |_| {
+                assert_eq!(
+                    checked.load(std::sync::atomic::Ordering::Relaxed),
+                    1,
+                    "removed entries complete before cache IO"
+                );
+                probes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                false
+            },
+            |count| {
+                checked.fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+            },
+        );
         assert_eq!(probes.into_inner(), 1);
         assert_eq!(result.len(), 1);
-        assert!(!result[&oid]);
+        assert!(!result[&oid].present);
+        assert_eq!(checked.into_inner(), rows.len() as u64);
+    }
+    #[test]
+    fn completed_probe_reports_while_another_probe_is_blocked() {
+        let first = gat_core::oid::Oid::from_bytes([1; 32]);
+        let second = gat_core::oid::Oid::from_bytes([2; 32]);
+        let rows = [
+            ChangedRow {
+                path: GatPath::parse_canonical("a").unwrap(),
+                change: RowChange::Added { oid: first },
+            },
+            ChangedRow {
+                path: GatPath::parse_canonical("b").unwrap(),
+                change: RowChange::Added { oid: second },
+            },
+        ];
+        let (finished, receiver) = std::sync::mpsc::channel();
+        let receiver = std::sync::Mutex::new(receiver);
+        let started = std::sync::atomic::AtomicUsize::new(0);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap()
+            .install(|| {
+                probe_cache(
+                    &rows,
+                    |_| {
+                        if started.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 1 {
+                            receiver.lock().unwrap().recv().unwrap();
+                        }
+                        true
+                    },
+                    |count| {
+                        assert_eq!(count, 1);
+                        finished.send(()).unwrap();
+                    },
+                );
+            });
     }
 }

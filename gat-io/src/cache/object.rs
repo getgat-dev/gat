@@ -577,6 +577,17 @@ pub struct CacheClient {
     memo: std::cell::RefCell<std::collections::HashMap<Oid, CacheObservation>>,
 }
 
+/// Coordinator notifications surrounding one cache verification subwindow.
+pub enum VerificationEvent<'a> {
+    Started {
+        oids: &'a [Oid],
+    },
+    Completed {
+        oids: &'a [Oid],
+        statuses: &'a [ObjectVerification],
+    },
+}
+
 /// Owned cache-verification work prepared by the coordinator.
 ///
 /// The object paths and prior proofs remain opaque to higher layers. This
@@ -958,6 +969,22 @@ impl CacheClient {
         oids: &[Oid],
         mut on_window: impl FnMut(&[Oid], &[ObjectVerification]) -> std::result::Result<(), E>,
     ) -> std::result::Result<(), E> {
+        self.verify_windows_unmemoized_observed(oids, |event| match event {
+            VerificationEvent::Started { .. } => Ok(()),
+            VerificationEvent::Completed { oids, statuses } => on_window(oids, statuses),
+        })
+    }
+
+    /// Verify bounded subwindows, notifying the coordinator before filesystem
+    /// work and after results and proof deltas are available.
+    ///
+    /// # Panics (debug only)
+    /// As with `verify_windows_unmemoized`, OIDs must be globally distinct.
+    pub fn verify_windows_unmemoized_observed<E: From<CacheError>>(
+        &self,
+        oids: &[Oid],
+        mut observe: impl FnMut(VerificationEvent<'_>) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), E> {
         // Debug-only dedup check spans the *whole* `oids` slice, not just
         // one window at a time: a duplicate more than one window apart
         // (e.g. oid 0 and oid `VERIFY_WINDOW + 5`) would silently pass a
@@ -982,6 +1009,8 @@ impl CacheClient {
                     "verify_windows_unmemoized requires globally deduplicated oids"
                 );
             }
+
+            observe(VerificationEvent::Started { oids: window })?;
 
             // A failed bulk proof lookup degrades to "no known priors"
             // for this window rather than aborting verification, same
@@ -1022,7 +1051,10 @@ impl CacheClient {
             // Best-effort, same reasoning as `verify` above.
             let _ = self.index.apply_many(&deltas);
 
-            on_window(window, &statuses)?;
+            observe(VerificationEvent::Completed {
+                oids: window,
+                statuses: &statuses,
+            })?;
         }
         Ok(())
     }
@@ -1198,13 +1230,8 @@ pub use gat_core::config::{DEFAULT_INGEST_STRATEGY, IngestStrategy};
 /// Ingest a file that already exists on the local filesystem into the
 /// cache, per `strategy` (see [`IngestStrategy`]).
 #[cfg(any(test, feature = "test-support"))]
-pub fn ingest_file(
-    objects_dir: &Path,
-    path: &Path,
-    strategy: IngestStrategy,
-    on_progress: impl Fn(u64) + Sync,
-) -> Result<Ingested> {
-    let (tmp, oid, size) = ingest_file_to_tmp(objects_dir, path, strategy, on_progress)?;
+pub fn ingest_file(objects_dir: &Path, path: &Path, strategy: IngestStrategy) -> Result<Ingested> {
+    let (tmp, oid, size) = ingest_file_to_tmp(objects_dir, path, strategy)?;
     finalize_tmp(objects_dir, tmp, oid, size)
 }
 
@@ -1218,9 +1245,8 @@ pub fn ingest_file_delta(
     objects_dir: &Path,
     path: &Path,
     strategy: IngestStrategy,
-    on_progress: impl Fn(u64) + Sync,
 ) -> Result<(Ingested, Option<CachePublication>)> {
-    let (tmp, oid, size) = ingest_file_to_tmp(objects_dir, path, strategy, on_progress)?;
+    let (tmp, oid, size) = ingest_file_to_tmp(objects_dir, path, strategy)?;
     publish_tmp(objects_dir, tmp, oid, size)
 }
 
@@ -1232,37 +1258,12 @@ fn ingest_file_to_tmp(
     objects_dir: &Path,
     path: &Path,
     strategy: IngestStrategy,
-    on_progress: impl Fn(u64) + Sync,
 ) -> Result<(NamedTempFile, Oid, u64)> {
     match strategy {
-        IngestStrategy::Safe => ingest_file_safe_to_tmp(objects_dir, path, on_progress),
-        IngestStrategy::Hybrid => ingest_file_hybrid_to_tmp(objects_dir, path, on_progress),
-        IngestStrategy::Mmap => ingest_file_mmap_to_tmp(objects_dir, path, on_progress),
+        IngestStrategy::Safe => ingest_file_safe_to_tmp(objects_dir, path),
+        IngestStrategy::Hybrid => ingest_file_hybrid_to_tmp(objects_dir, path),
+        IngestStrategy::Mmap => ingest_file_mmap_to_tmp(objects_dir, path),
     }
-}
-
-/// Poll only while the copy is active. Dropping the completion sender wakes
-/// the observer immediately on success, failure, or unwind, instead of joining
-/// a sleeping thread for the remainder of its reporting interval.
-fn with_copy_progress<T>(
-    path: &Path,
-    on_progress: &(impl Fn(u64) + Sync),
-    copy: impl FnOnce() -> T,
-) -> T {
-    std::thread::scope(|scope| {
-        let (complete, waiting) = std::sync::mpsc::channel::<()>();
-        scope.spawn(move || {
-            while matches!(
-                waiting.recv_timeout(std::time::Duration::from_millis(100)),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-            ) {
-                on_progress(std::fs::metadata(path).map_or(0, |m| m.len()));
-            }
-        });
-        let result = copy();
-        drop(complete);
-        result
-    })
 }
 
 /// [`IngestStrategy::Safe`] (the default): copy `path` into the cache and
@@ -1281,20 +1282,14 @@ fn with_copy_progress<T>(
 /// the default) do not provide this same guarantee under concurrent
 /// source modification -- see their own doc comments.
 ///
-fn ingest_file_safe_to_tmp(
-    objects_dir: &Path,
-    path: &Path,
-    on_progress: impl Fn(u64) + Sync,
-) -> Result<(NamedTempFile, Oid, u64)> {
+fn ingest_file_safe_to_tmp(objects_dir: &Path, path: &Path) -> Result<(NamedTempFile, Oid, u64)> {
     ensure_cache_directory(objects_dir)?;
     let mut tmp = create_tmp_file(objects_dir)?;
     let tmp_path = tmp.path().to_path_buf();
-    with_copy_progress(&tmp_path, &on_progress, || std::fs::copy(path, &tmp_path)).map_err(
-        |source| CacheError::PathUnreadable {
-            path: path.to_path_buf(),
-            source,
-        },
-    )?;
+    std::fs::copy(path, &tmp_path).map_err(|source| CacheError::PathUnreadable {
+        path: path.to_path_buf(),
+        source,
+    })?;
     tmp.as_file_mut()
         .sync_all()
         .map_err(|source| CacheError::EntryUnwritable {
@@ -1311,7 +1306,6 @@ fn ingest_file_safe_to_tmp(
             source,
         })?
         .len();
-    on_progress(size);
     let oid = hash_file_oid(tmp.path())?;
     Ok((tmp, oid, size))
 }
@@ -1329,18 +1323,14 @@ fn ingest_file_safe_to_tmp(
 /// modification. It catches the vastly common "someone edited/replaced
 /// the file" case cheaply, but choosing `Hybrid` over `Safe` is an
 /// explicit trade of that narrow correctness gap for speed.
-fn ingest_file_hybrid_to_tmp(
-    objects_dir: &Path,
-    path: &Path,
-    on_progress: impl Fn(u64) + Sync,
-) -> Result<(NamedTempFile, Oid, u64)> {
+fn ingest_file_hybrid_to_tmp(objects_dir: &Path, path: &Path) -> Result<(NamedTempFile, Oid, u64)> {
     ensure_cache_directory(objects_dir)?;
     let mut tmp = create_tmp_file(objects_dir)?;
     let tmp_path = tmp.path().to_path_buf();
     let before = source_fingerprint(path);
     let (copy_result, hash_result): (std::io::Result<u64>, std::io::Result<blake3::Hash>) =
         rayon::join(
-            || with_copy_progress(&tmp_path, &on_progress, || std::fs::copy(path, &tmp_path)),
+            || std::fs::copy(path, &tmp_path),
             || {
                 let mut hasher = blake3::Hasher::new();
                 hasher.update_mmap_rayon(path)?;
@@ -1351,7 +1341,6 @@ fn ingest_file_hybrid_to_tmp(
         path: path.to_path_buf(),
         source,
     })?;
-    on_progress(size);
     tmp.as_file_mut()
         .sync_all()
         .map_err(|source| CacheError::EntryUnwritable {
@@ -1399,11 +1388,7 @@ pub fn source_fingerprint(path: &Path) -> Option<(u64, std::time::SystemTime)> {
 /// alive are outside this strategy's safety assumptions and must be
 /// avoided. Choose `Safe` instead when source-file stability cannot be
 /// guaranteed.
-fn ingest_file_mmap_to_tmp(
-    objects_dir: &Path,
-    path: &Path,
-    on_progress: impl Fn(u64) + Sync,
-) -> Result<(NamedTempFile, Oid, u64)> {
+fn ingest_file_mmap_to_tmp(objects_dir: &Path, path: &Path) -> Result<(NamedTempFile, Oid, u64)> {
     ensure_cache_directory(objects_dir)?;
     let mut tmp = create_tmp_file(objects_dir)?;
     let tmp_path = tmp.path().to_path_buf();
@@ -1428,7 +1413,6 @@ fn ingest_file_mmap_to_tmp(
             })?;
         #[cfg(any(test, feature = "test-support"))]
         record_sync_all();
-        on_progress(0);
         let oid = Oid::from_bytes(*(blake3::hash(&[])).as_bytes());
         return Ok((tmp, oid, 0));
     }
@@ -1442,17 +1426,14 @@ fn ingest_file_mmap_to_tmp(
             path: path.to_path_buf(),
             source,
         })?;
-    let (write_result, hash): (std::io::Result<()>, blake3::Hash) =
-        with_copy_progress(&tmp_path, &on_progress, || {
-            rayon::join(
-                || tmp.as_file_mut().write_all(&mmap),
-                || {
-                    let mut hasher = blake3::Hasher::new();
-                    hasher.update_rayon(&mmap);
-                    hasher.finalize()
-                },
-            )
-        });
+    let (write_result, hash): (std::io::Result<()>, blake3::Hash) = rayon::join(
+        || tmp.as_file_mut().write_all(&mmap),
+        || {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update_rayon(&mmap);
+            hasher.finalize()
+        },
+    );
     write_result.map_err(|source| CacheError::EntryUnwritable {
         path: tmp_path.clone(),
         source,
@@ -1465,7 +1446,6 @@ fn ingest_file_mmap_to_tmp(
         })?;
     #[cfg(any(test, feature = "test-support"))]
     record_sync_all();
-    on_progress(size);
     let oid = Oid::from_bytes(*(hash).as_bytes());
     Ok((tmp, oid, size))
 }
@@ -2238,29 +2218,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_progress_completion_preserves_results_and_unwinds() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("staging");
-        assert_eq!(
-            with_copy_progress(&path, &|_| {}, || Ok::<_, u8>(42)),
-            Ok(42)
-        );
-        assert_eq!(
-            with_copy_progress(&path, &|_| {}, || Err::<u8, _>(7)),
-            Err(7)
-        );
-        // The completion sender must be dropped before the scoped observer is
-        // joined during unwinding, or this call would never return.
-        assert!(
-            std::panic::catch_unwind(|| {
-                with_copy_progress(&path, &|_| {}, || panic!("copy failed"));
-            })
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn file_ingest_reports_final_size_and_cleans_staging_on_read_failure() {
+    fn file_ingest_preserves_size_and_cleans_staging_on_read_failure() {
         for strategy in [
             IngestStrategy::Safe,
             IngestStrategy::Hybrid,
@@ -2269,15 +2227,10 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let objects = tmp.path().join("objects");
             let source = tmp.path().join("source");
-            let reported = std::sync::Mutex::new(Vec::new());
             std::fs::write(&source, b"content").unwrap();
-            let result = ingest_file(&objects, &source, strategy, |size| {
-                reported.lock().unwrap().push(size);
-            })
-            .unwrap();
+            let result = ingest_file(&objects, &source, strategy).unwrap();
             assert_eq!(result.size, 7);
-            assert_eq!(reported.lock().unwrap().last(), Some(&7));
-            assert!(ingest_file(&objects, &tmp.path().join("absent"), strategy, |_| {}).is_err());
+            assert!(ingest_file(&objects, &tmp.path().join("absent"), strategy).is_err());
             assert!(!std::fs::read_dir(&objects).unwrap().any(|entry| {
                 entry
                     .unwrap()
@@ -2297,7 +2250,7 @@ mod tests {
             let src = tmp.path().join("src.bin");
             std::fs::write(&src, &content).unwrap();
 
-            let via_file = ingest_file(&objects_dir, &src, strategy, |_| {}).unwrap();
+            let via_file = ingest_file(&objects_dir, &src, strategy).unwrap();
             let expected_oid = Oid::from_bytes(*(blake3::hash(&content)).as_bytes());
             assert_eq!(via_file.oid, expected_oid, "strategy {strategy:?}");
             assert_eq!(via_file.size, content.len() as u64, "strategy {strategy:?}");
@@ -2309,7 +2262,7 @@ mod tests {
             assert_eq!(via_file, via_stream, "strategy {strategy:?}");
 
             // re-ingesting the same file dedups (no leftover temp files)
-            ingest_file(&objects_dir, &src, strategy, |_| {}).unwrap();
+            ingest_file(&objects_dir, &src, strategy).unwrap();
             let leftovers: Vec<_> = std::fs::read_dir(&objects_dir)
                 .unwrap()
                 .filter_map(std::result::Result::ok)
@@ -2425,7 +2378,7 @@ mod tests {
                 for (src, content) in &srcs {
                     let objects_dir = &objects_dir;
                     s.spawn(move || {
-                        let ingested = ingest_file(objects_dir, src, strategy, |_| {}).unwrap();
+                        let ingested = ingest_file(objects_dir, src, strategy).unwrap();
                         let expected_oid = Oid::from_bytes(*(blake3::hash(content)).as_bytes());
                         assert_eq!(ingested.oid, expected_oid, "strategy {strategy:?}");
                         let stored =
@@ -2463,9 +2416,7 @@ mod tests {
                     .map(|_| {
                         let objects_dir = &objects_dir;
                         let src = &src;
-                        s.spawn(move || {
-                            ingest_file(objects_dir, src, strategy, |_| {}).unwrap().oid
-                        })
+                        s.spawn(move || ingest_file(objects_dir, src, strategy).unwrap().oid)
                     })
                     .collect();
                 handles.into_iter().map(|h| h.join().unwrap()).collect()
@@ -2725,7 +2676,7 @@ mod tests {
             std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
             std::fs::write(&dest, b"not the right bytes at all").unwrap();
 
-            let ingested = ingest_file(&objects_dir, &src, strategy, |_| {}).unwrap();
+            let ingested = ingest_file(&objects_dir, &src, strategy).unwrap();
             assert_eq!(ingested.oid, oid, "strategy {strategy:?}");
             assert_eq!(
                 std::fs::read(&dest).unwrap(),
@@ -2817,7 +2768,7 @@ mod tests {
             let src = tmp.path().join("large.bin");
             std::fs::write(&src, &content).unwrap();
 
-            let ingested = ingest_file(&objects_dir, &src, strategy, |_| {}).unwrap();
+            let ingested = ingest_file(&objects_dir, &src, strategy).unwrap();
             assert_eq!(ingested.oid, expected_oid, "strategy {strategy:?}");
             assert_eq!(ingested.size, content.len() as u64, "strategy {strategy:?}");
             let stored = std::fs::read(cache_path_oid(&objects_dir, &ingested.oid)).unwrap();
@@ -2850,7 +2801,7 @@ mod tests {
         let src = tmp.path().join("src.bin");
         std::fs::write(&src, &content).unwrap();
 
-        let ingested = ingest_file(&objects_dir, &src, IngestStrategy::Hybrid, |_| {}).unwrap();
+        let ingested = ingest_file(&objects_dir, &src, IngestStrategy::Hybrid).unwrap();
         let expected_oid = Oid::from_bytes(*(blake3::hash(&content)).as_bytes());
         assert_eq!(ingested.oid, expected_oid);
         assert_eq!(ingested.size, content.len() as u64);
@@ -2872,7 +2823,7 @@ mod tests {
         let src = tmp.path().join("src.bin");
         std::fs::write(&src, &content).unwrap();
 
-        let ingested = ingest_file(&objects_dir, &src, IngestStrategy::Hybrid, |_| {}).unwrap();
+        let ingested = ingest_file(&objects_dir, &src, IngestStrategy::Hybrid).unwrap();
         let dest = cache_path_oid(&objects_dir, &ingested.oid);
         let stored = std::fs::read(&dest).unwrap();
         let actual_hash = Oid::from_bytes(*(blake3::hash(&stored)).as_bytes());
@@ -2913,7 +2864,7 @@ mod tests {
         let src = tmp.path().join("src.bin");
         std::fs::write(&src, &content).unwrap();
 
-        let ingested = ingest_file(&objects_dir, &src, IngestStrategy::Mmap, |_| {}).unwrap();
+        let ingested = ingest_file(&objects_dir, &src, IngestStrategy::Mmap).unwrap();
         let expected_oid = Oid::from_bytes(*(blake3::hash(&content)).as_bytes());
         assert_eq!(ingested.oid, expected_oid);
         assert_eq!(ingested.size, content.len() as u64);
@@ -2928,7 +2879,7 @@ mod tests {
         let src = tmp.path().join("empty.bin");
         std::fs::write(&src, b"").unwrap();
 
-        let ingested = ingest_file(&objects_dir, &src, IngestStrategy::Mmap, |_| {}).unwrap();
+        let ingested = ingest_file(&objects_dir, &src, IngestStrategy::Mmap).unwrap();
         assert_eq!(ingested.size, 0);
         assert_eq!(ingested.oid, Oid::from_bytes(*blake3::hash(b"").as_bytes()));
     }
@@ -3290,6 +3241,45 @@ mod tests {
 
             assert_eq!(window_calls, 2, "expected one callback per bounded window");
             assert_eq!(seen, count);
+        }
+
+        #[test]
+        fn observed_verification_announces_each_subwindow_before_reading_objects() {
+            let tmp = tempfile::tempdir().unwrap();
+            let objects_dir = tmp.path().join("objects");
+            let _window = crate::cache::object::test_support::with_verify_window(2);
+            let oids = write_objects(&objects_dir, 3);
+            let cache = CacheClient::open(objects_dir.clone());
+            let mut started = Vec::new();
+            let mut completed = Vec::new();
+            cache
+                .verify_windows_unmemoized_observed(&oids, |event| -> Result<()> {
+                    match event {
+                        VerificationEvent::Started { oids } => {
+                            started.push(oids.len());
+                            // Removing the bytes at this boundary must affect this
+                            // batch's verification, proving the event precedes I/O.
+                            for oid in oids {
+                                std::fs::remove_file(
+                                    objects_dir.join(crate::cache::object_key_oid(oid)),
+                                )
+                                .unwrap();
+                            }
+                        }
+                        VerificationEvent::Completed { oids, statuses } => {
+                            completed.push(oids.len());
+                            assert!(
+                                statuses
+                                    .iter()
+                                    .all(|status| *status == ObjectVerification::Missing)
+                            );
+                        }
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(started, [2, 1]);
+            assert_eq!(completed, started);
         }
 
         #[test]

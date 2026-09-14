@@ -254,16 +254,126 @@ fn history_aware_push_reports_resolution_before_pushing() {
     assert!(
         task.activities.iter().any(|activity| matches!(
             activity,
-            ProgressActivity::TransferringFile { path } if path == "a.bin"
+            ProgressActivity::Publishing(counts) if counts.uploading > 0
         )),
-        "expected a per-object upload activity after resolution, got {:?}",
+        "expected an upload summary after resolution, got {:?}",
         task.activities
     );
+    let verification = task.activities.iter().position(|activity| matches!(
+        activity, ProgressActivity::Publishing(counts) if counts.verifying == 1 && counts.uploaded == 0
+    )).unwrap();
+    let upload = task
+        .activities
+        .iter()
+        .position(|activity| {
+            matches!(
+                activity, ProgressActivity::Publishing(counts) if counts.uploading == 1
+            )
+        })
+        .unwrap();
+    assert!(verification < upload);
     assert_eq!(progress.max_active_tasks(), 1);
 }
 
+/// Hold verification at its dispatch boundary and inspect the recorded UI from
+/// another thread. Synchronization, rather than a sleep, makes the stalled
+/// state observable regardless of cache speed or worker scheduling.
 #[test]
-fn fetch_progress_reports_activity_message_per_object() {
+fn push_reports_verification_while_dispatch_is_delayed() {
+    use gat_core::progress::{ActivityBackend, ProgressHandle, ProgressSpec, ProgressTask};
+    use std::sync::{Arc, Mutex, mpsc};
+
+    struct Gate {
+        handle: ProgressHandle,
+        task: Mutex<Option<ProgressTask>>,
+        entered: mpsc::Sender<()>,
+        release: Mutex<Option<mpsc::Receiver<()>>>,
+    }
+    impl ActivityBackend for Gate {
+        fn inc(&self, delta: u64) {
+            self.handle.inc(delta);
+        }
+        fn set_activity(&self, activity: &ProgressActivity) {
+            self.handle.set_activity(activity.clone());
+            if matches!(activity, ProgressActivity::Publishing(counts) if counts.verifying > 0) {
+                let release = self.release.lock().unwrap().take();
+                if let Some(release) = release {
+                    self.entered.send(()).unwrap();
+                    release.recv().unwrap();
+                }
+            }
+        }
+        fn finish(&self) {
+            self.task.lock().unwrap().take();
+        }
+    }
+    struct Reporter {
+        recording: RecordingProgress,
+        entered: Mutex<Option<mpsc::Sender<()>>>,
+        release: Mutex<Option<mpsc::Receiver<()>>>,
+    }
+    impl ProgressReporter for Reporter {
+        fn begin(&self, spec: ProgressSpec) -> ProgressTask {
+            let task = self.recording.begin(spec);
+            if spec.operation() != ProgressOperation::Pushing {
+                return task;
+            }
+            ProgressTask::from_backend(Arc::new(Gate {
+                handle: task.handle(),
+                task: Mutex::new(Some(task)),
+                entered: self.entered.lock().unwrap().take().unwrap(),
+                release: Mutex::new(self.release.lock().unwrap().take()),
+            }))
+        }
+    }
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let tmp = test_repo();
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
+    std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
+    add(&repo, &[PathBuf::from("a.bin")], &NoopProgress).unwrap();
+    let remote_dir = tempfile::tempdir().unwrap();
+    remote_add_with_default(
+        &repo,
+        "origin",
+        gat_io::remote_file_url_for_test(remote_dir.path()),
+    )
+    .unwrap();
+
+    let recording = RecordingProgress::new();
+    let (entered, waiting) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let reporter = Reporter {
+        recording: recording.clone(),
+        entered: Mutex::new(Some(entered)),
+        release: Mutex::new(Some(released)),
+    };
+    std::thread::scope(move |scope| {
+        let observer = scope.spawn(move || {
+            waiting.recv().unwrap();
+            let snapshot = recording.only(ProgressOperation::Pushing);
+            // Release before asserting so a failed assertion cannot strand push.
+            release.send(()).unwrap();
+            snapshot
+        });
+        let result = push(&repo, None, None, &reporter);
+        // Close the gate channel even when push fails before creating its task.
+        drop(reporter);
+        result.unwrap();
+        let snapshot = observer.join().unwrap();
+        assert_eq!(snapshot.position, 0);
+        assert!(matches!(snapshot.activities.last(),
+            Some(ProgressActivity::Publishing(counts))
+                if counts.verifying == 1 && counts.checked == 1
+                    && counts.uploading == 0 && counts.uploaded == 0));
+    });
+}
+
+#[test]
+fn fetch_progress_reports_active_downloads() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     opendal::init_default_registry();
@@ -288,12 +398,12 @@ fn fetch_progress_reports_activity_message_per_object() {
     fetch_current(&repo, &Selection::root(), None, &progress).unwrap();
 
     // The one logical `Fetching` task must have advanced its item
-    // position and reported the object it was downloading as typed activity.
+    // position and reported admitted downloads as typed activity.
     let fetch_task = progress.only(ProgressOperation::Fetching);
     assert!(fetch_task.position > 0);
     assert!(fetch_task.activities.iter().any(|activity| matches!(
         activity,
-        ProgressActivity::TransferringFile { path } if path == "a.bin"
+        ProgressActivity::Fetching(counts) if counts.downloading > 0
     )));
 }
 
@@ -987,6 +1097,11 @@ fn push_skips_entries_missing_from_local_cache_without_erroring() {
     assert_eq!(
         outcome.skipped[0].reason,
         gat_command::PushSkipReason::CacheMissing
+    );
+    let recorded = progress.only(ProgressOperation::Pushing);
+    assert!(
+        matches!(recorded.activities.last(), Some(ProgressActivity::Publishing(counts))
+        if counts.rejected == 1 && counts.uploaded == 0 && counts.verifying == 0)
     );
     // A missing-from-cache obligation still reaches a terminal outcome
     // (skipped) and must advance the `Pushing` position exactly once,
@@ -2140,9 +2255,29 @@ fn repair_corrupted_dedups_the_same_oid_across_a_repair_window_boundary() {
     corrupted.push((gp("shared-again.bin"), oid));
 
     let repair_calls_before = gat_command::repair_test_support::repair_oid_calls();
-    let repair_task = NoopProgress.begin(ProgressSpec::indeterminate(ProgressOperation::Repairing));
+    let progress = RecordingProgress::new();
+    let repair_task = progress.begin(ProgressSpec::items(
+        ProgressOperation::Repairing,
+        gat_core::progress::ProgressUnit::Entries,
+        Some(corrupted.len() as u64),
+    ));
+    let resolutions_before = gat_engine::test_support::remote_route_resolutions();
     let outcome = repair_corrupted(&mut operation, None, &corrupted, &repair_task.handle());
 
+    assert_eq!(
+        gat_engine::test_support::remote_route_resolutions() - resolutions_before,
+        repair_window() + 1,
+        "route resolution must run once per distinct object, including across windows"
+    );
+    let recorded = progress.only(ProgressOperation::Repairing);
+    assert_eq!(recorded.position, corrupted.len() as u64);
+    assert!(
+        matches!(recorded.activities.last(), Some(ProgressActivity::Repairing(counts))
+        if counts.received == 1 && counts.failed == repair_window() as u64 && counts.downloading == 0)
+    );
+    assert!(recorded.activities.iter().any(|activity| matches!(
+        activity, ProgressActivity::Repairing(counts) if counts.downloading > 0
+    )));
     assert_eq!(
         gat_command::repair_test_support::repair_oid_calls() - repair_calls_before,
         repair_window() + 1,
@@ -2436,12 +2571,8 @@ fn repair_corrupted_resolves_the_same_oid_different_route_representative_determi
     let routed_url = gat_io::remote_file_url_for_test(routed_remote_dir.path());
     remote_add_with_default(&repo, "alt", routed_url).unwrap();
 
-    // "routed.bin" is explicitly routed to "alt"; "plain.bin" shares
-    // its oid with "routed.bin" but is left unrouted -- it still gets
-    // its own route resolved from the operation snapshot below (see
-    // the `remote_route_resolutions` assertions), even though only
-    // the first-occurrence representative's resolution is the one
-    // actually selects the download source for the shared oid.
+    // Only the first path for the shared OID selects its download source.
+    // The later duplicate's route cannot affect the repair outcome.
     // Both need `origin` (the current default) reachable to push, so
     // the default is only cleared below, once pushing is done.
     route_add(&repo, "routed.bin", "alt", "routed.bin").unwrap();
@@ -2506,12 +2637,8 @@ fn repair_corrupted_resolves_the_same_oid_different_route_representative_determi
     );
     assert_eq!(
         gat_engine::test_support::remote_route_resolutions() - route_resolutions_before,
-        corrupted_len,
-        "the effective remote must be resolved from the operation \
-             snapshot for every `(path, oid)` entry in `corrupted` -- \
-             including `plain.bin`, which shares an already-seen oid with \
-             the first-occurrence `routed.bin` representative -- not just \
-             the retained representative per unique oid"
+        corrupted_len - 1,
+        "resolve only the first representative of each distinct object"
     );
     assert_eq!(
         gat_engine::test_support::remote_open_count_for("alt") - alt_opens_before,
@@ -2564,12 +2691,8 @@ fn repair_corrupted_resolves_the_same_oid_different_route_representative_determi
     assert_eq!(outcome2.repaired, 2);
     assert_eq!(
         gat_engine::test_support::remote_route_resolutions() - route_resolutions_before_2,
-        second_corrupted_len,
-        "every `(path, oid)` entry -- including `routed.bin`, which \
-             now shares an already-seen oid with the first-occurrence \
-             `plain.bin` representative -- must still have its effective \
-             remote resolved from the operation snapshot, regardless of \
-             which path happens to be the retained representative"
+        second_corrupted_len - 1,
+        "reversing path order must still resolve only distinct objects"
     );
     assert_eq!(
         gat_engine::test_support::remote_open_count_for("origin") - origin_opens_before_2,
@@ -2859,7 +2982,26 @@ fn push_multi_remote_creates_one_obligation_per_remote_for_the_same_oid() {
     );
     repo.write_config_fixture(&cfg).unwrap();
 
-    let outcome = push(&repo, None, None, &NoopProgress).unwrap();
+    let progress = RecordingProgress::new();
+    let outcome = push(&repo, None, None, &progress).unwrap();
+    let task = progress.only(ProgressOperation::Pushing);
+    let Some(ProgressActivity::Publishing(counts)) = task.activities.last() else {
+        panic!("missing publication summary");
+    };
+    assert_eq!(counts.checked, 2);
+    assert_eq!(counts.uploaded, 2);
+    assert!(task.activities.iter().all(|activity| !matches!(
+        activity, ProgressActivity::Publishing(counts) if counts.verifying > 1
+    )));
+    let progress = RecordingProgress::new();
+    push(&repo, None, None, &progress).unwrap();
+    let task = progress.only(ProgressOperation::Pushing);
+    let Some(ProgressActivity::Publishing(counts)) = task.activities.last() else {
+        panic!("missing publication summary");
+    };
+    assert_eq!(counts.checked, 2);
+    assert_eq!(counts.already_present, 2);
+    assert_eq!(counts.uploaded, 0);
     // Local verification is shared by oid: only one unique object is
     // reported, even though it was published to two remotes.
     assert_eq!(outcome.total, 1);
@@ -3048,6 +3190,29 @@ fn push_progress_is_invariant_across_transfer_window_sizes() {
             "the whole obligation count is not known before streaming begins, \
              so no window size may expose a determinate total"
         );
+        let Some(ProgressActivity::Publishing(counts)) = task.activities.last() else {
+            panic!("push must finish with a publication summary");
+        };
+        assert_eq!(counts.checked, object_count as u64);
+        assert_eq!(counts.uploaded, object_count as u64);
+        assert_eq!(
+            (counts.checking, counts.verifying, counts.uploading),
+            (0, 0, 0)
+        );
+        let snapshots: Vec<_> = task
+            .activities
+            .iter()
+            .filter_map(|activity| match activity {
+                ProgressActivity::Publishing(counts) => Some(counts),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            snapshots
+                .windows(2)
+                .all(|pair| pair[0].checked <= pair[1].checked
+                    && pair[0].uploaded <= pair[1].uploaded)
+        );
         final_positions.push(task.position);
     }
 
@@ -3193,7 +3358,26 @@ fn fetch_progress_is_invariant_across_transfer_window_sizes() {
         );
         let task = progress.only(ProgressOperation::Fetching);
         assert!(task.finished);
+        let Some(ProgressActivity::Fetching(counts)) = task.activities.last() else {
+            panic!("fetch must end with a summary");
+        };
+        assert_eq!(counts.checked, object_count as u64);
+        assert_eq!(counts.received, object_count as u64);
+        assert_eq!(
+            (counts.verifying, counts.downloading, counts.cached),
+            (0, 0, 0)
+        );
         final_positions.push(task.position);
+        drop(desired_op);
+        let warm = RecordingProgress::new();
+        fetch_current(&repo, &Selection::root(), None, &warm).unwrap();
+        let task = warm.only(ProgressOperation::Fetching);
+        assert_eq!(task.position, 0, "cached objects are not downloads");
+        assert!(
+            matches!(task.activities.last(), Some(ProgressActivity::Fetching(counts))
+            if counts.checked == object_count as u64 && counts.cached == object_count as u64
+                && counts.received == 0 && counts.verifying == 0)
+        );
     }
 
     assert!(
@@ -3787,7 +3971,7 @@ fn fetch_then_repair_then_sync_share_one_proof_session() {
     let outcome = gat_engine::download_window(
         &mut operation,
         vec![gat_engine::DownloadObject::new(oid, path, remote)],
-        &repair_task.handle(),
+        &mut gat_engine::FetchProgress::new(repair_task.handle()),
     )
     .unwrap();
     assert_eq!(
@@ -4637,5 +4821,33 @@ fn remote_status_with_all_history_fails_closed_on_a_dangling_ref() {
         result.is_err(),
         "status --remote --all-history must fail closed on a dangling \
          ref instead of silently reporting an incomplete selection"
+    );
+}
+
+#[test]
+fn fetch_reports_remote_open_failure_without_counting_a_download() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let tmp = test_repo();
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
+    std::fs::write(
+        tmp.path().join("gat.yaml"),
+        "remotes:\n  default: origin\n  origin:\n    url: '${GAT_TEST_UNSET_REMOTE}'\n",
+    )
+    .unwrap();
+    std::fs::write(tmp.path().join("object.bin"), b"payload").unwrap();
+    add(&repo, &[PathBuf::from("object.bin")], &NoopProgress).unwrap();
+    std::fs::remove_dir_all(cache_path(&repo)).unwrap();
+
+    let progress = RecordingProgress::new();
+    assert!(fetch_current(&repo, &Selection::root(), None, &progress).is_err());
+    let task = progress.only(ProgressOperation::Fetching);
+    assert_eq!(task.position, 0);
+    assert!(
+        matches!(task.activities.last(), Some(ProgressActivity::Fetching(counts))
+        if counts.checked == 1 && counts.failed == 1 && counts.received == 0
+            && counts.verifying == 0 && counts.downloading == 0)
     );
 }

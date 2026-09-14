@@ -5,14 +5,13 @@ use gat_core::history::HistorySelection;
 use gat_core::name::RemoteName;
 use gat_core::oid::Oid;
 use gat_core::progress::{
-    ProgressActivity, ProgressHandle, ProgressOperation, ProgressReporter, ProgressSpec,
-    ProgressUnit,
+    ProgressActivity, ProgressOperation, ProgressReporter, ProgressSpec, ProgressUnit,
 };
 use gat_core::selection::Selection;
 use gat_engine::{
-    DesiredOperation, DownloadError, DownloadObject, HistoryError, RemoteCatalogError,
-    RemoteSessionError, Repository, SelectedObject, StreamingWindow, UnknownRemoteOverrideError,
-    visit_current_state_objects, visit_history_objects,
+    DesiredOperation, DownloadError, DownloadObject, FetchProgress, HistoryError,
+    RemoteCatalogError, RemoteSessionError, Repository, SelectedObject, StreamingWindow,
+    UnknownRemoteOverrideError, visit_current_state_objects, visit_history_objects,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -97,6 +96,7 @@ pub fn fetch_with_desired_operation(
     let task = fetching.handle();
     task.set_activity(ProgressActivity::selection_or_state(history_selected));
 
+    let mut download_progress = FetchProgress::new(task);
     let mut window: StreamingWindow<Oid, SelectedObject> =
         StreamingWindow::new(operation.limits().transfer.window);
     let mut fetched = 0usize;
@@ -111,7 +111,7 @@ pub fn fetch_with_desired_operation(
                     batch.drain(),
                     request.remote,
                     &mut fetched,
-                    &task,
+                    &mut download_progress,
                 )
             },
         )
@@ -141,7 +141,7 @@ pub fn fetch_with_desired_operation(
             batch.drain(),
             request.remote,
             &mut fetched,
-            &task,
+            &mut download_progress,
         )
     })?;
     fetching.finish();
@@ -163,7 +163,7 @@ fn run_fetch_window(
     objects: std::vec::Drain<'_, SelectedObject>,
     remote: Option<&RemoteName>,
     fetched: &mut usize,
-    task: &ProgressHandle,
+    task: &mut FetchProgress,
 ) -> Result<(), FetchError> {
     let downloads = {
         let policy = operation.policy();

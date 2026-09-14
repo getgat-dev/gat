@@ -369,6 +369,16 @@ fn reshape_and_reconciliation_share_one_progress_task() {
         progress.count_of(gat_core::progress::ProgressOperation::Synchronizing),
         1
     );
+    let task = progress.only(gat_core::progress::ProgressOperation::Synchronizing);
+    assert!(
+        task.activities
+            .contains(&gat_core::progress::ProgressActivity::ReconcilingWorkingTree)
+    );
+    assert!(
+        !task
+            .activities
+            .contains(&gat_core::progress::ProgressActivity::ValidatingWorkingTree)
+    );
     assert_eq!(progress.max_active_tasks(), 1);
 }
 

@@ -48,6 +48,25 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+fn work_line(
+    counts: gat_core::progress::WorkCounts,
+    active: &'static str,
+    complete: &'static str,
+) -> UserLine {
+    UserLine::compose([
+        UserLine::unsigned_number(counts.active()),
+        UserLine::authored(" "),
+        UserLine::authored(active),
+        UserLine::authored(" · "),
+        UserLine::unsigned_number(counts.succeeded()),
+        UserLine::authored(" "),
+        UserLine::authored(complete),
+        UserLine::authored(" · "),
+        UserLine::unsigned_number(counts.failed()),
+        UserLine::authored(" failed"),
+    ])
+}
+
 /// The only place a [`ProgressOperation`] variant's fixed label is
 /// decided.
 /// `crate::progress` itself has no wording method on this type.
@@ -114,15 +133,14 @@ pub(crate) fn activity_line(activity: &ProgressActivity) -> UserLine {
         }
         ProgressActivity::RegeneratingExcludes => UserLine::authored("regenerating excludes"),
         ProgressActivity::CheckingReuseStatus => UserLine::authored("checking reuse status"),
-        ProgressActivity::HashingFile { path, percent } => match percent {
-            Some(percent) => UserLine::compose([
-                UserLine::path_text(path.as_str()),
-                UserLine::authored(" ("),
-                UserLine::number(i64::from(*percent)),
-                UserLine::authored("%)"),
-            ]),
-            None => UserLine::path_text(path.as_str()),
-        },
+        ProgressActivity::HashingFiles(counts) => work_line(*counts, "hashing", "hashed"),
+        ProgressActivity::InspectingRepositories(counts) => {
+            work_line(*counts, "inspecting", "inspected")
+        }
+        ProgressActivity::ListingRemoteObjects => UserLine::authored("listing remote objects"),
+        ProgressActivity::ReconcilingWorkingTree => {
+            UserLine::authored("validating and applying changes")
+        }
         ProgressActivity::WalkingDirectory => UserLine::authored("walking directory"),
         ProgressActivity::ExpandingPattern { pattern } => UserLine::compose([
             UserLine::authored("expanding pattern "),
@@ -131,17 +149,75 @@ pub(crate) fn activity_line(activity: &ProgressActivity) -> UserLine {
         ProgressActivity::Connecting => UserLine::authored("connecting"),
         ProgressActivity::ResolvingSelection => UserLine::authored("resolving selection"),
         ProgressActivity::LoadingState => UserLine::authored("loading state"),
+        ProgressActivity::Fetching(counts) => {
+            let failed = (counts.failed != 0).then(|| {
+                [
+                    UserLine::authored(" · "),
+                    UserLine::unsigned_number(counts.failed),
+                    UserLine::authored(" failed"),
+                ]
+            });
+            UserLine::compose(
+                [
+                    UserLine::unsigned_number(counts.verifying),
+                    UserLine::authored(" verifying · "),
+                    UserLine::unsigned_number(counts.downloading),
+                    UserLine::authored(" downloading · "),
+                    UserLine::unsigned_number(counts.checked),
+                    UserLine::authored(" checked · "),
+                    UserLine::unsigned_number(counts.cached),
+                    UserLine::authored(" cached · "),
+                    UserLine::unsigned_number(counts.received),
+                    UserLine::authored(" downloaded"),
+                ]
+                .into_iter()
+                .chain(failed.into_iter().flatten()),
+            )
+        }
+        ProgressActivity::Repairing(counts) => UserLine::compose([
+            UserLine::unsigned_number(counts.downloading),
+            UserLine::authored(" downloading · "),
+            UserLine::unsigned_number(counts.received),
+            UserLine::authored(" repaired · "),
+            UserLine::unsigned_number(counts.failed),
+            UserLine::authored(" failed"),
+        ]),
+        ProgressActivity::Publishing(counts) => {
+            let parts = [
+                UserLine::unsigned_number(counts.verifying),
+                UserLine::authored(" verifying · "),
+                UserLine::unsigned_number(counts.uploading),
+                UserLine::authored(" uploading · "),
+                UserLine::unsigned_number(counts.checking),
+                UserLine::authored(" checking · "),
+                UserLine::unsigned_number(counts.checked),
+                UserLine::authored(" checked · "),
+                UserLine::unsigned_number(counts.already_present),
+                UserLine::authored(" present · "),
+                UserLine::unsigned_number(counts.uploaded),
+                UserLine::authored(" uploaded"),
+            ];
+            let rejected = (counts.rejected != 0).then(|| {
+                [
+                    UserLine::authored(" · "),
+                    UserLine::unsigned_number(counts.rejected),
+                    UserLine::authored(" rejected"),
+                ]
+            });
+            UserLine::compose(parts.into_iter().chain(rejected.into_iter().flatten()))
+        }
         ProgressActivity::CheckingRemote => UserLine::authored("checking remote"),
-        ProgressActivity::CheckedRemoteObject { path } => UserLine::path_text(path.as_str()),
+        ProgressActivity::RemotePresence { present, missing } => UserLine::compose([
+            UserLine::unsigned_number(*present),
+            UserLine::authored(" present · "),
+            UserLine::unsigned_number(*missing),
+            UserLine::authored(" missing"),
+        ]),
         ProgressActivity::ClassifyingSelectors => UserLine::authored("classifying selectors"),
         ProgressActivity::ScanningDesiredState => UserLine::authored("scanning desired state"),
         ProgressActivity::ScanningLock => UserLine::authored("scanning gat.lock"),
         ProgressActivity::MatchingSourcePath => UserLine::authored("matching source path"),
         ProgressActivity::CheckingDestination => UserLine::authored("checking destination"),
-        ProgressActivity::CloningSource { location } => UserLine::redacted_url(
-            &crate::redaction::RedactedUrl::render(location.as_location_str()),
-        ),
-        ProgressActivity::TransferringFile { path } => UserLine::path_text(path.as_str()),
         ProgressActivity::LoadingMaterializedState => {
             UserLine::authored("loading materialized state")
         }
@@ -526,6 +602,50 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn receive_summaries_distinguish_cached_downloaded_and_repaired_objects() {
+        let counts = gat_core::progress::ReceiveProgress {
+            verifying: 12,
+            downloading: 8,
+            checked: 860,
+            cached: 720,
+            received: 120,
+            failed: 2,
+        };
+        assert_eq!(
+            activity_line(&ProgressActivity::Fetching(counts)).as_str(),
+            "12 verifying · 8 downloading · 860 checked · 720 cached · 120 downloaded · 2 failed"
+        );
+        assert_eq!(
+            activity_line(&ProgressActivity::Repairing(counts)).as_str(),
+            "8 downloading · 120 repaired · 2 failed"
+        );
+    }
+
+    #[test]
+    fn publication_summary_keeps_active_work_first_and_results_distinct() {
+        use gat_core::progress::PublicationProgress;
+        let counts = PublicationProgress {
+            checking: 4,
+            checked: 860,
+            already_present: 720,
+            verifying: 12,
+            uploading: 8,
+            uploaded: 120,
+            rejected: 2,
+        };
+        assert_eq!(
+            compose_message(
+                ProgressOperation::Pushing,
+                Some(activity_line(&ProgressActivity::Publishing(counts)))
+            )
+            .as_str(),
+            "pushing · 12 verifying · 8 uploading · 4 checking · 860 checked · 720 present · 120 uploaded · 2 rejected"
+        );
+        let line = activity_line(&ProgressActivity::Publishing(PublicationProgress::default()));
+        assert!(!line.as_str().contains("rejected"));
+    }
+
+    #[test]
     fn remote_gc_deletion_has_an_explicit_activity_label() {
         let message = super::compose_message(
             gat_core::progress::ProgressOperation::GarbageCollecting,
@@ -555,45 +675,25 @@ mod tests {
             "checking remote"
         );
         assert_eq!(
-            activity_line(&ProgressActivity::CheckedRemoteObject {
-                path: gat_core::lexical_path::GatPath::normalize("models/checkpoint.bin").unwrap(),
+            activity_line(&ProgressActivity::RemotePresence {
+                present: 3,
+                missing: 2
             })
             .as_str(),
-            "models/checkpoint.bin"
+            "3 present · 2 missing"
         );
     }
 
     #[test]
     fn activity_line_escapes_control_characters_instead_of_collapsing_them() {
-        // `UserLine`'s construction-time escaping is the single
-        // place control characters are neutralized. `HashingFile`'s `path` is a
-        // `GatPath` now, which structurally rejects control characters
-        // at construction time (see `gat_core::lexical_path`), so this
-        // test exercises the escaping contract through
-        // `ExpandingPattern`'s still-free-text `pattern` field instead.
+        // Selector patterns are the only free-form text in the activity
+        // protocol; escaping belongs to UserLine construction.
         let line = activity_line(&ProgressActivity::ExpandingPattern {
             pattern: "line one\nline two\r\ttabbed".to_string(),
         });
         assert!(!line.as_str().contains('\n'));
         assert!(!line.as_str().contains('\r'));
         assert!(!line.as_str().contains('\t'));
-    }
-
-    #[test]
-    fn cloning_source_activity_line_never_reaches_the_original_credential_bearing_url() {
-        // A credential-bearing clone URL must never reach the rendered
-        // activity line unredacted. `activity_line` itself performs the
-        // redaction (via `RedactedUrl::render`) from the neutral,
-        // unvalidated `GitLocationSpec` the protocol carries -- built
-        // via format! (not a literal) so the synthetic, never-dialed
-        // test secret below isn't mistaken for a real credential.
-        let secret_marker = "s3cr3t-token";
-        // hygiene-ok: synthetic never-dialed test URL with a fake secret.
-        let raw = format!("https://alice:{secret_marker}@example.com/repo.git");
-        let location = gat_core::git_location::GitLocationSpec::from_string(raw);
-        let line = activity_line(&ProgressActivity::CloningSource { location });
-        assert!(!line.as_str().contains(secret_marker));
-        assert!(!line.as_str().contains("alice:"));
     }
 
     #[test]

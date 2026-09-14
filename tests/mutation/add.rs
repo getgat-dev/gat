@@ -66,7 +66,7 @@ mod tests {
     use gat_engine::Repository as Repo;
 
     use gat::lifecycle::Lifecycle;
-    use gat_engine::test_support::LARGE_FILE_PROGRESS_THRESHOLD;
+    use gat_engine::test_support::LARGE_FILE_INGEST_THRESHOLD;
     use test_support::git_repo_with_initial_commit as test_repo;
     use test_support_git::{commit_all, run_git as git};
 
@@ -210,20 +210,20 @@ mod tests {
     }
 
     /// A file above
-    /// `LARGE_FILE_PROGRESS_THRESHOLD` gets coarse whole-percent activity
+    /// `LARGE_FILE_INGEST_THRESHOLD` gets aggregate hashing activity
     /// updates during ingest instead of looking frozen -- but those updates
     /// must never advance the logical `Hashing` task's position;
     /// the position advances exactly once, after the file is fully
     /// ingested, exactly like any other file.
     #[test]
-    fn large_file_percent_activity_updates_never_move_the_hashing_position() {
+    fn large_file_ingestion_counts_one_completed_file() {
         let tmp = test_repo();
         let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
             .unwrap()
             .repository_at(tmp.path().to_path_buf());
         let big = vec![
             0u8;
-            usize::try_from(LARGE_FILE_PROGRESS_THRESHOLD + 1)
+            usize::try_from(LARGE_FILE_INGEST_THRESHOLD + 1)
                 .expect("progress threshold must fit in usize")
         ];
         std::fs::write(tmp.path().join("big.bin"), &big).unwrap();
@@ -235,18 +235,16 @@ mod tests {
         assert_eq!(
             task.position, 1,
             "the position must advance exactly once for the one large file ingested, \
-             regardless of how many percent-activity messages were emitted along the way"
+             regardless of how many activity snapshots were emitted along the way"
         );
         assert_eq!(task.total, None);
         assert!(
             task.activities.iter().any(|activity| matches!(
                 activity,
-                ProgressActivity::HashingFile {
-                    path,
-                    percent: Some(_)
-                } if path == "big.bin"
+                ProgressActivity::HashingFiles(counts)
+                    if counts.active() == 0 && counts.succeeded() == 1 && counts.failed() == 0
             )),
-            "a file above the threshold must report coarse percent activity: {:?}",
+            "a file above the threshold must report completed hashing activity: {:?}",
             task.activities
         );
     }
