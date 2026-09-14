@@ -28,6 +28,24 @@ pub(crate) fn due<S: Copy + Eq, A: Eq>(
 pub(crate) trait Refresh {
     fn deadline(&self) -> Option<Instant>;
     fn flush(&mut self);
+
+    async fn next<S: futures::Stream + Unpin>(
+        &mut self,
+        completions: &mut S,
+        timer: &mut RefreshTimer,
+    ) -> Option<S::Item> {
+        use futures::StreamExt;
+        loop {
+            let Some(deadline) = self.deadline() else {
+                return completions.next().await;
+            };
+            tokio::select! {
+                biased;
+                () = wait_for_refresh(timer, Some(deadline)) => self.flush(),
+                completion = completions.next() => return completion,
+            }
+        }
+    }
 }
 
 pub(crate) type RefreshTimer = Option<std::pin::Pin<Box<tokio::time::Sleep>>>;
@@ -43,22 +61,4 @@ pub(crate) async fn wait_for_refresh(timer: &mut RefreshTimer, deadline: Option<
         sleep.as_mut().reset(deadline);
     }
     sleep.as_mut().await;
-}
-
-pub(crate) async fn next_with_refresh<S: futures::Stream + Unpin>(
-    progress: &mut impl Refresh,
-    completions: &mut S,
-    timer: &mut RefreshTimer,
-) -> Option<S::Item> {
-    use futures::StreamExt;
-    loop {
-        let Some(deadline) = progress.deadline() else {
-            return completions.next().await;
-        };
-        tokio::select! {
-            biased;
-            () = wait_for_refresh(timer, Some(deadline)) => progress.flush(),
-            completion = completions.next() => return completion,
-        }
-    }
 }

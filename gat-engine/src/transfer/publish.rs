@@ -6,6 +6,7 @@ use super::upload::{
 use crate::cache_session::CacheVerificationError;
 use crate::operation::Operation;
 use crate::path_policy::ResolvedRemote;
+use crate::progress_reporting::Refresh;
 use crate::remote_catalog::RemoteId;
 use crate::remote_executor::RemoteExecutor;
 use crate::remote_session::RemoteHandle;
@@ -423,7 +424,7 @@ pub fn publish_window(
         let mut ready = Vec::new();
         loop {
             let completion = progress
-                .next_completion(&mut completions, &mut refresh_timer)
+                .next(&mut completions, &mut refresh_timer)
                 .await;
             let Some(completion) = completion else {
                 break;

@@ -1,4 +1,3 @@
-use futures::Stream;
 use gat_core::progress::{ProgressActivity, ProgressHandle, PublicationProgress};
 #[cfg(test)]
 use tokio::time::Duration;
@@ -79,22 +78,8 @@ impl PublishProgress {
         }
     }
 
-    /// Wait for useful work, publishing a deferred snapshot if I/O stalls.
-    ///
-    /// The caller retains one lazily allocated timer for the window. Reusing
-    /// its pinned allocation and registration avoids timer churn while draining
-    /// fast completion streams. Disabled reporting never creates a timer.
-    pub(super) async fn next_completion<S: Stream + Unpin>(
-        &mut self,
-        completions: &mut S,
-        timer: &mut progress_reporting::RefreshTimer,
-    ) -> Option<S::Item> {
-        progress_reporting::next_with_refresh(self, completions, timer).await
-    }
-
     pub(super) fn report(&mut self, force: bool) {
         if !self.enabled {
-            self.completed = 0;
             return;
         }
         // Verification dispatch and remote refill can report the same snapshot
@@ -104,10 +89,6 @@ impl PublishProgress {
             return;
         }
         self.report_at(force, Instant::now());
-    }
-
-    fn refresh_deadline(&self) -> Option<Instant> {
-        progress_reporting::deadline(self.last, self.counts)
     }
 
     fn report_at(&mut self, force: bool, now: Instant) {
@@ -126,7 +107,7 @@ impl PublishProgress {
 
 impl progress_reporting::Refresh for PublishProgress {
     fn deadline(&self) -> Option<Instant> {
-        self.refresh_deadline()
+        progress_reporting::deadline(self.last, self.counts)
     }
     fn flush(&mut self) {
         self.report(true);
@@ -136,6 +117,7 @@ impl progress_reporting::Refresh for PublishProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::progress_reporting::Refresh;
     use futures::FutureExt;
     use gat_core::progress::{ActivityBackend, ProgressTask};
     use std::sync::{Arc, Mutex};
@@ -173,10 +155,7 @@ mod tests {
             progress.report_at(false, now);
         }
         assert_eq!(backend.activities.lock().unwrap().len(), 1);
-        assert_eq!(
-            progress.refresh_deadline(),
-            Some(now + Duration::from_millis(100))
-        );
+        assert_eq!(progress.deadline(), Some(now + Duration::from_millis(100)));
 
         progress.counts.verifying = 12;
         progress.report_at(false, now);
@@ -196,7 +175,7 @@ mod tests {
             backend.activities.lock().unwrap().last().unwrap().uploading,
             7
         );
-        assert_eq!(progress.refresh_deadline(), None);
+        assert_eq!(progress.deadline(), None);
 
         progress.counts.verifying = 0;
         progress.counts.uploading = 0;
@@ -230,7 +209,7 @@ mod tests {
 
         progress.counts.checked = 1;
         assert_eq!(
-            progress.refresh_deadline(),
+            progress.deadline(),
             first.map(|(_, when)| when + REFRESH_INTERVAL)
         );
     }
@@ -250,11 +229,11 @@ mod tests {
         assert_eq!(progress.completed, 0);
         progress.report(false);
         assert!(progress.last.is_none());
-        assert!(progress.refresh_deadline().is_none());
+        assert!(progress.deadline().is_none());
         let mut timer = None;
         let mut completions = futures::stream::iter([7]);
         assert_eq!(
-            futures::executor::block_on(progress.next_completion(&mut completions, &mut timer)),
+            futures::executor::block_on(progress.next(&mut completions, &mut timer)),
             Some(7)
         );
         assert!(
@@ -277,8 +256,7 @@ mod tests {
             progress.counts.checked = checked;
             progress.report(false);
             {
-                let mut next =
-                    std::pin::pin!(progress.next_completion(&mut completions, &mut timer));
+                let mut next = std::pin::pin!(progress.next(&mut completions, &mut timer));
                 assert!(next.as_mut().now_or_never().is_none());
                 tokio::time::advance(REFRESH_INTERVAL).await;
                 assert!(next.as_mut().now_or_never().is_none());
@@ -293,9 +271,6 @@ mod tests {
             assert_eq!(*timer_address.get_or_insert(address), address);
         }
         drop(sender);
-        assert_eq!(
-            progress.next_completion(&mut completions, &mut timer).await,
-            None
-        );
+        assert_eq!(progress.next(&mut completions, &mut timer).await, None);
     }
 }

@@ -106,16 +106,14 @@ impl DownloadProgress {
             return;
         }
         let now = Instant::now();
-        if progress_reporting::due(self.last, self.counts, active, force, now) {
-            if self.completed != 0 {
-                self.task.inc(std::mem::take(&mut self.completed));
-            }
-            self.task.set_activity(match self.kind {
-                ReceiveKind::Repair => ProgressActivity::Repairing(self.counts),
-                ReceiveKind::Fetch => ProgressActivity::Fetching(self.counts),
-            });
-            self.last = Some((self.counts, now));
+        if self.completed != 0 {
+            self.task.inc(std::mem::take(&mut self.completed));
         }
+        self.task.set_activity(match self.kind {
+            ReceiveKind::Repair => ProgressActivity::Repairing(self.counts),
+            ReceiveKind::Fetch => ProgressActivity::Fetching(self.counts),
+        });
+        self.last = Some((self.counts, now));
     }
 
     fn deadline(&self) -> Option<Instant> {

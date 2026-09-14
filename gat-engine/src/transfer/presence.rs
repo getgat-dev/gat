@@ -3,6 +3,7 @@
     reason = "The coordinator polls these futures locally with block_on; only spawned work requires Send"
 )]
 use crate::operation::Operation;
+use crate::progress_reporting::Refresh;
 
 use crate::path_policy::{EffectivePathPolicy, ResolvedRemote};
 use crate::remote_catalog::{RemoteCatalog, RemoteId};

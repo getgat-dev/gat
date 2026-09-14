@@ -100,15 +100,11 @@ impl Sampler {
     }
 }
 
-struct Worker {
+struct Enabled {
+    work: Arc<WorkProgress>,
     commands: mpsc::SyncSender<Command>,
     acknowledged: mpsc::Receiver<()>,
     thread: JoinHandle<()>,
-}
-
-struct Enabled {
-    work: Arc<WorkProgress>,
-    worker: Option<Worker>,
 }
 
 /// One optional sampler for a logical operation, reused across windows. Worker
@@ -151,11 +147,9 @@ impl ParallelProgress {
                 .ok()?;
                 Some(Enabled {
                     work,
-                    worker: Some(Worker {
-                        commands,
-                        acknowledged,
-                        thread,
-                    }),
+                    commands,
+                    acknowledged,
+                    thread,
                 })
             })
             .flatten();
@@ -177,13 +171,10 @@ impl ParallelProgress {
         let Some(enabled) = &self.enabled else {
             return run(&WorkProgress::default());
         };
-        let Some(worker) = &enabled.worker else {
-            return run(&WorkProgress::default());
-        };
-        if worker.commands.send(Command::Resume).is_err() {
+        if enabled.commands.send(Command::Resume).is_err() {
             return run(&WorkProgress::default());
         }
-        struct Pause<'a>(&'a Worker);
+        struct Pause<'a>(&'a Enabled);
         impl Drop for Pause<'_> {
             fn drop(&mut self) {
                 if self.0.commands.send(Command::Pause).is_ok() {
@@ -193,23 +184,23 @@ impl ParallelProgress {
                 }
             }
         }
-        let _pause = Pause(worker);
+        let _pause = Pause(enabled);
         run(&enabled.work)
     }
 }
 
-impl Drop for Enabled {
+impl Drop for ParallelProgress {
     fn drop(&mut self) {
-        if let Some(Worker {
+        if let Some(Enabled {
             commands,
             acknowledged,
             thread,
-        }) = self.worker.take()
+            ..
+        }) = self.enabled.take()
         {
             drop(commands);
             drop(acknowledged);
-            // Backend panics are confined to optional reporting, never promoted
-            // to operation failures (especially while another error unwinds).
+            // Backend panics must not replace an operation error during unwind.
             let _ = thread.join();
         }
     }
@@ -313,14 +304,7 @@ mod tests {
             .set_activity(&ProgressActivity::CheckingReuseStatus);
         // A second pause is an explicit barrier through the sampler's idle
         // receive path. No sleeps or assumptions about scheduling are needed.
-        let worker = fixture
-            .progress
-            .enabled
-            .as_ref()
-            .unwrap()
-            .worker
-            .as_ref()
-            .unwrap();
+        let worker = fixture.progress.enabled.as_ref().unwrap();
         worker.commands.send(Command::Pause).unwrap();
         worker.acknowledged.recv().unwrap();
         assert_eq!(

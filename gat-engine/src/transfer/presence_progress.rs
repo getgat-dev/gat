@@ -1,5 +1,4 @@
 use crate::progress_reporting;
-use futures::Stream;
 use gat_core::progress::{ProgressActivity, ProgressHandle};
 use tokio::time::Instant;
 
@@ -78,25 +77,13 @@ impl PresenceProgress {
             state.last = Some((state.counts, now));
         }
     }
-
-    fn deadline(&self) -> Option<Instant> {
-        self.enabled
-            .as_ref()
-            .and_then(|state| progress_reporting::deadline(state.last, state.counts))
-    }
-
-    pub(super) async fn next<S: Stream + Unpin>(
-        &mut self,
-        stream: &mut S,
-        timer: &mut progress_reporting::RefreshTimer,
-    ) -> Option<S::Item> {
-        progress_reporting::next_with_refresh(self, stream, timer).await
-    }
 }
 
 impl progress_reporting::Refresh for PresenceProgress {
     fn deadline(&self) -> Option<Instant> {
-        self.deadline()
+        self.enabled
+            .as_ref()
+            .and_then(|state| progress_reporting::deadline(state.last, state.counts))
     }
     fn flush(&mut self) {
         self.report(true);
@@ -106,6 +93,7 @@ impl progress_reporting::Refresh for PresenceProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::progress_reporting::Refresh;
     use futures::FutureExt;
     use gat_core::progress::{ActivityBackend, ProgressTask};
     use std::sync::{Arc, Mutex};
