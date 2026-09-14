@@ -25,13 +25,14 @@ jobs:
         with:
           github-token: ${{ github.token }}
 
-      # Repository settings must allow auto-merge and squash merging, with
-      # CI checks required by branch protection. Required approvals still apply.
-      - name: Enable squash auto-merge
+      # The main branch requires a merge queue configured to squash. GitHub
+      # queues the PR once required checks and approvals pass, then tests it
+      # against the latest main before merging.
+      - name: Enable automatic merge queue entry
         if: >-
           steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
           steps.metadata.outputs.update-type == 'version-update:semver-minor'
-        run: gh pr merge --auto --squash --match-head-commit "$PR_HEAD" "$PR_URL"
+        run: gh pr merge --auto --match-head-commit "$PR_HEAD" "$PR_URL"
         env:
           GH_TOKEN: ${{ github.token }}
           PR_URL: ${{ github.event.pull_request.html_url }}
