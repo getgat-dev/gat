@@ -3971,7 +3971,7 @@ fn fetch_then_repair_then_sync_share_one_proof_session() {
     let outcome = gat_engine::download_window(
         &mut operation,
         vec![gat_engine::DownloadObject::new(oid, path, remote)],
-        &mut gat_engine::DownloadProgress::fetch(repair_task.handle()),
+        &mut gat_engine::FetchProgress::new(repair_task.handle()),
     )
     .unwrap();
     assert_eq!(

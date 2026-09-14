@@ -268,7 +268,7 @@ fn worker_error(
 pub fn repair_window(
     operation: &mut Operation<'_>,
     objects: Vec<RepairObject>,
-    progress: &mut super::DownloadProgress,
+    progress: &mut super::RepairProgress,
 ) -> RepairOutcome {
     if objects.is_empty() {
         return RepairOutcome::default();
@@ -305,7 +305,7 @@ pub fn repair_window(
     for id in distinct_ids {
         match services
             .remotes
-            .open_handle(services.remotes_catalog, id, Some(&progress.task))
+            .open_handle(services.remotes_catalog, id, Some(progress.task()))
         {
             Ok(handle) => {
                 handles.insert(id, handle);

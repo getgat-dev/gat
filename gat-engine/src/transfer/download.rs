@@ -1,4 +1,4 @@
-use super::DownloadProgress;
+use super::FetchProgress;
 use crate::operation::Operation;
 use crate::path_policy::{EffectivePathPolicy, ResolvedRemote};
 use crate::remote_catalog::RemoteCatalog;
@@ -319,7 +319,7 @@ fn worker_error(
 pub fn download_window(
     operation: &mut Operation<'_>,
     objects: Vec<DownloadObject>,
-    progress: &mut DownloadProgress,
+    progress: &mut FetchProgress,
 ) -> Result<DownloadOutcome, DownloadError> {
     if objects.is_empty() {
         return Ok(DownloadOutcome::default());
@@ -368,10 +368,10 @@ pub fn download_window(
                     .open_handle(
                         services.remotes_catalog,
                         object.remote.id(),
-                        Some(&progress.task),
+                        Some(progress.task()),
                     )
                     .map_err(|source| {
-                        progress.rejected(1);
+                        progress.rejected();
                         remote_open(services.remotes_catalog, services.policy, object, source)
                     })?;
                 jobs.push(RemoteJob::new(handle, index));
@@ -388,7 +388,7 @@ pub fn download_window(
                     }
                 },
                 || WorkerError::Cancelled,
-                &mut progress.observe(|_| 1),
+                &mut progress.observe(),
             );
 
             let mut publications = Vec::<CachePublication>::new();

@@ -7,7 +7,7 @@ mod presence;
 mod publish;
 mod receive;
 mod receive_progress;
-pub use receive_progress::DownloadProgress;
+pub use receive_progress::{FetchProgress, RepairProgress};
 mod repair;
 mod selection;
 mod upload;
@@ -80,7 +80,7 @@ mod tests {
             download_window(
                 &mut operation,
                 downloads,
-                &mut DownloadProgress::fetch(progress.clone())
+                &mut FetchProgress::new(progress.clone())
             ),
             Err(DownloadError::Identity(RemoteIdentityError::ForeignOwner))
         ));
@@ -106,11 +106,7 @@ mod tests {
             )))
         ));
         let repairs = vec![RepairObject::new(oid, path, remote, 1)];
-        let outcome = repair_window(
-            &mut operation,
-            repairs,
-            &mut DownloadProgress::repair(progress),
-        );
+        let outcome = repair_window(&mut operation, repairs, &mut RepairProgress::new(progress));
         assert!(matches!(
             outcome.results.as_slice(),
             [Err(RepairError::Identity(

@@ -3,67 +3,55 @@ use crate::remote_executor::TransferObserver;
 use gat_core::progress::{ProgressActivity, ProgressHandle, ReceiveProgress};
 use tokio::time::Instant;
 
-#[derive(Clone, Copy)]
-enum ReceiveKind {
-    Fetch,
-    Repair,
-}
-
-/// Operation-scoped receive reporting, retained across bounded windows.
+/// Reports fetch progress in successfully downloaded objects.
+/// A repair reporter cannot be passed to a fetch window.
 ///
-/// Fetch positions count successful downloads. Repair positions count original
-/// path entries; the engine receives their multiplicity with each unique object.
-pub struct DownloadProgress {
-    pub(crate) task: ProgressHandle,
+/// ```compile_fail
+/// fn wrong_mode(op: &mut gat_engine::Operation<'_>, progress: &mut gat_engine::RepairProgress) {
+///     gat_engine::download_window(op, Vec::new(), progress);
+/// }
+/// ```
+pub type FetchProgress = ReceiveReporter<false>;
+
+/// Reports repair progress in original path entries, including failed repairs.
+/// A fetch reporter cannot be passed to a repair window.
+///
+/// ```compile_fail
+/// fn wrong_mode(op: &mut gat_engine::Operation<'_>, progress: &mut gat_engine::FetchProgress) {
+///     gat_engine::repair_window(op, Vec::new(), progress);
+/// }
+/// ```
+pub type RepairProgress = ReceiveReporter<true>;
+
+/// Shared storage for the two receive reporters. The mode is fixed by the
+/// public aliases, so windows cannot mix position semantics. No runtime tag or
+/// dynamic dispatch is needed; both modes retain totals across windows.
+pub struct ReceiveReporter<const REPAIR: bool> {
+    task: ProgressHandle,
     counts: ReceiveProgress,
-    kind: ReceiveKind,
     enabled: bool,
     completed: u64,
     last: Option<(ReceiveProgress, Instant)>,
 }
 
-impl DownloadProgress {
+impl<const REPAIR: bool> ReceiveReporter<REPAIR> {
     #[must_use]
-    pub fn fetch(task: ProgressHandle) -> Self {
-        Self::new(task, ReceiveKind::Fetch)
-    }
-
-    #[must_use]
-    pub fn repair(task: ProgressHandle) -> Self {
-        Self::new(task, ReceiveKind::Repair)
-    }
-
-    fn new(task: ProgressHandle, kind: ReceiveKind) -> Self {
+    pub fn new(task: ProgressHandle) -> Self {
         Self {
             enabled: task.is_enabled(),
             task,
-            kind,
             counts: ReceiveProgress::default(),
             completed: 0,
             last: None,
         }
     }
 
-    pub(super) fn verifying(&mut self, count: usize) {
-        if !self.enabled {
-            return;
-        }
-        self.counts.verifying = count as u64;
-        self.report(false);
-    }
-
-    pub(super) fn verified(&mut self, checked: usize, cached: usize) {
-        if !self.enabled {
-            return;
-        }
-        self.counts.verifying = 0;
-        self.counts.checked += checked as u64;
-        self.counts.cached += cached as u64;
-        self.report(false);
+    pub(super) const fn task(&self) -> &ProgressHandle {
+        &self.task
     }
 
     /// Resolve an object rejected before a transfer could be admitted.
-    pub fn rejected(&mut self, entries: u64) {
+    fn reject(&mut self, entries: u64) {
         self.complete(false, entries);
         self.report(false);
     }
@@ -77,7 +65,7 @@ impl DownloadProgress {
         } else {
             self.counts.failed += 1;
         }
-        if matches!(self.kind, ReceiveKind::Repair) || success {
+        if REPAIR || success {
             self.completed += entries;
         }
     }
@@ -109,9 +97,10 @@ impl DownloadProgress {
         if self.completed != 0 {
             self.task.inc(std::mem::take(&mut self.completed));
         }
-        self.task.set_activity(match self.kind {
-            ReceiveKind::Repair => ProgressActivity::Repairing(self.counts),
-            ReceiveKind::Fetch => ProgressActivity::Fetching(self.counts),
+        self.task.set_activity(if REPAIR {
+            ProgressActivity::Repairing(self.counts)
+        } else {
+            ProgressActivity::Fetching(self.counts)
         });
         self.last = Some((self.counts, now));
     }
@@ -119,11 +108,49 @@ impl DownloadProgress {
     fn deadline(&self) -> Option<Instant> {
         progress_reporting::deadline(self.last, self.counts)
     }
+}
+
+impl ReceiveReporter<false> {
+    pub(super) fn verifying(&mut self, count: usize) {
+        if !self.enabled {
+            return;
+        }
+        self.counts.verifying = count as u64;
+        self.report(false);
+    }
+
+    pub(super) fn verified(&mut self, checked: usize, cached: usize) {
+        if !self.enabled {
+            return;
+        }
+        self.counts.verifying = 0;
+        self.counts.checked += checked as u64;
+        self.counts.cached += cached as u64;
+        self.report(false);
+    }
+
+    pub(super) fn rejected(&mut self) {
+        self.reject(1);
+    }
+
+    pub(super) fn observe(&mut self) -> ReceiveObserver<'_, false, impl Fn(usize) -> u64> {
+        ReceiveObserver {
+            progress: self,
+            entries: |_| 1,
+        }
+    }
+}
+
+impl ReceiveReporter<true> {
+    /// Resolve an object rejected before a transfer could be admitted.
+    pub fn rejected(&mut self, entries: u64) {
+        self.reject(entries);
+    }
 
     pub(super) fn observe(
         &mut self,
         entries: impl Fn(usize) -> u64,
-    ) -> ReceiveObserver<'_, impl Fn(usize) -> u64> {
+    ) -> ReceiveObserver<'_, true, impl Fn(usize) -> u64> {
         ReceiveObserver {
             progress: self,
             entries,
@@ -131,12 +158,14 @@ impl DownloadProgress {
     }
 }
 
-pub(super) struct ReceiveObserver<'a, W> {
-    progress: &'a mut DownloadProgress,
+pub(super) struct ReceiveObserver<'a, const REPAIR: bool, W> {
+    progress: &'a mut ReceiveReporter<REPAIR>,
     entries: W,
 }
 
-impl<T, E, W: Fn(usize) -> u64> TransferObserver<Result<T, E>> for ReceiveObserver<'_, W> {
+impl<T, E, const REPAIR: bool, W: Fn(usize) -> u64> TransferObserver<Result<T, E>>
+    for ReceiveObserver<'_, REPAIR, W>
+{
     fn completed(&mut self, index: usize, result: &Result<T, E>) {
         if self.progress.enabled {
             self.progress
@@ -180,11 +209,11 @@ mod tests {
     async fn fetch_throttles_counts_but_reports_verification_and_download_transitions() {
         let backend = Arc::new(Recording::default());
         let task = ProgressTask::from_backend(backend.clone());
-        let mut progress = DownloadProgress::fetch(task.handle());
+        let mut progress = FetchProgress::new(task.handle());
         progress.verifying(100);
         progress.verified(100, 90);
         {
-            let mut observer = progress.observe(|_| 1);
+            let mut observer = progress.observe();
             <_ as TransferObserver<Result<(), ()>>>::report(&mut observer, 10, false);
             for index in 0..8 {
                 observer.completed(index, &Ok::<_, ()>(()));
@@ -212,7 +241,7 @@ mod tests {
     fn repair_counts_objects_in_summary_and_paths_in_position() {
         let backend = Arc::new(Recording::default());
         let task = ProgressTask::from_backend(backend.clone());
-        let mut progress = DownloadProgress::repair(task.handle());
+        let mut progress = RepairProgress::new(task.handle());
         {
             let mut observer = progress.observe(|index| [3, 2][index]);
             observer.completed(0, &Ok::<_, ()>(()));
@@ -228,12 +257,16 @@ mod tests {
     fn disabled_reports_need_no_runtime_or_refresh_timer() {
         use gat_core::progress::{NoopProgress, ProgressOperation, ProgressReporter, ProgressSpec};
         let task = NoopProgress.begin(ProgressSpec::indeterminate(ProgressOperation::Fetching));
-        let mut progress = DownloadProgress::fetch(task.handle());
+        let mut progress = FetchProgress::new(task.handle());
         progress.verifying(128);
         progress.verified(128, 127);
-        progress
+        progress.observe().completed(0, &Ok::<_, ()>(()));
+        let mut repair = RepairProgress::new(task.handle());
+        repair
             .observe(|_| panic!("disabled reporting must not calculate weights"))
             .completed(0, &Ok::<_, ()>(()));
+        repair.flush();
+        assert_eq!(repair.counts, ReceiveProgress::default());
         progress.flush();
         assert!(progress.deadline().is_none());
         assert!(progress.last.is_none());

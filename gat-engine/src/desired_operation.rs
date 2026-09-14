@@ -116,7 +116,7 @@ impl<'repo> SelectionOperation<'_, 'repo> {
     pub fn download_window(
         &mut self,
         objects: Vec<crate::DownloadObject>,
-        progress: &mut crate::DownloadProgress,
+        progress: &mut crate::FetchProgress,
     ) -> std::result::Result<crate::DownloadOutcome, crate::DownloadError> {
         crate::download_window(self.operation, objects, progress)
     }

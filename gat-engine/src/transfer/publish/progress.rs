@@ -12,7 +12,7 @@ use crate::progress_reporting::REFRESH_INTERVAL;
 /// Retain one instance for the complete operation so cumulative totals survive
 /// window boundaries. Workers must not update its task's publication activity.
 pub struct PublishProgress {
-    pub(super) task: ProgressHandle,
+    task: ProgressHandle,
     counts: PublicationProgress,
     enabled: bool,
     last: Option<(PublicationProgress, Instant)>,
@@ -27,6 +27,10 @@ impl PublishProgress {
             counts: PublicationProgress::default(),
             last: None,
         }
+    }
+
+    pub(super) const fn task(&self) -> &ProgressHandle {
+        &self.task
     }
 
     pub(super) const fn checking_started(&mut self) {

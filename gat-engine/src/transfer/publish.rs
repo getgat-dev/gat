@@ -397,7 +397,7 @@ pub fn publish_window(
             .open_handle(
                 services.remotes_catalog,
                 object.remote.id(),
-                Some(&progress.task),
+                Some(progress.task()),
             )
             .map_err(|source| {
                 RemotePresenceError::remote_open(

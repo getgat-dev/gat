@@ -5,7 +5,7 @@ use gat_core::name::RemoteName;
 use gat_core::oid::Oid;
 use gat_core::progress::ProgressHandle;
 use gat_engine::{
-    DownloadProgress, Operation, RepairError as EngineRepairError, RepairObject, StreamingWindow,
+    Operation, RepairError as EngineRepairError, RepairObject, RepairProgress, StreamingWindow,
     UnknownRemoteOverrideError, repair_window,
 };
 use std::collections::BTreeMap;
@@ -77,7 +77,7 @@ pub fn repair_with_operation(
             results.entry(*oid).or_default().entries += 1;
         }
     }
-    let mut reporting = DownloadProgress::repair(progress.clone());
+    let mut reporting = RepairProgress::new(progress.clone());
 
     for (path, oid) in request.corrupted {
         let _: Result<(), std::convert::Infallible> = window.record(
@@ -136,7 +136,7 @@ fn run_repair_window(
     remote_override: Option<&RemoteName>,
     reporting_enabled: bool,
     results: &mut BTreeMap<Oid, RepairResult>,
-    progress: &mut DownloadProgress,
+    progress: &mut RepairProgress,
 ) {
     let mut objects = Vec::with_capacity(window.len());
     for candidate in window {
