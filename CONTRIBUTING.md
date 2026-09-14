@@ -43,6 +43,17 @@ Prefix commit messages and pull request titles with a
 `:sparkles: add remote pruning`. Pull requests are squash-merged, so the pull
 request title becomes the commit message on `main`.
 
+Pull requests targeting `main` use GitHub's merge queue. After the required
+checks pass, add the pull request to the queue with `gh pr merge --auto` or
+the GitHub merge button. The queue runs the required checks against the
+latest `main` before squash-merging, so branches do not need rebasing just
+to catch up with `main`. Dependabot patch and minor updates enter the queue
+automatically; major updates require a manual merge decision.
+
+Workflows that provide required checks must handle both `pull_request` and
+`merge_group` (`checks_requested`) events. Keep their check names consistent
+with the required checks in the `main` ruleset.
+
 ## Generated documentation
 
 Do not edit `docs/commands/*.mdx` or
