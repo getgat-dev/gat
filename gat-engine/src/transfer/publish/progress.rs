@@ -15,7 +15,6 @@ pub struct PublishProgress {
     pub(super) task: ProgressHandle,
     counts: PublicationProgress,
     enabled: bool,
-    completed: u64,
     last: Option<(PublicationProgress, Instant)>,
 }
 
@@ -26,7 +25,6 @@ impl PublishProgress {
             enabled: task.is_enabled(),
             task,
             counts: PublicationProgress::default(),
-            completed: 0,
             last: None,
         }
     }
@@ -68,7 +66,6 @@ impl PublishProgress {
         if !self.enabled {
             return;
         }
-        self.completed += 1;
         match status {
             super::PublishStatus::AlreadyPresent => self.counts.already_present += 1,
             super::PublishStatus::Uploaded => self.counts.uploaded += 1,
@@ -82,26 +79,23 @@ impl PublishProgress {
         if !self.enabled {
             return;
         }
-        // Verification dispatch and remote refill can report the same snapshot
-        // in one iteration. Skip the clock and backend when neither text nor
-        // the separately batched entry position needs updating.
-        if self.completed == 0 && self.last.is_some_and(|(counts, _)| counts == self.counts) {
+        let active = |s: PublicationProgress| (s.checking != 0, s.verifying != 0, s.uploading != 0);
+        // Count-only changes are published by the refresh timer. Phase changes
+        // and final flushes publish immediately, without per-result clock reads.
+        if self.last.is_some_and(|(previous, _)| {
+            previous == self.counts || (!force && active(previous) == active(self.counts))
+        }) {
             return;
         }
-        self.report_at(force, Instant::now());
-    }
-
-    fn report_at(&mut self, force: bool, now: Instant) {
-        if self.completed != 0 {
-            self.task.inc(std::mem::take(&mut self.completed));
+        let completed = |s: PublicationProgress| s.already_present + s.uploaded + s.rejected;
+        let delta =
+            completed(self.counts) - self.last.map_or(0, |(previous, _)| completed(previous));
+        if delta != 0 {
+            self.task.inc(delta);
         }
-        let active = |s: PublicationProgress| (s.checking != 0, s.verifying != 0, s.uploading != 0);
-        let publish = progress_reporting::due(self.last, self.counts, active, force, now);
-        if publish {
-            self.task
-                .set_activity(ProgressActivity::Publishing(self.counts));
-            self.last = Some((self.counts, now));
-        }
+        self.task
+            .set_activity(ProgressActivity::Publishing(self.counts));
+        self.last = Some((self.counts, Instant::now()));
     }
 }
 
@@ -138,39 +132,39 @@ mod tests {
         }
         fn finish(&self) {}
     }
-    fn progress_handle(backend: &Arc<RecordingBackend>) -> ProgressHandle {
-        ProgressTask::from_backend(Arc::clone(backend) as Arc<dyn ActivityBackend>).handle()
-    }
 
-    #[test]
-    fn reporting_throttles_counts_but_never_hides_activity_transitions() {
+    #[tokio::test(start_paused = true)]
+    async fn reporting_throttles_counts_but_never_hides_activity_transitions() {
         let backend = Arc::new(RecordingBackend::default());
-        let mut progress = PublishProgress::new(progress_handle(&backend));
+        let task = ProgressTask::from_backend(backend.clone());
+        let mut progress = PublishProgress::new(task.handle());
         let now = Instant::now();
         progress.counts.checking = 100;
-        progress.report_at(false, now);
+        progress.report(false);
         for checked in 1..50 {
             progress.counts.checked = checked;
             progress.counts.checking -= 1;
-            progress.report_at(false, now);
+            progress.report(false);
         }
         assert_eq!(backend.activities.lock().unwrap().len(), 1);
         assert_eq!(progress.deadline(), Some(now + Duration::from_millis(100)));
 
         progress.counts.verifying = 12;
-        progress.report_at(false, now);
+        progress.report(false);
         progress.counts.uploading = 8;
-        progress.report_at(false, now);
-        let snapshots = backend.activities.lock().unwrap();
-        assert_eq!(snapshots.len(), 3);
-        assert_eq!(snapshots[2].verifying, 12);
-        assert_eq!(snapshots[2].uploading, 8);
-        drop(snapshots);
+        progress.report(false);
+        {
+            let snapshots = backend.activities.lock().unwrap();
+            assert_eq!(snapshots.len(), 3);
+            assert_eq!(snapshots[2].verifying, 12);
+            assert_eq!(snapshots[2].uploading, 8);
+        }
 
         progress.counts.uploading = 7;
-        progress.report_at(false, now);
+        progress.report(false);
         assert_eq!(backend.activities.lock().unwrap().len(), 3);
-        progress.report_at(false, now + Duration::from_millis(100));
+        tokio::time::advance(REFRESH_INTERVAL).await;
+        progress.flush();
         assert_eq!(
             backend.activities.lock().unwrap().last().unwrap().uploading,
             7
@@ -180,7 +174,7 @@ mod tests {
         progress.counts.verifying = 0;
         progress.counts.uploading = 0;
         progress.counts.checking = 0;
-        progress.report_at(true, now + Duration::from_millis(100));
+        progress.flush();
         assert_eq!(
             backend.activities.lock().unwrap().last().unwrap().verifying,
             0
@@ -190,7 +184,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn unchanged_reports_preserve_the_deadline_and_flush_entry_progress() {
         let backend = Arc::new(RecordingBackend::default());
-        let mut progress = PublishProgress::new(progress_handle(&backend));
+        let task = ProgressTask::from_backend(backend.clone());
+        let mut progress = PublishProgress::new(task.handle());
         progress.counts.checking = 2;
         progress.report(false);
         let first = progress.last;
@@ -200,18 +195,30 @@ mod tests {
         assert_eq!(progress.last, first);
         assert_eq!(backend.activities.lock().unwrap().len(), 1);
 
-        // A duplicate snapshot must not swallow separately batched increments.
-        progress.completed = 2;
-        progress.report(false);
-        assert_eq!(*backend.increments.lock().unwrap(), [2]);
-        assert_eq!(progress.completed, 0);
-        assert_eq!(backend.activities.lock().unwrap().len(), 1);
-
-        progress.counts.checked = 1;
+        // Successful outcomes determine both summary and position. Repeated
+        // count-only reports must not invoke the backend per completion.
+        progress.counts.checking = 200;
+        for _ in 0..100 {
+            progress.checking_finished(true);
+            progress.complete(super::super::PublishStatus::AlreadyPresent);
+            progress.report(false);
+        }
+        assert!(backend.increments.lock().unwrap().is_empty());
+        assert_eq!(progress.last, first);
         assert_eq!(
             progress.deadline(),
             first.map(|(_, when)| when + REFRESH_INTERVAL)
         );
+        progress.flush();
+        assert_eq!(*backend.increments.lock().unwrap(), [100]);
+        progress.flush();
+        assert_eq!(*backend.increments.lock().unwrap(), [100]);
+
+        progress.complete(super::super::PublishStatus::Uploaded);
+        progress.complete(super::super::PublishStatus::CacheMissing);
+        progress.complete(super::super::PublishStatus::CacheCorrupt);
+        progress.flush();
+        assert_eq!(*backend.increments.lock().unwrap(), [100, 3]);
     }
 
     #[test]
@@ -226,7 +233,6 @@ mod tests {
         progress.verifying(12);
         progress.complete(super::super::PublishStatus::Uploaded);
         assert_eq!(progress.counts, PublicationProgress::default());
-        assert_eq!(progress.completed, 0);
         progress.report(false);
         assert!(progress.last.is_none());
         assert!(progress.deadline().is_none());
@@ -245,7 +251,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn stalled_completion_refreshes_and_reuses_the_timer() {
         let backend = Arc::new(RecordingBackend::default());
-        let mut progress = PublishProgress::new(progress_handle(&backend));
+        let task = ProgressTask::from_backend(backend.clone());
+        let mut progress = PublishProgress::new(task.handle());
         progress.counts.checking = 100;
         progress.report(false);
         let (sender, mut completions) = futures::channel::mpsc::unbounded();

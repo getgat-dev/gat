@@ -1,4 +1,4 @@
-use crate::progress_reporting;
+use crate::progress_reporting::{self, Refresh};
 use gat_core::progress::{ProgressActivity, ProgressHandle};
 use tokio::time::Instant;
 
@@ -44,7 +44,7 @@ impl PresenceProgress {
         if let Some(state) = &mut self.enabled {
             state.last = None;
         }
-        self.report(true);
+        self.flush();
     }
 
     pub(super) const fn completed(&mut self, present: bool) {
@@ -57,43 +57,36 @@ impl PresenceProgress {
             state.completed += 1;
         }
     }
+}
 
-    pub(super) fn report(&mut self, force: bool) {
+impl Refresh for PresenceProgress {
+    fn deadline(&self) -> Option<Instant> {
+        self.enabled
+            .as_ref()
+            .and_then(|state| progress_reporting::deadline(state.last, state.counts))
+    }
+
+    fn flush(&mut self) {
         let Some(state) = &mut self.enabled else {
             return;
         };
         if state.last.is_some_and(|(counts, _)| counts == state.counts) {
             return;
         }
-        let now = Instant::now();
-        if progress_reporting::due(state.last, state.counts, |_| (), force, now) {
-            if state.completed != 0 {
-                state.task.inc(std::mem::take(&mut state.completed));
-            }
-            state.task.set_activity(ProgressActivity::RemotePresence {
-                present: state.counts.present,
-                missing: state.counts.missing,
-            });
-            state.last = Some((state.counts, now));
+        if state.completed != 0 {
+            state.task.inc(std::mem::take(&mut state.completed));
         }
-    }
-}
-
-impl progress_reporting::Refresh for PresenceProgress {
-    fn deadline(&self) -> Option<Instant> {
-        self.enabled
-            .as_ref()
-            .and_then(|state| progress_reporting::deadline(state.last, state.counts))
-    }
-    fn flush(&mut self) {
-        self.report(true);
+        state.task.set_activity(ProgressActivity::RemotePresence {
+            present: state.counts.present,
+            missing: state.counts.missing,
+        });
+        state.last = Some((state.counts, Instant::now()));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::progress_reporting::Refresh;
     use futures::FutureExt;
     use gat_core::progress::{ActivityBackend, ProgressTask};
     use std::sync::{Arc, Mutex};
@@ -121,7 +114,6 @@ mod tests {
         progress.resume();
         progress.completed(true);
         progress.completed(false);
-        progress.report(false);
         assert_eq!(*backend.position.lock().unwrap(), 0);
         let mut pending = futures::stream::pending::<()>();
         let mut timer = None;
@@ -144,7 +136,7 @@ mod tests {
             })
         );
         progress.completed(true);
-        progress.report(true);
+        progress.flush();
         assert_eq!(*backend.position.lock().unwrap(), 3);
         assert_eq!(
             backend.events.lock().unwrap().last(),

@@ -240,7 +240,7 @@ pub(crate) fn check_remote_presence_streaming<T: RemotePresenceObligation>(
             progress,
         },
     ));
-    progress.report(true);
+    progress.flush();
 
     outcome.map_err(|(request_index, source)| {
         RemotePresenceError::presence_check(
@@ -377,7 +377,6 @@ where
         if active_entries == 0 {
             break;
         }
-        progress.report(false);
         let (request_index, result) = progress
             .next(&mut active, &mut timer)
             .await

@@ -15,7 +15,7 @@ use futures::{FutureExt, StreamExt};
 use gat_core::lexical_path::GatPath;
 use gat_core::oid::Oid;
 #[cfg(test)]
-use gat_core::progress::{ProgressHandle, PublicationProgress};
+use gat_core::progress::PublicationProgress;
 
 mod progress;
 use gat_io::{CacheError, CacheObject, CompletedCacheVerification, ObjectVerification};
@@ -788,7 +788,8 @@ mod tests {
             handles: &handles,
             objects: &objects,
         };
-        let mut progress = PublishProgress::new(progress_handle(&backend));
+        let task = ProgressTask::from_backend(backend);
+        let mut progress = PublishProgress::new(task.handle());
         let mut state = PipelineState::new(&objects);
         let mut completions = SelectAll::new();
         refill_remote_work(&mut state, &mut completions, &scheduler, &mut progress);
@@ -821,10 +822,6 @@ mod tests {
         }
 
         fn finish(&self) {}
-    }
-
-    fn progress_handle(backend: &Arc<RecordingBackend>) -> ProgressHandle {
-        ProgressTask::from_backend(Arc::clone(backend) as Arc<dyn ActivityBackend>).handle()
     }
 
     fn assert_send_static<T: Send + 'static>() {}
@@ -869,7 +866,8 @@ mod tests {
     #[test]
     fn completing_obligations_increments_each_terminal_result_once() {
         let backend = Arc::new(RecordingBackend::default());
-        let mut progress = PublishProgress::new(progress_handle(&backend));
+        let task = ProgressTask::from_backend(backend.clone());
+        let mut progress = PublishProgress::new(task.handle());
         let mut statuses = vec![None; 4];
 
         complete_obligation(
@@ -899,7 +897,8 @@ mod tests {
     #[should_panic(expected = "publication obligation completed more than once")]
     fn completing_an_obligation_twice_is_rejected() {
         let backend = Arc::new(RecordingBackend::default());
-        let mut progress = PublishProgress::new(progress_handle(&backend));
+        let task = ProgressTask::from_backend(backend);
+        let mut progress = PublishProgress::new(task.handle());
         let mut statuses = vec![None];
 
         complete_obligation(
