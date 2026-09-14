@@ -238,7 +238,6 @@ fn complete_repository_inspection(
 
 fn inspect_additional_repository(
     location: &GitLocationSpec,
-    progress: &ProgressHandle,
     selection: &HistorySelection,
     cancellation: &crate::TransferCancellation,
 ) -> std::result::Result<HashSet<Oid>, GcRepositoryIssue> {
@@ -249,9 +248,6 @@ fn inspect_additional_repository(
             error,
         )
     })?;
-    progress.set_activity(ProgressActivity::CloningSource {
-        location: location.clone(),
-    });
     let prepared = gat_io::prepare_bare_repository(&parsed, cancellation.git_interrupt()).map_err(
         |error| {
             GcRepositoryIssue::new(
@@ -324,15 +320,30 @@ fn additional_repositories(
         .iter()
         .filter(|location| seen.insert(location.as_location_str()))
         .collect();
-    inspect_in_bounded_batches(
-        &candidates,
-        limits.repository_concurrency,
-        |location| inspect_additional_repository(location, progress, selection, cancellation),
-        |index, result| match result {
-            Ok(marked) => merge_keep_set(keep, marked),
-            Err(issue) => issues.push((index, issue)),
-        },
-    );
+    if !candidates.is_empty() {
+        let mut reporting = crate::ParallelProgress::new(
+            progress.clone(),
+            crate::ParallelWork::InspectingRepositories,
+        );
+        reporting.run(|work| {
+            inspect_in_bounded_batches(
+                &candidates,
+                limits.repository_concurrency,
+                |location| {
+                    let item = work.start();
+                    let result = inspect_additional_repository(location, selection, cancellation);
+                    if result.is_ok() {
+                        item.complete();
+                    }
+                    result
+                },
+                |index, result| match result {
+                    Ok(marked) => merge_keep_set(keep, marked),
+                    Err(issue) => issues.push((index, issue)),
+                },
+            );
+        });
+    }
     issues.sort_unstable_by_key(|(index, _)| *index);
     issues.into_iter().map(|(_, issue)| issue).collect()
 }
@@ -440,6 +451,7 @@ fn visit_remote_oids(
     progress: &ProgressHandle,
     record: &mut dyn FnMut(Oid),
 ) -> Result<()> {
+    progress.set_activity(ProgressActivity::ListingRemoteObjects);
     let runtime = tokio::runtime::Handle::current();
     if let Some(file_gc) = remote.file_gc() {
         let mut scan = file_gc.listing();
@@ -825,6 +837,43 @@ mod tests {
     }
 
     #[test]
+    fn remote_listing_restores_activity_before_reporting_any_objects() {
+        struct ListingProgress(std::sync::Mutex<ProgressActivity>);
+        impl gat_core::progress::ActivityBackend for ListingProgress {
+            fn inc(&self, _: u64) {
+                assert_eq!(
+                    *self.0.lock().unwrap(),
+                    ProgressActivity::ListingRemoteObjects
+                );
+            }
+            fn set_activity(&self, activity: &ProgressActivity) {
+                *self.0.lock().unwrap() = activity.clone();
+            }
+            fn finish(&self) {}
+        }
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _entered = runtime.enter();
+        let (root, handles) =
+            crate::remote_session::test_support::open_handles_on_current_runtime(&["remote"]);
+        let path = root.path().join(gat_io::object_key_oid(&oid(1)));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"object").unwrap();
+        let executor = crate::remote_executor::RemoteExecutor::new(
+            crate::limits::ExecutionLimits::default().remote,
+        );
+        let backend = Arc::new(ListingProgress(std::sync::Mutex::new(
+            ProgressActivity::CheckingRemote,
+        )));
+        let task = gat_core::progress::ProgressTask::from_backend(backend);
+        let mut seen = Vec::new();
+        visit_remote_oids(handles[0].client(), &executor, &task.handle(), &mut |oid| {
+            seen.push(oid);
+        })
+        .unwrap();
+        assert_eq!(seen, [oid(1)]);
+    }
+
+    #[test]
     fn file_gc_groups_listing_and_deletion_into_bounded_workers() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let _entered = runtime.enter();
@@ -1069,13 +1118,9 @@ mod tests {
     fn remote_clone_failure_retains_the_complete_io_source_chain() {
         let missing = tempfile::tempdir().unwrap().path().join("missing.git");
         let location = GitLocationSpec::from_string(gat_io::remote_file_url_for_test(&missing));
-        let progress = NoopProgress.begin(ProgressSpec::indeterminate(
-            ProgressOperation::ComputingReachability,
-        ));
 
         let Err(issue) = inspect_additional_repository(
             &location,
-            &progress.handle(),
             &HistorySelection::conservative_default(),
             &crate::TransferCancellation::default(),
         ) else {
@@ -1101,13 +1146,9 @@ mod tests {
         let source = crate::test_harness::test_repo();
         let location =
             GitLocationSpec::from_string(gat_io::remote_file_url_for_test(source.path()));
-        let progress = NoopProgress.begin(ProgressSpec::indeterminate(
-            ProgressOperation::ComputingReachability,
-        ));
 
         let keep = inspect_additional_repository(
             &location,
-            &progress.handle(),
             &HistorySelection::conservative_default(),
             &crate::TransferCancellation::default(),
         )

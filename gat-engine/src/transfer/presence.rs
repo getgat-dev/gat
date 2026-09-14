@@ -165,7 +165,7 @@ pub(crate) fn check_remote_presence_streaming<T: RemotePresenceObligation>(
     operation: &mut Operation<'_>,
     obligations: &[T],
     on_result: impl FnMut(RemotePresenceResult),
-    progress: &gat_core::progress::ProgressHandle,
+    progress: &mut crate::PresenceProgress,
 ) -> Result<(), RemotePresenceError> {
     if obligations.is_empty() {
         return Ok(());
@@ -199,7 +199,7 @@ pub(crate) fn check_remote_presence_streaming<T: RemotePresenceObligation>(
         }
         let handle = services
             .remotes
-            .open_handle(services.remotes_catalog, remote_id, Some(progress))
+            .open_handle(services.remotes_catalog, remote_id, progress.task())
             .map_err(|source| {
                 RemotePresenceError::remote_open(
                     services.remotes_catalog,
@@ -224,6 +224,7 @@ pub(crate) fn check_remote_presence_streaming<T: RemotePresenceObligation>(
         pending.len(),
     );
 
+    progress.resume();
     let outcome = tokio::runtime::Handle::current().block_on(drive_presence_groups(
         services.remote_executor,
         &handles,
@@ -233,8 +234,12 @@ pub(crate) fn check_remote_presence_streaming<T: RemotePresenceObligation>(
         |handle, entries| {
             presence_stream(services.remote_executor, handle.client().clone(), entries)
         },
-        on_result,
+        PresenceObserver {
+            on_result,
+            progress,
+        },
     ));
+    progress.report(true);
 
     outcome.map_err(|(request_index, source)| {
         RemotePresenceError::presence_check(
@@ -281,6 +286,11 @@ pub(crate) fn fair_request_order(by_remote: &BTreeMap<RemoteId, Vec<usize>>) -> 
     ordered
 }
 
+struct PresenceObserver<'a, F> {
+    on_result: F,
+    progress: &'a mut crate::PresenceProgress,
+}
+
 /// Drives `pending` through `executor`, keeping at most `capacity` requests
 /// admitted at once, calling `on_result` for every completed request in
 /// completion order. `launch` returns a stream of per-entry outcomes for each
@@ -294,17 +304,22 @@ async fn drive_presence_groups<'a, T, F, E>(
     pending: Vec<usize>,
     capacity: usize,
     launch: F,
-    mut on_result: impl FnMut(RemotePresenceResult),
+    observer: PresenceObserver<'_, impl FnMut(RemotePresenceResult)>,
 ) -> Result<(), (usize, PresenceProbeError)>
 where
     T: RemotePresenceObligation,
     F: Fn(&RemoteHandle, Vec<batch::AdmittedPresence>) -> BoxStream<'a, (usize, Result<bool, E>)>,
     E: Into<PresenceProbeError> + Send + 'static,
 {
+    let PresenceObserver {
+        mut on_result,
+        progress,
+    } = observer;
     let mut pending: VecDeque<_> = pending.into();
     let mut active = SelectAll::new();
     let mut active_entries = 0;
     let mut first_error = None;
+    let mut timer = None;
     while !pending.is_empty() || active_entries > 0 {
         if executor.is_cancelled()
             && let Some(index) = pending.iter().min().copied()
@@ -361,18 +376,22 @@ where
         if active_entries == 0 {
             break;
         }
-        let (request_index, result) = active
-            .next()
+        progress.report(false);
+        let (request_index, result) = progress
+            .next(&mut active, &mut timer)
             .await
             .expect("admitted presence produces an outcome");
         let mut completed = Some((request_index, result));
         while let Some((request_index, result)) = completed {
             active_entries -= 1;
             match result {
-                Ok(present) => on_result(RemotePresenceResult {
-                    request_index,
-                    present,
-                }),
+                Ok(present) => {
+                    progress.completed(present);
+                    on_result(RemotePresenceResult {
+                        request_index,
+                        present,
+                    });
+                }
                 Err(source) => retain_first_error(&mut first_error, request_index, source.into()),
             }
             // Drain ready notifications before refilling. A completed batch
@@ -435,7 +454,10 @@ where
                 .collect::<FuturesUnordered<_>>()
                 .boxed()
         },
-        on_result,
+        PresenceObserver {
+            on_result,
+            progress: &mut crate::PresenceProgress::default(),
+        },
     )
     .await
 }
@@ -521,7 +543,10 @@ mod tests {
                     sizes.borrow_mut().push(entries.len());
                     presence_stream(&executor, handle.client().clone(), entries)
                 },
-                |result| seen.push(result.request_index),
+                PresenceObserver {
+                    on_result: |result: RemotePresenceResult| seen.push(result.request_index),
+                    progress: &mut crate::PresenceProgress::default(),
+                },
             ))
             .unwrap();
         assert_eq!(*sizes.borrow(), [128, 128, 1]);
@@ -550,7 +575,10 @@ mod tests {
                 (0..129).collect(),
                 128,
                 |handle, entries| presence_stream(&executor, handle.client().clone(), entries),
-                |result| seen.push(result.request_index),
+                PresenceObserver {
+                    on_result: |result: RemotePresenceResult| seen.push(result.request_index),
+                    progress: &mut crate::PresenceProgress::default(),
+                },
             ))
             .unwrap_err();
         assert_eq!(index, 3);

@@ -233,12 +233,13 @@ pub use repository_state::{
 pub use snapshot::SnapshotError;
 pub use transfer::{
     DownloadCacheFailureKind, DownloadError, DownloadObject, DownloadOutcome, DownloadProgress,
-    DownloadRemoteFailureKind, PublishError, PublishObject, PublishOutcome, PublishProgress,
-    PublishStatus, RemotePresenceError, RemotePresenceObligation, RemotePresenceResult,
-    RepairCacheFailureKind, RepairError, RepairObject, RepairOutcome, RepairRemoteFailureKind,
-    SelectedObject, StreamingWindow, TransferCacheSource, UploadCacheFailureKind, UploadError,
-    UploadRemoteFailureKind, UploadWriteFailureKind, WindowBatch, download_window, publish_window,
-    repair_window, visit_current_state_objects, visit_history_objects,
+    DownloadRemoteFailureKind, PresenceProgress, PublishError, PublishObject, PublishOutcome,
+    PublishProgress, PublishStatus, RemotePresenceError, RemotePresenceObligation,
+    RemotePresenceResult, RepairCacheFailureKind, RepairError, RepairObject, RepairOutcome,
+    RepairRemoteFailureKind, SelectedObject, StreamingWindow, TransferCacheSource,
+    UploadCacheFailureKind, UploadError, UploadRemoteFailureKind, UploadWriteFailureKind,
+    WindowBatch, download_window, publish_window, repair_window, visit_current_state_objects,
+    visit_history_objects,
 };
 pub use workspace::sync::{
     CacheFailureKind as SyncCacheFailureKind, ExcludesFailureKind as SyncExcludesFailureKind,
@@ -329,8 +330,8 @@ pub mod test_support {
     pub use crate::workspace::sync::test_support::{dirty_rows_high_water, do_rematerialize_calls};
     pub use crate::workspace::sync::{RefreshResult, refresh_desired_index};
 
-    pub const LARGE_FILE_PROGRESS_THRESHOLD: u64 =
-        crate::repository_mutation::LARGE_FILE_PROGRESS_THRESHOLD;
+    pub const LARGE_FILE_INGEST_THRESHOLD: u64 =
+        crate::repository_mutation::LARGE_FILE_INGEST_THRESHOLD;
 
     #[must_use]
     pub fn remote_url_validation_error_for_test(
@@ -453,3 +454,6 @@ mod resources;
 pub use resources::*;
 
 pub(crate) use mount::{LockedMount, MountAdd, MountRemove, MountUpdate};
+
+mod parallel_progress;
+pub use parallel_progress::{ParallelProgress, ParallelWork};

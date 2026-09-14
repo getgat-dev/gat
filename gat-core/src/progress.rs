@@ -35,8 +35,10 @@
 //!   progress is cleared before final outcomes/errors are
 //!   rendered.
 
+mod work;
+pub use work::{WorkCounts, WorkItem, WorkProgress};
+
 use crate::git_location::GitLocationSpec;
-use crate::lexical_path::GatPath;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// One semantic operation a command can report progress for. Deliberately
@@ -150,7 +152,7 @@ pub struct ReceiveProgress {
 /// This type is a neutral protocol value -- it has no wording method of
 /// its own. The root `output::progress` module alone owns the mapping
 /// from a variant to its rendered presentation line. Dynamic fields
-/// carry only already-validated core semantic values (e.g. [`GatPath`],
+/// carry only already-validated core semantic values (e.g. [`crate::lexical_path::GatPath`],
 /// [`GitLocationSpec`]) or plain display text (`pattern`) -- never a
 /// presentation-layer/security-sensitive type such as a redacted URL:
 /// that redaction happens only at the root renderer, from
@@ -185,9 +187,10 @@ pub enum ProgressActivity {
     RegeneratingExcludes,
     /// Checking whether a candidate can reuse an existing OID.
     CheckingReuseStatus,
-    /// Hashing one specific file (e.g. a large file whose byte-level
-    /// progress is tracked separately via `percent`).
-    HashingFile { path: GatPath, percent: Option<u8> },
+    /// Concurrent file ingestion, including copy, hashing, and cache publication.
+    HashingFiles(WorkCounts),
+    /// Concurrent preparation and history inspection of additional repositories.
+    InspectingRepositories(WorkCounts),
     /// Walking a directory to discover candidate files.
     WalkingDirectory,
     /// Expanding a glob pattern to discover candidate files.
@@ -202,14 +205,18 @@ pub enum ProgressActivity {
     LoadingState,
     /// Checking remote object presence for the current window.
     CheckingRemote,
+    /// Enumerating object identifiers after remote readiness.
+    ListingRemoteObjects,
+    /// Streaming validation and application of working-tree changes.
+    ReconcilingWorkingTree,
     /// Concurrent publication work and cumulative results.
     Publishing(PublicationProgress),
     /// Cache verification and downloads during fetch.
     Fetching(ReceiveProgress),
     /// Best-effort downloads of damaged objects during repair.
     Repairing(ReceiveProgress),
-    /// The most recently completed remote-presence check.
-    CheckedRemoteObject { path: GatPath },
+    /// Remote presence results across the operation.
+    RemotePresence { present: u64, missing: u64 },
     /// Classifying user-supplied selectors (literal path vs. glob).
     ClassifyingSelectors,
     /// Scanning desired state for matching rows.
@@ -602,16 +609,10 @@ mod tests {
             Some(3),
         ));
         task.inc(1);
-        task.set_activity(ProgressActivity::HashingFile {
-            path: GatPath::parse_canonical("a.bin").unwrap(),
-            percent: None,
-        });
+        task.set_activity(ProgressActivity::HashingFiles(Default::default()));
         let handle = task.handle();
         handle.inc(1);
-        handle.set_activity(ProgressActivity::HashingFile {
-            path: GatPath::parse_canonical("a.bin").unwrap(),
-            percent: Some(50),
-        });
+        handle.set_activity(ProgressActivity::HashingFiles(Default::default()));
         task.finish();
         NoopProgress.finish_all();
     }

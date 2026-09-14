@@ -685,7 +685,6 @@ pub(crate) fn ingest_file(
     path: &GatPath,
     strategy: cache::IngestStrategy,
     large_file_threshold: u64,
-    on_progress: impl Fn(u64, u64) + Sync,
 ) -> Result<WorktreeIngested, WorktreeMutationError> {
     let full = confine_read(root, path)?;
     let observation = crate::file_state::coherent_observation(&full, || {
@@ -697,10 +696,8 @@ pub(crate) fn ingest_file(
             })
             .map_err(WorktreeMutationError::from)?;
         if size > large_file_threshold {
-            cache::object::ingest_file_delta(objects_dir, &full, strategy, |read| {
-                on_progress(read, size);
-            })
-            .map_err(WorktreeMutationError::from)
+            cache::object::ingest_file_delta(objects_dir, &full, strategy)
+                .map_err(WorktreeMutationError::from)
         } else {
             let file = std::fs::File::open(&full).map_err(|source| CacheError::PathUnreadable {
                 path: full.clone(),

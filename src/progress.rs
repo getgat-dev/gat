@@ -256,16 +256,10 @@ mod tests {
             Some(3),
         ));
         task.inc(1);
-        task.set_activity(ProgressActivity::HashingFile {
-            path: gat_core::lexical_path::GatPath::parse_canonical("a.bin").unwrap(),
-            percent: None,
-        });
+        task.set_activity(ProgressActivity::HashingFiles(Default::default()));
         let handle = task.handle();
         handle.inc(1);
-        handle.set_activity(ProgressActivity::HashingFile {
-            path: gat_core::lexical_path::GatPath::parse_canonical("a.bin").unwrap(),
-            percent: Some(50),
-        });
+        handle.set_activity(ProgressActivity::HashingFiles(Default::default()));
         task.finish();
         NoopProgress.finish_all();
     }

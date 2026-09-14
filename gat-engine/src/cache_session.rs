@@ -138,16 +138,14 @@ impl CacheSession {
         cache_root: &CacheRoot,
         files: &[GatPath],
         strategy: IngestStrategy,
-        on_progress: impl Fn(&GatPath, Option<u8>) + Sync,
-        on_complete: impl Fn() + Sync,
+        progress: &gat_core::progress::WorkProgress,
     ) -> Result<Vec<PreparedMaterialization>, MaterializationPreparationError> {
         state.ingest_materializations(
             self.cache(cache_root),
             files,
             strategy,
-            crate::repository_mutation::LARGE_FILE_PROGRESS_THRESHOLD,
-            on_progress,
-            on_complete,
+            crate::repository_mutation::LARGE_FILE_INGEST_THRESHOLD,
+            progress,
         )
     }
 }

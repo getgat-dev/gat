@@ -6,8 +6,7 @@ use gat_core::lexical_path::GatPath;
 use gat_core::name::{RemoteName, RouteName};
 use gat_core::oid::Oid;
 use gat_core::progress::{
-    ProgressActivity, ProgressHandle, ProgressOperation, ProgressReporter, ProgressSpec,
-    ProgressUnit,
+    ProgressActivity, ProgressOperation, ProgressReporter, ProgressSpec, ProgressUnit,
 };
 use gat_core::selection::Selection;
 use gat_engine::{
@@ -117,6 +116,7 @@ pub fn remote_status_with_desired_operation(
         request.history.is_some(),
     ));
 
+    let mut reporting = gat_engine::PresenceProgress::new(task);
     let mut visit = |object: SelectedObject| -> Result<(), RemoteStatusError> {
         let remote = operation
             .policy()
@@ -132,7 +132,15 @@ pub fn remote_status_with_desired_operation(
         window.record(
             key,
             || StatusObligation { object, remote },
-            |batch| run_status_window(&mut operation, batch, &mut checked, &mut missing, &task),
+            |batch| {
+                run_status_window(
+                    &mut operation,
+                    batch,
+                    &mut checked,
+                    &mut missing,
+                    &mut reporting,
+                )
+            },
         )
     };
 
@@ -144,7 +152,13 @@ pub fn remote_status_with_desired_operation(
     };
 
     window.finish(|batch| {
-        run_status_window(&mut operation, batch, &mut checked, &mut missing, &task)
+        run_status_window(
+            &mut operation,
+            batch,
+            &mut checked,
+            &mut missing,
+            &mut reporting,
+        )
     })?;
     checking.finish();
 
@@ -181,10 +195,8 @@ fn run_status_window(
     batch: gat_engine::WindowBatch<'_, StatusObligation>,
     checked: &mut usize,
     missing: &mut Vec<MissingRemoteObject>,
-    task: &ProgressHandle,
+    reporting: &mut gat_engine::PresenceProgress,
 ) -> Result<(), RemoteStatusError> {
-    task.set_activity(ProgressActivity::CheckingRemote);
-
     // Each result slot is filled in as soon as its own check completes
     // (`checked` and progress advance immediately, not after the whole window), but
     // `missing` below is always built by walking `obligations` in their
@@ -196,15 +208,9 @@ fn run_status_window(
         obligations,
         |result| {
             *checked += 1;
-            task.inc(1);
-            task.set_activity(ProgressActivity::CheckedRemoteObject {
-                path: obligations[result.request_index]
-                    .representative_path()
-                    .clone(),
-            });
             present[result.request_index] = result.present;
         },
-        task,
+        reporting,
     )?;
 
     let catalog = operation.remotes_catalog();

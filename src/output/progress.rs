@@ -48,6 +48,25 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+fn work_line(
+    counts: gat_core::progress::WorkCounts,
+    active: &'static str,
+    complete: &'static str,
+) -> UserLine {
+    UserLine::compose([
+        UserLine::unsigned_number(counts.active()),
+        UserLine::authored(" "),
+        UserLine::authored(active),
+        UserLine::authored(" · "),
+        UserLine::unsigned_number(counts.succeeded()),
+        UserLine::authored(" "),
+        UserLine::authored(complete),
+        UserLine::authored(" · "),
+        UserLine::unsigned_number(counts.failed()),
+        UserLine::authored(" failed"),
+    ])
+}
+
 /// The only place a [`ProgressOperation`] variant's fixed label is
 /// decided.
 /// `crate::progress` itself has no wording method on this type.
@@ -114,15 +133,14 @@ pub(crate) fn activity_line(activity: &ProgressActivity) -> UserLine {
         }
         ProgressActivity::RegeneratingExcludes => UserLine::authored("regenerating excludes"),
         ProgressActivity::CheckingReuseStatus => UserLine::authored("checking reuse status"),
-        ProgressActivity::HashingFile { path, percent } => match percent {
-            Some(percent) => UserLine::compose([
-                UserLine::path_text(path.as_str()),
-                UserLine::authored(" ("),
-                UserLine::number(i64::from(*percent)),
-                UserLine::authored("%)"),
-            ]),
-            None => UserLine::path_text(path.as_str()),
-        },
+        ProgressActivity::HashingFiles(counts) => work_line(*counts, "hashing", "hashed"),
+        ProgressActivity::InspectingRepositories(counts) => {
+            work_line(*counts, "inspecting", "inspected")
+        }
+        ProgressActivity::ListingRemoteObjects => UserLine::authored("listing remote objects"),
+        ProgressActivity::ReconcilingWorkingTree => {
+            UserLine::authored("validating and applying changes")
+        }
         ProgressActivity::WalkingDirectory => UserLine::authored("walking directory"),
         ProgressActivity::ExpandingPattern { pattern } => UserLine::compose([
             UserLine::authored("expanding pattern "),
@@ -189,7 +207,12 @@ pub(crate) fn activity_line(activity: &ProgressActivity) -> UserLine {
             UserLine::compose(parts.into_iter().chain(rejected.into_iter().flatten()))
         }
         ProgressActivity::CheckingRemote => UserLine::authored("checking remote"),
-        ProgressActivity::CheckedRemoteObject { path } => UserLine::path_text(path.as_str()),
+        ProgressActivity::RemotePresence { present, missing } => UserLine::compose([
+            UserLine::unsigned_number(*present),
+            UserLine::authored(" present · "),
+            UserLine::unsigned_number(*missing),
+            UserLine::authored(" missing"),
+        ]),
         ProgressActivity::ClassifyingSelectors => UserLine::authored("classifying selectors"),
         ProgressActivity::ScanningDesiredState => UserLine::authored("scanning desired state"),
         ProgressActivity::ScanningLock => UserLine::authored("scanning gat.lock"),
@@ -655,18 +678,19 @@ mod tests {
             "checking remote"
         );
         assert_eq!(
-            activity_line(&ProgressActivity::CheckedRemoteObject {
-                path: gat_core::lexical_path::GatPath::normalize("models/checkpoint.bin").unwrap(),
+            activity_line(&ProgressActivity::RemotePresence {
+                present: 3,
+                missing: 2
             })
             .as_str(),
-            "models/checkpoint.bin"
+            "3 present · 2 missing"
         );
     }
 
     #[test]
     fn activity_line_escapes_control_characters_instead_of_collapsing_them() {
         // `UserLine`'s construction-time escaping is the single
-        // place control characters are neutralized. `HashingFile`'s `path` is a
+        // place control characters are neutralized. A validated path is a
         // `GatPath` now, which structurally rejects control characters
         // at construction time (see `gat_core::lexical_path`), so this
         // test exercises the escaping contract through

@@ -108,7 +108,7 @@ impl<'repo> SelectionOperation<'_, 'repo> {
         &mut self,
         obligations: &[T],
         on_result: impl FnMut(crate::RemotePresenceResult),
-        progress: &gat_core::progress::ProgressHandle,
+        progress: &mut crate::PresenceProgress,
     ) -> std::result::Result<(), crate::RemotePresenceError> {
         self.operation
             .check_remote_presence_streaming(obligations, on_result, progress)

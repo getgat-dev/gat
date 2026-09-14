@@ -89,7 +89,7 @@ mod tests {
             operation.check_remote_presence_streaming(
                 &objects,
                 |_| panic!("foreign object reported"),
-                &progress
+                &mut PresenceProgress::new(progress.clone())
             ),
             Err(RemotePresenceError::Identity(
                 RemoteIdentityError::ForeignOwner
@@ -109,7 +109,7 @@ mod tests {
         let outcome = repair_window(
             &mut operation,
             repairs,
-            &mut DownloadProgress::repair(progress.clone()),
+            &mut DownloadProgress::repair(progress),
         );
         assert!(matches!(
             outcome.results.as_slice(),
@@ -120,3 +120,6 @@ mod tests {
         assert_eq!(crate::remote_session::test_support::remote_opens(), opens);
     }
 }
+
+mod presence_progress;
+pub use presence_progress::PresenceProgress;
