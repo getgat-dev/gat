@@ -131,6 +131,63 @@ pub(crate) fn activity_line(activity: &ProgressActivity) -> UserLine {
         ProgressActivity::Connecting => UserLine::authored("connecting"),
         ProgressActivity::ResolvingSelection => UserLine::authored("resolving selection"),
         ProgressActivity::LoadingState => UserLine::authored("loading state"),
+        ProgressActivity::Fetching(counts) => {
+            let failed = (counts.failed != 0).then(|| {
+                [
+                    UserLine::authored(" · "),
+                    UserLine::unsigned_number(counts.failed),
+                    UserLine::authored(" failed"),
+                ]
+            });
+            UserLine::compose(
+                [
+                    UserLine::unsigned_number(counts.verifying),
+                    UserLine::authored(" verifying · "),
+                    UserLine::unsigned_number(counts.downloading),
+                    UserLine::authored(" downloading · "),
+                    UserLine::unsigned_number(counts.checked),
+                    UserLine::authored(" checked · "),
+                    UserLine::unsigned_number(counts.cached),
+                    UserLine::authored(" cached · "),
+                    UserLine::unsigned_number(counts.received),
+                    UserLine::authored(" downloaded"),
+                ]
+                .into_iter()
+                .chain(failed.into_iter().flatten()),
+            )
+        }
+        ProgressActivity::Repairing(counts) => UserLine::compose([
+            UserLine::unsigned_number(counts.downloading),
+            UserLine::authored(" downloading · "),
+            UserLine::unsigned_number(counts.received),
+            UserLine::authored(" repaired · "),
+            UserLine::unsigned_number(counts.failed),
+            UserLine::authored(" failed"),
+        ]),
+        ProgressActivity::Publishing(counts) => {
+            let parts = [
+                UserLine::unsigned_number(counts.verifying),
+                UserLine::authored(" verifying · "),
+                UserLine::unsigned_number(counts.uploading),
+                UserLine::authored(" uploading · "),
+                UserLine::unsigned_number(counts.checking),
+                UserLine::authored(" checking · "),
+                UserLine::unsigned_number(counts.checked),
+                UserLine::authored(" checked · "),
+                UserLine::unsigned_number(counts.already_present),
+                UserLine::authored(" present · "),
+                UserLine::unsigned_number(counts.uploaded),
+                UserLine::authored(" uploaded"),
+            ];
+            let rejected = (counts.rejected != 0).then(|| {
+                [
+                    UserLine::authored(" · "),
+                    UserLine::unsigned_number(counts.rejected),
+                    UserLine::authored(" rejected"),
+                ]
+            });
+            UserLine::compose(parts.into_iter().chain(rejected.into_iter().flatten()))
+        }
         ProgressActivity::CheckingRemote => UserLine::authored("checking remote"),
         ProgressActivity::CheckedRemoteObject { path } => UserLine::path_text(path.as_str()),
         ProgressActivity::ClassifyingSelectors => UserLine::authored("classifying selectors"),
@@ -141,7 +198,6 @@ pub(crate) fn activity_line(activity: &ProgressActivity) -> UserLine {
         ProgressActivity::CloningSource { location } => UserLine::redacted_url(
             &crate::redaction::RedactedUrl::render(location.as_location_str()),
         ),
-        ProgressActivity::TransferringFile { path } => UserLine::path_text(path.as_str()),
         ProgressActivity::LoadingMaterializedState => {
             UserLine::authored("loading materialized state")
         }
@@ -525,6 +581,50 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn receive_summaries_distinguish_cached_downloaded_and_repaired_objects() {
+        let counts = gat_core::progress::ReceiveProgress {
+            verifying: 12,
+            downloading: 8,
+            checked: 860,
+            cached: 720,
+            received: 120,
+            failed: 2,
+        };
+        assert_eq!(
+            activity_line(&ProgressActivity::Fetching(counts)).as_str(),
+            "12 verifying · 8 downloading · 860 checked · 720 cached · 120 downloaded · 2 failed"
+        );
+        assert_eq!(
+            activity_line(&ProgressActivity::Repairing(counts)).as_str(),
+            "8 downloading · 120 repaired · 2 failed"
+        );
+    }
+
+    #[test]
+    fn publication_summary_keeps_active_work_first_and_results_distinct() {
+        use gat_core::progress::PublicationProgress;
+        let counts = PublicationProgress {
+            checking: 4,
+            checked: 860,
+            already_present: 720,
+            verifying: 12,
+            uploading: 8,
+            uploaded: 120,
+            rejected: 2,
+        };
+        assert_eq!(
+            compose_message(
+                ProgressOperation::Pushing,
+                Some(activity_line(&ProgressActivity::Publishing(counts)))
+            )
+            .as_str(),
+            "pushing · 12 verifying · 8 uploading · 4 checking · 860 checked · 720 present · 120 uploaded · 2 rejected"
+        );
+        let line = activity_line(&ProgressActivity::Publishing(PublicationProgress::default()));
+        assert!(!line.as_str().contains("rejected"));
+    }
+
     #[test]
     fn remote_gc_deletion_has_an_explicit_activity_label() {
         let message = super::compose_message(

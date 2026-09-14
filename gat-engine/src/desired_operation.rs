@@ -116,14 +116,14 @@ impl<'repo> SelectionOperation<'_, 'repo> {
     pub fn download_window(
         &mut self,
         objects: Vec<crate::DownloadObject>,
-        progress: &gat_core::progress::ProgressHandle,
+        progress: &mut crate::DownloadProgress,
     ) -> std::result::Result<crate::DownloadOutcome, crate::DownloadError> {
         crate::download_window(self.operation, objects, progress)
     }
     pub fn publish_window(
         &mut self,
         objects: Vec<crate::PublishObject>,
-        progress: &gat_core::progress::ProgressHandle,
+        progress: &mut crate::PublishProgress,
     ) -> std::result::Result<crate::PublishOutcome, crate::PublishError> {
         crate::publish_window(self.operation, objects, progress)
     }

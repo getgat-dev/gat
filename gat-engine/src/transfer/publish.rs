@@ -13,8 +13,12 @@ use futures::stream::{BoxStream, SelectAll};
 use futures::{FutureExt, StreamExt};
 use gat_core::lexical_path::GatPath;
 use gat_core::oid::Oid;
-use gat_core::progress::{ProgressActivity, ProgressHandle};
+#[cfg(test)]
+use gat_core::progress::{ProgressHandle, PublicationProgress};
+
+mod progress;
 use gat_io::{CacheError, CacheObject, CompletedCacheVerification, ObjectVerification};
+pub use progress::PublishProgress;
 use std::collections::{BTreeMap, VecDeque};
 
 const VERIFICATION_BATCH_SIZE: usize = 128;
@@ -183,7 +187,6 @@ struct RemoteScheduler<'a> {
     executor: &'a RemoteExecutor,
     handles: &'a BTreeMap<RemoteId, RemoteHandle>,
     objects: &'a [PublishObject],
-    task: ProgressHandle,
 }
 
 impl PipelineState {
@@ -367,7 +370,7 @@ const fn select_queue_kind(
 pub fn publish_window(
     operation: &mut Operation<'_>,
     objects: Vec<PublishObject>,
-    task: &ProgressHandle,
+    progress: &mut PublishProgress,
 ) -> Result<PublishOutcome, PublishError> {
     if objects.is_empty() {
         return Ok(PublishOutcome::default());
@@ -390,7 +393,11 @@ pub fn publish_window(
         }
         let handle = services
             .remotes
-            .open_handle(services.remotes_catalog, object.remote.id(), Some(task))
+            .open_handle(
+                services.remotes_catalog,
+                object.remote.id(),
+                Some(&progress.task),
+            )
             .map_err(|source| {
                 RemotePresenceError::remote_open(
                     services.remotes_catalog,
@@ -402,63 +409,82 @@ pub fn publish_window(
         handles.insert(object.remote.id(), handle);
     }
 
-    let task = task.clone();
-
     tokio::runtime::Handle::current().block_on(async move {
-        task.set_activity(ProgressActivity::CheckingRemote);
         let scheduler = RemoteScheduler {
             executor: services.remote_executor,
             handles: &handles,
             objects: &objects,
-            task: task.clone(),
         };
+        let mut refresh_timer = None;
         let mut completions = SelectAll::<BoxStream<'_, RemoteCompletion>>::new();
-        refill_remote_work(&mut state, &mut completions, &scheduler);
-        while let Some(completion) = completions.next().await {
-            let mut ready = vec![completion];
+        refill_remote_work(&mut state, &mut completions, &scheduler, progress);
+        progress.report(false);
+        // Retain the bounded batch allocation across coordinator iterations.
+        let mut ready = Vec::new();
+        loop {
+            let completion = progress
+                .next_completion(&mut completions, &mut refresh_timer)
+                .await;
+            let Some(completion) = completion else {
+                break;
+            };
+            ready.push(completion);
             while let Some(Some(completion)) = completions.next().now_or_never() {
                 ready.push(completion);
             }
 
-            for completion in ready {
+            #[allow(
+                clippy::iter_with_drain,
+                reason = "Retain the completion buffer allocation for the next coordinator iteration"
+            )]
+            for completion in ready.drain(..) {
                 match completion {
-                    RemoteCompletion::Presence { index, result } => match result {
-                        Ok(true) => {
-                            complete_obligation(
-                                &mut state.statuses,
-                                index,
-                                PublishStatus::AlreadyPresent,
-                                &task,
-                            );
+                    RemoteCompletion::Presence { index, result } => {
+                        progress.counts.checking -= 1;
+                        if result.is_ok() {
+                            progress.counts.checked += 1;
                         }
-                        Ok(false) => {
-                            let oid = objects[index].oid;
-                            match state.register_verification(oid, index) {
-                                VerificationAction::Wait => {}
-                                VerificationAction::Upload(source) => {
-                                    enqueue_upload(&mut state, &handles, &objects, index, source);
-                                }
-                                VerificationAction::Reject(rejection) => {
-                                    complete_obligation(
-                                        &mut state.statuses,
-                                        index,
-                                        rejection.status(),
-                                        &task,
-                                    );
+                        match result {
+                            Ok(true) => {
+                                complete_obligation(
+                                    &mut state.statuses,
+                                    index,
+                                    PublishStatus::AlreadyPresent,
+                                    progress,
+                                );
+                            }
+                            Ok(false) => {
+                                let oid = objects[index].oid;
+                                match state.register_verification(oid, index) {
+                                    VerificationAction::Wait => {}
+                                    VerificationAction::Upload(source) => {
+                                        enqueue_upload(
+                                            &mut state, &handles, &objects, index, source,
+                                        );
+                                    }
+                                    VerificationAction::Reject(rejection) => {
+                                        complete_obligation(
+                                            &mut state.statuses,
+                                            index,
+                                            rejection.status(),
+                                            progress,
+                                        );
+                                    }
                                 }
                             }
+                            Err(source) => state.record_error(
+                                index,
+                                PublishError::Presence(RemotePresenceError::presence_check(
+                                    services.remotes_catalog,
+                                    services.policy,
+                                    &objects[index],
+                                    source,
+                                )),
+                            ),
                         }
-                        Err(source) => state.record_error(
-                            index,
-                            PublishError::Presence(RemotePresenceError::presence_check(
-                                services.remotes_catalog,
-                                services.policy,
-                                &objects[index],
-                                source,
-                            )),
-                        ),
-                    },
+                    }
                     RemoteCompletion::Upload { upload } => {
+                        progress.counts.uploading -= 1;
                         let (object, index, result) = upload.into_parts();
                         match result {
                             Ok(()) => {
@@ -466,7 +492,7 @@ pub fn publish_window(
                                     &mut state.statuses,
                                     index,
                                     PublishStatus::Uploaded,
-                                    &task,
+                                    progress,
                                 );
                             }
                             Err(source) => state.record_error(
@@ -482,6 +508,7 @@ pub fn publish_window(
                     }
                     RemoteCompletion::Verification { oids, result } => {
                         state.verification_active = false;
+                        progress.counts.verifying = 0;
                         let error_index = state.verification_error_index(&oids);
                         let result = result.and_then(|completed| {
                             services
@@ -534,7 +561,7 @@ pub fn publish_window(
                                                     &mut state.statuses,
                                                     index,
                                                     rejection.status(),
-                                                    &task,
+                                                    progress,
                                                 );
                                             }
                                             state.verification.insert(
@@ -566,6 +593,8 @@ pub fn publish_window(
             if !state.verification_active && !services.remote_executor.is_cancelled() {
                 let oids = state.take_verification_batch();
                 if !oids.is_empty() {
+                    progress.counts.verifying = oids.len() as u64;
+                    progress.report(false);
                     let prepared = services
                         .cache_session
                         .prepare_verification(services.cache_root, &oids);
@@ -587,8 +616,10 @@ pub fn publish_window(
                     );
                 }
             }
-            refill_remote_work(&mut state, &mut completions, &scheduler);
+            refill_remote_work(&mut state, &mut completions, &scheduler, progress);
+            progress.report(false);
         }
+        progress.report(true);
         if let Some((_, error)) = state.error {
             return Err(error);
         }
@@ -606,6 +637,7 @@ fn refill_remote_work<'a>(
     state: &mut PipelineState,
     completions: &mut SelectAll<BoxStream<'a, RemoteCompletion>>,
     scheduler: &'a RemoteScheduler<'a>,
+    progress: &mut PublishProgress,
 ) {
     let presence_completions = |id, entries| {
         super::presence::presence_stream(
@@ -620,11 +652,11 @@ fn refill_remote_work<'a>(
     while let Some(work) = state.next_admissible_work(scheduler) {
         match work {
             AdmittedWork::Upload { upload, lease } => {
-                let task = scheduler.task.clone();
+                progress.counts.uploading += 1;
                 completions.push(
                     async move {
                         let _lease = lease;
-                        let upload = execute_upload(scheduler.executor, upload, task).await;
+                        let upload = execute_upload(scheduler.executor, upload).await;
                         RemoteCompletion::Upload { upload }
                     }
                     .into_stream()
@@ -636,6 +668,7 @@ fn refill_remote_work<'a>(
                 index,
                 lease,
             } => {
+                progress.counts.checking += 1;
                 let oid = scheduler.objects[index].oid;
                 let limit = scheduler.handles[&remote_id]
                     .client()
@@ -725,13 +758,18 @@ fn complete_obligation(
     statuses: &mut [Option<PublishStatus>],
     index: usize,
     status: PublishStatus,
-    task: &ProgressHandle,
+    progress: &mut PublishProgress,
 ) {
     assert!(
         statuses[index].replace(status).is_none(),
         "publication obligation completed more than once"
     );
-    task.inc(1);
+    progress.completed += 1;
+    match status {
+        PublishStatus::AlreadyPresent => progress.counts.already_present += 1,
+        PublishStatus::Uploaded => progress.counts.uploaded += 1,
+        PublishStatus::CacheMissing | PublishStatus::CacheCorrupt => progress.counts.rejected += 1,
+    }
 }
 
 #[cfg(test)]
@@ -756,11 +794,12 @@ mod tests {
             executor: &executor,
             handles: &handles,
             objects: &objects,
-            task: progress_handle(&backend),
         };
+        let mut progress = PublishProgress::new(progress_handle(&backend));
         let mut state = PipelineState::new(&objects);
         let mut completions = SelectAll::new();
-        refill_remote_work(&mut state, &mut completions, &scheduler);
+        refill_remote_work(&mut state, &mut completions, &scheduler, &mut progress);
+        progress.report(false);
         let results = runtime.block_on(completions.collect::<Vec<_>>());
         assert_eq!(results.len(), 128);
         for (expected, result) in results.into_iter().enumerate() {
@@ -774,6 +813,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingBackend {
         increments: Mutex<Vec<u64>>,
+        activities: Mutex<Vec<PublicationProgress>>,
     }
 
     impl ActivityBackend for RecordingBackend {
@@ -781,7 +821,11 @@ mod tests {
             self.increments.lock().unwrap().push(delta);
         }
 
-        fn set_activity(&self, _activity: &ProgressActivity) {}
+        fn set_activity(&self, activity: &ProgressActivity) {
+            if let ProgressActivity::Publishing(counts) = activity {
+                self.activities.lock().unwrap().push(*counts);
+            }
+        }
 
         fn finish(&self) {}
     }
@@ -832,13 +876,18 @@ mod tests {
     #[test]
     fn completing_obligations_increments_each_terminal_result_once() {
         let backend = Arc::new(RecordingBackend::default());
-        let task = progress_handle(&backend);
+        let mut progress = PublishProgress::new(progress_handle(&backend));
         let mut statuses = vec![None; 4];
 
-        complete_obligation(&mut statuses, 1, PublishStatus::AlreadyPresent, &task);
-        complete_obligation(&mut statuses, 3, PublishStatus::Uploaded, &task);
-        complete_obligation(&mut statuses, 0, PublishStatus::CacheMissing, &task);
-        complete_obligation(&mut statuses, 2, PublishStatus::CacheCorrupt, &task);
+        complete_obligation(
+            &mut statuses,
+            1,
+            PublishStatus::AlreadyPresent,
+            &mut progress,
+        );
+        complete_obligation(&mut statuses, 3, PublishStatus::Uploaded, &mut progress);
+        complete_obligation(&mut statuses, 0, PublishStatus::CacheMissing, &mut progress);
+        complete_obligation(&mut statuses, 2, PublishStatus::CacheCorrupt, &mut progress);
 
         assert_eq!(
             terminal_statuses(statuses),
@@ -849,18 +898,24 @@ mod tests {
                 PublishStatus::Uploaded,
             ]
         );
-        assert_eq!(*backend.increments.lock().unwrap(), vec![1, 1, 1, 1]);
+        progress.report(true);
+        assert_eq!(*backend.increments.lock().unwrap(), vec![4]);
     }
 
     #[test]
     #[should_panic(expected = "publication obligation completed more than once")]
     fn completing_an_obligation_twice_is_rejected() {
         let backend = Arc::new(RecordingBackend::default());
-        let task = progress_handle(&backend);
+        let mut progress = PublishProgress::new(progress_handle(&backend));
         let mut statuses = vec![None];
 
-        complete_obligation(&mut statuses, 0, PublishStatus::AlreadyPresent, &task);
-        complete_obligation(&mut statuses, 0, PublishStatus::Uploaded, &task);
+        complete_obligation(
+            &mut statuses,
+            0,
+            PublishStatus::AlreadyPresent,
+            &mut progress,
+        );
+        complete_obligation(&mut statuses, 0, PublishStatus::Uploaded, &mut progress);
     }
 
     #[test]

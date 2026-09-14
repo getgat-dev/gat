@@ -96,16 +96,17 @@ impl CacheSession {
         cache_root: &CacheRoot,
         oids: &[Oid],
         mut on_window: impl FnMut(
-            &[Oid],
-            &[ObjectVerification],
+            gat_io::VerificationEvent<'_>,
         ) -> std::result::Result<Vec<CachePublication>, E>,
     ) -> std::result::Result<(), E> {
         let cache = self.cache(cache_root);
-        cache.verify_windows_unmemoized(oids, |oids, status| {
-            let publications = on_window(oids, status)?;
+        cache.verify_windows_unmemoized_observed(oids, |event| {
+            let publications = on_window(event)?;
             // Best-effort: publications accelerate later verification;
             // the object bytes are already durably present.
-            let _ = cache.apply_publications(&publications);
+            if !publications.is_empty() {
+                let _ = cache.apply_publications(&publications);
+            }
             Ok(())
         })
     }

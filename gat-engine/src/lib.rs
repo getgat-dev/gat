@@ -141,6 +141,7 @@ mod mount;
 mod mutation;
 mod operation;
 mod path_policy;
+mod progress_reporting;
 mod remote_catalog;
 mod remote_executor;
 pub use remote_executor::TransferCancellation;
@@ -231,11 +232,11 @@ pub use repository_state::{
 };
 pub use snapshot::SnapshotError;
 pub use transfer::{
-    DownloadCacheFailureKind, DownloadError, DownloadObject, DownloadOutcome,
-    DownloadRemoteFailureKind, PublishError, PublishObject, PublishOutcome, PublishStatus,
-    RemotePresenceError, RemotePresenceObligation, RemotePresenceResult, RepairCacheFailureKind,
-    RepairError, RepairObject, RepairOutcome, RepairRemoteFailureKind, SelectedObject,
-    StreamingWindow, TransferCacheSource, UploadCacheFailureKind, UploadError,
+    DownloadCacheFailureKind, DownloadError, DownloadObject, DownloadOutcome, DownloadProgress,
+    DownloadRemoteFailureKind, PublishError, PublishObject, PublishOutcome, PublishProgress,
+    PublishStatus, RemotePresenceError, RemotePresenceObligation, RemotePresenceResult,
+    RepairCacheFailureKind, RepairError, RepairObject, RepairOutcome, RepairRemoteFailureKind,
+    SelectedObject, StreamingWindow, TransferCacheSource, UploadCacheFailureKind, UploadError,
     UploadRemoteFailureKind, UploadWriteFailureKind, WindowBatch, download_window, publish_window,
     repair_window, visit_current_state_objects, visit_history_objects,
 };

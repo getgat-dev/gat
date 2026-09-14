@@ -6,14 +6,14 @@ use gat_core::lexical_path::GatPath;
 use gat_core::name::{MountName, RemoteName};
 use gat_core::oid::Oid;
 use gat_core::progress::{
-    ProgressActivity, ProgressHandle, ProgressOperation, ProgressReporter, ProgressSpec,
-    ProgressUnit,
+    ProgressActivity, ProgressOperation, ProgressReporter, ProgressSpec, ProgressUnit,
 };
 use gat_core::selection::Selection;
 use gat_engine::{
-    DesiredOperation, HistoryError, PublishError, PublishObject, PublishStatus, RemoteCatalogError,
-    RemoteId, RemotePresenceError, RemoteSessionError, Repository, ResolvedRemote, StreamingWindow,
-    UnknownRemoteOverrideError, UploadError, visit_current_state_objects, visit_history_objects,
+    DesiredOperation, HistoryError, PublishError, PublishObject, PublishProgress, PublishStatus,
+    RemoteCatalogError, RemoteId, RemotePresenceError, RemoteSessionError, Repository,
+    ResolvedRemote, StreamingWindow, UnknownRemoteOverrideError, UploadError,
+    visit_current_state_objects, visit_history_objects,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -135,6 +135,7 @@ pub fn push_with_desired_operation(
     let task = pushing.handle();
     task.set_activity(ProgressActivity::selection_or_state(history_selected));
 
+    let mut publication = PublishProgress::new(task);
     let mut visit = |path: &GatPath, oid: Oid| -> Result<(), PushError> {
         let selected_index = next_index;
         next_index += 1;
@@ -166,7 +167,14 @@ pub fn push_with_desired_operation(
                 remote,
                 selected_index,
             },
-            |batch| run_push_window(&mut operation, batch.drain(), &mut skipped, &task),
+            |batch| {
+                run_push_window(
+                    &mut operation,
+                    batch.drain(),
+                    &mut skipped,
+                    &mut publication,
+                )
+            },
         )
     };
 
@@ -184,7 +192,14 @@ pub fn push_with_desired_operation(
         }
     };
 
-    window.finish(|batch| run_push_window(&mut operation, batch.drain(), &mut skipped, &task))?;
+    window.finish(|batch| {
+        run_push_window(
+            &mut operation,
+            batch.drain(),
+            &mut skipped,
+            &mut publication,
+        )
+    })?;
     // Keep progress active while ordering potentially large skipped results.
 
     let total = root_owned_oids.len();
@@ -215,7 +230,7 @@ fn run_push_window(
     operation: &mut gat_engine::SelectionOperation<'_, '_>,
     obligations: std::vec::Drain<'_, PushObligation>,
     skipped: &mut Vec<(usize, PushSkip)>,
-    task: &ProgressHandle,
+    task: &mut PublishProgress,
 ) -> Result<(), PushError> {
     #[cfg(any(test, feature = "test-support"))]
     test_support::record_push_window(obligations.len());

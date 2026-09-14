@@ -111,6 +111,35 @@ pub enum ProgressOperation {
     CloningSource,
 }
 
+/// Counters for one push operation.
+///
+/// Checked/present/uploaded/rejected count remote-object obligations. Active
+/// checks and uploads count admitted, unfinished operations. Verifying counts
+/// distinct OIDs in the outstanding verification batch, including proof reuse
+/// and work waiting for a local worker, rather than simultaneous hash calls.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PublicationProgress {
+    pub checked: u64,
+    pub already_present: u64,
+    pub uploaded: u64,
+    pub rejected: u64,
+    pub checking: u64,
+    pub verifying: u64,
+    pub uploading: u64,
+}
+
+/// Receive-side work. Totals count distinct selected objects, while the
+/// task's item counter retains its command-specific meaning.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReceiveProgress {
+    pub verifying: u64,
+    pub downloading: u64,
+    pub checked: u64,
+    pub cached: u64,
+    pub received: u64,
+    pub failed: u64,
+}
+
 /// One activity a command can be doing while a [`ProgressOperation`] is
 /// underway -- the closed set of things worth telling the user about,
 /// deliberately independent of [`ProgressOperation`] so the same
@@ -173,6 +202,12 @@ pub enum ProgressActivity {
     LoadingState,
     /// Checking remote object presence for the current window.
     CheckingRemote,
+    /// Concurrent publication work and cumulative results.
+    Publishing(PublicationProgress),
+    /// Cache verification and downloads during fetch.
+    Fetching(ReceiveProgress),
+    /// Best-effort downloads of damaged objects during repair.
+    Repairing(ReceiveProgress),
     /// The most recently completed remote-presence check.
     CheckedRemoteObject { path: GatPath },
     /// Classifying user-supplied selectors (literal path vs. glob).
@@ -193,8 +228,6 @@ pub enum ProgressActivity {
     /// boundary, is permitted to turn this into human-readable
     /// (redacted) text.
     CloningSource { location: GitLocationSpec },
-    /// Streaming bytes for one specific file during an upload/download.
-    TransferringFile { path: GatPath },
     /// Loading the materialized-state store (`gat sync`'s own phase,
     /// distinct from [`ProgressActivity::OpeningMaterializedState`]'s
     /// `gat add` wording).
@@ -313,6 +346,11 @@ impl ProgressSpec {
 /// concrete implementations necessarily live in the root `gat` crate,
 /// a separate workspace member.
 pub trait ActivityBackend: Send + Sync {
+    /// Whether this backend consumes progress, including test observers.
+    fn is_enabled(&self) -> bool {
+        true
+    }
+
     fn inc(&self, delta: u64);
     fn set_activity(&self, activity: &ProgressActivity);
     fn finish(&self);
@@ -324,6 +362,10 @@ pub trait ActivityBackend: Send + Sync {
 struct NoopBackend;
 
 impl ActivityBackend for NoopBackend {
+    fn is_enabled(&self) -> bool {
+        false
+    }
+
     fn inc(&self, _delta: u64) {}
     fn set_activity(&self, _activity: &ProgressActivity) {}
     fn finish(&self) {}
@@ -340,6 +382,12 @@ pub struct ProgressHandle {
 }
 
 impl ProgressHandle {
+    /// Whether reporting work is needed for this task.
+    #[must_use]
+    pub fn is_enabled(&self) -> bool {
+        self.backend.is_enabled()
+    }
+
     /// Advance the logical item position by `delta` (e.g. one more file
     /// hashed, one more object fetched). Cheap: a thread-safe counter
     /// update only, never a direct terminal redraw.

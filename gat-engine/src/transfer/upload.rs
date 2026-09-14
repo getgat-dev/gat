@@ -6,7 +6,6 @@ use crate::remote_session::{RemoteHandle, RemoteSessionError};
 use gat_core::lexical_path::GatPath;
 use gat_core::name::RouteName;
 use gat_core::oid::Oid;
-use gat_core::progress::{ProgressActivity, ProgressHandle};
 use gat_io::RemoteError;
 use gat_io::{CacheError, CacheObject, CacheObjectOpenError};
 use std::error::Error;
@@ -513,7 +512,6 @@ impl ExecutedUpload {
 pub(crate) async fn execute_upload(
     executor: &RemoteExecutor,
     upload: PreparedUpload,
-    task: ProgressHandle,
 ) -> ExecutedUpload {
     let PreparedUpload {
         object,
@@ -529,9 +527,8 @@ pub(crate) async fn execute_upload(
                 executor,
                 job.handle.client().clone(),
                 job.payload.1.clone(),
-                job.payload.0.clone(),
+                job.payload.0.oid,
                 prepared,
-                task,
             )
             .await
         }
@@ -552,16 +549,12 @@ async fn upload_bytes(
     executor: &RemoteExecutor,
     client: gat_io::RemoteClient,
     source: CacheObject,
-    object: UploadObject,
+    oid: Oid,
     prepared: PreparedWrite,
-    task: ProgressHandle,
 ) -> Result<(), WorkerError> {
     if executor.is_cancelled() {
         return Err(WorkerError::Cancelled);
     }
-    task.set_activity(ProgressActivity::TransferringFile {
-        path: object.representative_path,
-    });
     let prepared = match prepared {
         PreparedWrite::File(write) => {
             let cancellation = executor.cancellation();
@@ -588,7 +581,7 @@ async fn upload_bytes(
             .await
             .map_err(WorkerError::from)??;
         return executor
-            .cancellable(client.write_object(&object.oid, bytes, prepared))
+            .cancellable(client.write_object(&oid, bytes, prepared))
             .await
             .map_err(|()| WorkerError::Cancelled)?
             .map_err(WorkerError::WriterOpen);
@@ -603,7 +596,7 @@ async fn upload_bytes(
     }
     let expected_size = reader.size();
     let mut writer = executor
-        .cancellable(client.open_writer(&object.oid, prepared))
+        .cancellable(client.open_writer(&oid, prepared))
         .await
         .map_err(|()| WorkerError::Cancelled)?
         .map_err(WorkerError::WriterOpen)?;
@@ -690,13 +683,6 @@ fn remote_io(error: RemoteError) -> std::io::Error {
 mod tests {
     use super::*;
 
-    struct Silent;
-    impl gat_core::progress::ActivityBackend for Silent {
-        fn inc(&self, _: u64) {}
-        fn set_activity(&self, _: &ProgressActivity) {}
-        fn finish(&self) {}
-    }
-
     #[test]
     fn file_upload_uses_one_worker_and_a_bounded_reservation_at_every_size() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -732,11 +718,10 @@ mod tests {
             );
             assert!(matches!(&prepared.prepared, Ok(PreparedWrite::File(_))));
             let before = executor.local_submissions();
-            let task = gat_core::progress::ProgressTask::from_backend(Arc::new(Silent));
             let lease = executor
                 .try_transfer(handles[0].id(), prepared.buffer_bytes())
                 .unwrap();
-            let result = runtime.block_on(execute_upload(&executor, prepared, task.handle()));
+            let result = runtime.block_on(execute_upload(&executor, prepared));
             drop(lease);
             assert!(result.result.is_ok());
             assert_eq!(executor.local_submissions() - before, 1);

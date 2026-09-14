@@ -577,6 +577,17 @@ pub struct CacheClient {
     memo: std::cell::RefCell<std::collections::HashMap<Oid, CacheObservation>>,
 }
 
+/// Coordinator notifications surrounding one cache verification subwindow.
+pub enum VerificationEvent<'a> {
+    Started {
+        oids: &'a [Oid],
+    },
+    Completed {
+        oids: &'a [Oid],
+        statuses: &'a [ObjectVerification],
+    },
+}
+
 /// Owned cache-verification work prepared by the coordinator.
 ///
 /// The object paths and prior proofs remain opaque to higher layers. This
@@ -958,6 +969,22 @@ impl CacheClient {
         oids: &[Oid],
         mut on_window: impl FnMut(&[Oid], &[ObjectVerification]) -> std::result::Result<(), E>,
     ) -> std::result::Result<(), E> {
+        self.verify_windows_unmemoized_observed(oids, |event| match event {
+            VerificationEvent::Started { .. } => Ok(()),
+            VerificationEvent::Completed { oids, statuses } => on_window(oids, statuses),
+        })
+    }
+
+    /// Verify bounded subwindows, notifying the coordinator before filesystem
+    /// work and after results and proof deltas are available.
+    ///
+    /// # Panics (debug only)
+    /// As with `verify_windows_unmemoized`, OIDs must be globally distinct.
+    pub fn verify_windows_unmemoized_observed<E: From<CacheError>>(
+        &self,
+        oids: &[Oid],
+        mut observe: impl FnMut(VerificationEvent<'_>) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), E> {
         // Debug-only dedup check spans the *whole* `oids` slice, not just
         // one window at a time: a duplicate more than one window apart
         // (e.g. oid 0 and oid `VERIFY_WINDOW + 5`) would silently pass a
@@ -982,6 +1009,8 @@ impl CacheClient {
                     "verify_windows_unmemoized requires globally deduplicated oids"
                 );
             }
+
+            observe(VerificationEvent::Started { oids: window })?;
 
             // A failed bulk proof lookup degrades to "no known priors"
             // for this window rather than aborting verification, same
@@ -1022,7 +1051,10 @@ impl CacheClient {
             // Best-effort, same reasoning as `verify` above.
             let _ = self.index.apply_many(&deltas);
 
-            on_window(window, &statuses)?;
+            observe(VerificationEvent::Completed {
+                oids: window,
+                statuses: &statuses,
+            })?;
         }
         Ok(())
     }
@@ -3290,6 +3322,45 @@ mod tests {
 
             assert_eq!(window_calls, 2, "expected one callback per bounded window");
             assert_eq!(seen, count);
+        }
+
+        #[test]
+        fn observed_verification_announces_each_subwindow_before_reading_objects() {
+            let tmp = tempfile::tempdir().unwrap();
+            let objects_dir = tmp.path().join("objects");
+            let _window = crate::cache::object::test_support::with_verify_window(2);
+            let oids = write_objects(&objects_dir, 3);
+            let cache = CacheClient::open(objects_dir.clone());
+            let mut started = Vec::new();
+            let mut completed = Vec::new();
+            cache
+                .verify_windows_unmemoized_observed(&oids, |event| -> Result<()> {
+                    match event {
+                        VerificationEvent::Started { oids } => {
+                            started.push(oids.len());
+                            // Removing the bytes at this boundary must affect this
+                            // batch's verification, proving the event precedes I/O.
+                            for oid in oids {
+                                std::fs::remove_file(
+                                    objects_dir.join(crate::cache::object_key_oid(oid)),
+                                )
+                                .unwrap();
+                            }
+                        }
+                        VerificationEvent::Completed { oids, statuses } => {
+                            completed.push(oids.len());
+                            assert!(
+                                statuses
+                                    .iter()
+                                    .all(|status| *status == ObjectVerification::Missing)
+                            );
+                        }
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(started, [2, 1]);
+            assert_eq!(completed, started);
         }
 
         #[test]
