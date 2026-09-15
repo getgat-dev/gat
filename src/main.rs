@@ -137,11 +137,13 @@ fn run_command(
     let repo = invocation.discover().map_err(Failure::from)?;
     let context = app::Context::new(repo);
 
-    // Hooks stay silent regardless of TTY (handled inside `commands::hook`
-    // itself via a hard-coded `NoopProgress`); every other invocation's
-    // progress policy is decided once, from execution settings -- never
-    // re-derived by individual commands.
-    let hook_mode = matches!(cli.command, cli::Command::Hook { .. });
+    // Internal Git commands stay silent, including repository recovery.
+    // Decide terminal policy once; dispatch also enforces silence for callers
+    // that supply their own reporter.
+    let hook_mode = matches!(
+        cli.command,
+        cli::Command::Hook { .. } | cli::Command::MergeDriver { .. }
+    );
     let progress = output::progress::for_environment(output::progress::ProgressOptions {
         hook_mode,
         quiet: false,

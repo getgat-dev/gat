@@ -2,8 +2,8 @@
     clippy::future_not_send,
     reason = "The coordinator polls these futures locally with block_on; only spawned work requires Send"
 )]
+use super::diagnostic_remote;
 use crate::operation::Operation;
-use crate::progress_reporting::Refresh;
 
 use crate::path_policy::{EffectivePathPolicy, ResolvedRemote};
 use crate::remote_catalog::{RemoteCatalog, RemoteId};
@@ -91,7 +91,8 @@ impl RemotePresenceError {
         obligation: &T,
         source: RemoteSessionError,
     ) -> Self {
-        let (remote_name, route_name, route) = diagnostic_remote(catalog, policy, obligation);
+        let (remote_name, route_name, route) =
+            diagnostic_remote(catalog, policy, obligation.resolved_remote());
         Self::RemoteOpen {
             remote_name,
             route_name,
@@ -110,7 +111,8 @@ impl RemotePresenceError {
         if matches!(source, PresenceProbeError::Cancelled) {
             return Self::Cancelled;
         }
-        let (remote_name, route_name, route) = diagnostic_remote(catalog, policy, obligation);
+        let (remote_name, route_name, route) =
+            diagnostic_remote(catalog, policy, obligation.resolved_remote());
         Self::PresenceCheck {
             remote_name,
             route_name,
@@ -119,21 +121,6 @@ impl RemotePresenceError {
             source: Box::new(source),
         }
     }
-}
-
-fn diagnostic_remote<T: RemotePresenceObligation>(
-    catalog: &RemoteCatalog,
-    policy: &EffectivePathPolicy,
-    obligation: &T,
-) -> (Arc<str>, Option<RouteName>, Option<GatPath>) {
-    let remote = obligation.resolved_remote();
-    let remote_name = catalog.name(remote.id());
-    let route = remote.route().map(|id| policy.route_descriptor(id));
-    (
-        remote_name,
-        route.map(|descriptor| descriptor.name.clone()),
-        route.map(|descriptor| descriptor.path.clone()),
-    )
 }
 
 /// Bounded, completion-order streaming presence check: calls `on_result` for
@@ -166,7 +153,7 @@ pub(crate) fn check_remote_presence_streaming<T: RemotePresenceObligation>(
     operation: &mut Operation<'_>,
     obligations: &[T],
     on_result: impl FnMut(RemotePresenceResult),
-    progress: &mut crate::PresenceProgress,
+    progress: &mut crate::ProgressUpdates,
 ) -> Result<(), RemotePresenceError> {
     if obligations.is_empty() {
         return Ok(());
@@ -200,7 +187,7 @@ pub(crate) fn check_remote_presence_streaming<T: RemotePresenceObligation>(
         }
         let handle = services
             .remotes
-            .open_handle(services.remotes_catalog, remote_id, progress.task())
+            .open_handle(services.remotes_catalog, remote_id, Some(progress.task()))
             .map_err(|source| {
                 RemotePresenceError::remote_open(
                     services.remotes_catalog,
@@ -225,7 +212,7 @@ pub(crate) fn check_remote_presence_streaming<T: RemotePresenceObligation>(
         pending.len(),
     );
 
-    progress.resume();
+    progress.set_activity(gat_core::progress::ProgressActivity::CheckingRemote);
     let outcome = tokio::runtime::Handle::current().block_on(drive_presence_groups(
         services.remote_executor,
         &handles,
@@ -289,7 +276,7 @@ pub(crate) fn fair_request_order(by_remote: &BTreeMap<RemoteId, Vec<usize>>) -> 
 
 struct PresenceObserver<'a, F> {
     on_result: F,
-    progress: &'a mut crate::PresenceProgress,
+    progress: &'a mut crate::ProgressUpdates,
 }
 
 /// Drives `pending` through `executor`, keeping at most `capacity` requests
@@ -320,7 +307,6 @@ where
     let mut active = SelectAll::new();
     let mut active_entries = 0;
     let mut first_error = None;
-    let mut timer = None;
     while !pending.is_empty() || active_entries > 0 {
         if executor.is_cancelled()
             && let Some(index) = pending.iter().min().copied()
@@ -358,7 +344,7 @@ where
                 && let Some(index) = pending.pop_front()
             {
                 let id = obligations[index].resolved_remote().id();
-                match executor.acquire_presence(id).await {
+                match progress.wait(executor.acquire_presence(id)).await {
                     Ok(lease) => {
                         active_entries = 1;
                         active.push(launch(
@@ -378,7 +364,7 @@ where
             break;
         }
         let (request_index, result) = progress
-            .next(&mut active, &mut timer)
+            .wait(active.next())
             .await
             .expect("admitted presence produces an outcome");
         let mut completed = Some((request_index, result));
@@ -386,7 +372,7 @@ where
             active_entries -= 1;
             match result {
                 Ok(present) => {
-                    progress.completed(present);
+                    progress.inc(1);
                     on_result(RemotePresenceResult {
                         request_index,
                         present,
@@ -456,7 +442,7 @@ where
         },
         PresenceObserver {
             on_result,
-            progress: &mut crate::PresenceProgress::default(),
+            progress: &mut crate::ProgressUpdates::default(),
         },
     )
     .await
@@ -524,6 +510,64 @@ mod tests {
         NonZeroUsize::new(n).unwrap()
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn progress_flushes_while_another_window_owns_presence_capacity() {
+        use gat_core::progress::{ActivityBackend, ProgressActivity, ProgressTask};
+        struct Counter(std::sync::atomic::AtomicU64);
+        impl ActivityBackend for Counter {
+            fn inc(&self, delta: u64) {
+                self.0.fetch_add(delta, Ordering::Relaxed);
+            }
+            fn set_activity(&self, _: &ProgressActivity) {}
+            fn finish(&self) {}
+        }
+        let executor = executor(2, 1);
+        let (_dir, handles) =
+            crate::remote_session::test_support::open_handles_on_current_runtime(&["a", "b"]);
+        let obligations: Vec<_> = handles
+            .iter()
+            .map(|handle| obligation(handle.id(), 0))
+            .collect();
+        let handles: BTreeMap<_, _> = handles
+            .into_iter()
+            .map(|handle| (handle.id(), handle))
+            .collect();
+        let held = executor.try_presence(obligations[0].remote.id()).unwrap();
+        let counter = Arc::new(Counter(std::sync::atomic::AtomicU64::new(0)));
+        let task = ProgressTask::from_backend(counter.clone());
+        let mut updates = crate::ProgressUpdates::new(task.handle());
+        {
+            let window = drive_presence_groups(
+                &executor,
+                &handles,
+                &obligations,
+                vec![0, 1],
+                2,
+                |_, entries| {
+                    futures::stream::iter(entries.into_iter().map(|(index, _, lease)| {
+                        drop(lease);
+                        (index, Ok::<_, PresenceProbeError>(true))
+                    }))
+                    .boxed()
+                },
+                PresenceObserver {
+                    on_result: |_| {},
+                    progress: &mut updates,
+                },
+            );
+            tokio::pin!(window);
+            assert!(futures::poll!(&mut window).is_pending());
+            assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+            tokio::time::advance(crate::progress_reporting::REFRESH_INTERVAL).await;
+            assert!(futures::poll!(&mut window).is_pending());
+            assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+            drop(held);
+            window.await.unwrap();
+        }
+        updates.flush();
+        assert_eq!(counter.0.load(Ordering::Relaxed), 2);
+    }
+
     #[test]
     fn production_presence_groups_full_batches_and_dispatches_the_partial_tail() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -545,7 +589,7 @@ mod tests {
                 },
                 PresenceObserver {
                     on_result: |result: RemotePresenceResult| seen.push(result.request_index),
-                    progress: &mut crate::PresenceProgress::default(),
+                    progress: &mut crate::ProgressUpdates::default(),
                 },
             ))
             .unwrap();
@@ -577,7 +621,7 @@ mod tests {
                 |handle, entries| presence_stream(&executor, handle.client().clone(), entries),
                 PresenceObserver {
                     on_result: |result: RemotePresenceResult| seen.push(result.request_index),
-                    progress: &mut crate::PresenceProgress::default(),
+                    progress: &mut crate::ProgressUpdates::default(),
                 },
             ))
             .unwrap_err();

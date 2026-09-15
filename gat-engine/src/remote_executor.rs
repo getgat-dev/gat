@@ -64,9 +64,9 @@ impl<T> RemoteJob<T> {
 /// Coordinator-only observation; never runs in a transfer worker.
 pub(crate) trait TransferObserver<R> {
     fn completed(&mut self, _index: usize, _result: &R) {}
-    fn report(&mut self, _active: usize, _force: bool) {}
-    fn deadline(&self) -> Option<tokio::time::Instant> {
-        None
+    fn flush(&mut self) {}
+    async fn refresh(&mut self) {
+        std::future::pending::<()>().await;
     }
 }
 impl<R> TransferObserver<R> for () {}
@@ -333,7 +333,6 @@ impl RemoteExecutor {
         let mut active = FuturesUnordered::new();
         let mut results: Vec<Option<R>> = (0..jobs.len()).map(|_| None).collect();
         let mut frontier = jobs.len();
-        let mut refresh_timer = None;
         loop {
             let changed = self.transfer.notified();
             tokio::pin!(changed);
@@ -379,16 +378,10 @@ impl RemoteExecutor {
                     break;
                 }
             }
-            observer.report(active.len(), false);
-            let deadline = observer.deadline();
-            let refresh = crate::progress_reporting::wait_for_refresh(&mut refresh_timer, deadline);
             let completed = tokio::select! {
                 biased;
                 () = self.cancellation.cancelled(), if cancelled.is_some() && !self.is_cancelled() => continue,
-                () = refresh, if deadline.is_some() => {
-                    observer.report(active.len(), true);
-                    continue;
-                },
+                () = observer.refresh() => continue,
                 completed = active.next() => completed,
             };
             if let Some((index, result)) = completed {
@@ -402,12 +395,13 @@ impl RemoteExecutor {
             } else {
                 // Another coordinator can own capacity from this operation.
                 tokio::select! {
+                    () = observer.refresh() => {},
                     () = changed => {},
                     () = self.cancellation.cancelled(), if cancelled.is_some() => {},
                 }
             }
         }
-        observer.report(0, true);
+        observer.flush();
         results
     }
 
@@ -727,7 +721,6 @@ mod tests {
     async fn transfer_observer_refreshes_while_a_download_is_stalled() {
         struct Observer {
             completed: Vec<usize>,
-            active: usize,
             deadline: Option<tokio::time::Instant>,
             release: Option<tokio::sync::oneshot::Sender<()>>,
         }
@@ -739,16 +732,18 @@ mod tests {
                         Some(tokio::time::Instant::now() + std::time::Duration::from_millis(100));
                 }
             }
-            fn report(&mut self, active: usize, force: bool) {
-                self.active = active;
-                if force && self.deadline.take().is_some() {
-                    assert_eq!(active, 1);
+            fn flush(&mut self) {
+                if self.deadline.take().is_some() {
                     assert_eq!(self.completed, [1]);
                     self.release.take().unwrap().send(()).unwrap();
                 }
             }
-            fn deadline(&self) -> Option<tokio::time::Instant> {
-                self.deadline
+            async fn refresh(&mut self) {
+                let Some(deadline) = self.deadline else {
+                    return std::future::pending().await;
+                };
+                tokio::time::sleep_until(deadline).await;
+                self.flush();
             }
         }
         let executor = executor(2, 1);
@@ -763,7 +758,6 @@ mod tests {
         let released = Mutex::new(Some(released));
         let mut observer = Observer {
             completed: Vec::new(),
-            active: 0,
             deadline: None,
             release: Some(release),
         };
@@ -787,7 +781,58 @@ mod tests {
             .await;
         assert_eq!(results, [Some(Ok(0)), Some(Ok(1))]);
         assert_eq!(observer.completed, [1, 0]);
-        assert_eq!(observer.active, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn progress_flushes_while_another_window_owns_transfer_capacity() {
+        use gat_core::progress::{ActivityBackend, ProgressActivity, ProgressTask};
+        struct Counter(std::sync::atomic::AtomicU64);
+        impl ActivityBackend for Counter {
+            fn inc(&self, delta: u64) {
+                self.0.fetch_add(delta, Ordering::Relaxed);
+            }
+            fn set_activity(&self, _: &ProgressActivity) {}
+            fn finish(&self) {}
+        }
+        let executor = executor(2, 1);
+        let (_dir, handles) =
+            crate::remote_session::test_support::open_handles_on_current_runtime(&["a", "b"]);
+        let jobs: Vec<_> = handles
+            .into_iter()
+            .enumerate()
+            .map(|(index, handle)| RemoteJob::new(handle, index))
+            .collect();
+        let counter = Arc::new(Counter(std::sync::atomic::AtomicU64::new(0)));
+        let task = ProgressTask::from_backend(counter.clone());
+        let mut updates = crate::ProgressUpdates::new(task.handle());
+        for completed in [0, 2] {
+            let held = executor.try_transfer(jobs[0].handle.id(), 1).unwrap();
+            let mut observer =
+                updates.observe(|_, result: &Result<usize, ()>| u64::from(result.is_ok()));
+            let window = executor.run_transfer_window_until(
+                &jobs,
+                |_, index| {
+                    let index = *index;
+                    async move { Ok(index) }
+                },
+                Result::is_err,
+                None,
+                &mut observer,
+            );
+            tokio::pin!(window);
+            assert!(futures::poll!(&mut window).is_pending());
+            assert_eq!(counter.0.load(Ordering::Relaxed), completed);
+            tokio::time::advance(crate::progress_reporting::REFRESH_INTERVAL).await;
+            assert!(futures::poll!(&mut window).is_pending());
+            assert_eq!(
+                counter.0.load(Ordering::Relaxed),
+                completed + 1,
+                "completed work must be visible while the remaining job waits for capacity"
+            );
+            drop(held);
+            assert_eq!(window.await, [Some(Ok(0)), Some(Ok(1))]);
+            assert_eq!(counter.0.load(Ordering::Relaxed), completed + 2);
+        }
     }
 
     #[test]

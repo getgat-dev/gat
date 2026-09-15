@@ -6,8 +6,6 @@ mod planner;
 mod presence;
 mod publish;
 mod receive;
-mod receive_progress;
-pub use receive_progress::{FetchProgress, RepairProgress};
 mod repair;
 mod selection;
 mod upload;
@@ -21,9 +19,7 @@ pub use download::{
 pub use planner::{StreamingWindow, WindowBatch};
 pub(crate) use presence::check_remote_presence_streaming;
 pub use presence::{RemotePresenceError, RemotePresenceObligation, RemotePresenceResult};
-pub use publish::{
-    PublishError, PublishObject, PublishOutcome, PublishProgress, PublishStatus, publish_window,
-};
+pub use publish::{PublishError, PublishObject, PublishOutcome, PublishStatus, publish_window};
 pub use repair::{
     RepairCacheFailureKind, RepairError, RepairObject, RepairOutcome, RepairRemoteFailureKind,
     repair_window,
@@ -33,6 +29,40 @@ pub use selection::{SelectedObject, visit_current_state_objects, visit_history_o
 pub use upload::{
     UploadCacheFailureKind, UploadError, UploadRemoteFailureKind, UploadWriteFailureKind,
 };
+
+fn cache_io_kind(source: &gat_io::CacheError) -> Option<std::io::ErrorKind> {
+    use gat_io::CacheError;
+    match source {
+        CacheError::DirectoryUnavailable { source, .. }
+        | CacheError::TempFileUnavailable { source, .. }
+        | CacheError::PathUnreadable { source, .. }
+        | CacheError::SourceUnreadable { source }
+        | CacheError::EntryUnwritable { source, .. }
+        | CacheError::EntryUnreadable { source, .. } => Some(source.kind()),
+        CacheError::MaterializationFailed { .. }
+        | CacheError::State(_)
+        | CacheError::Oid(_)
+        | CacheError::Atomic(_) => None,
+    }
+}
+
+// Keep remote and route metadata consistent across transfer error types.
+fn diagnostic_remote(
+    catalog: &crate::remote_catalog::RemoteCatalog,
+    policy: &crate::path_policy::EffectivePathPolicy,
+    remote: &crate::path_policy::ResolvedRemote,
+) -> (
+    std::sync::Arc<str>,
+    Option<gat_core::name::RouteName>,
+    Option<gat_core::lexical_path::GatPath>,
+) {
+    let route = remote.route().map(|id| policy.route_descriptor(id));
+    (
+        catalog.name(remote.id()),
+        route.map(|descriptor| descriptor.name.clone()),
+        route.map(|descriptor| descriptor.path.clone()),
+    )
+}
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
@@ -47,6 +77,7 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ProgressUpdates;
     use crate::{RemoteCatalog, RemoteIdentityError, ResolvedRemote};
     use gat_core::config::{RemoteConfig, RemotesConfig};
     use gat_core::lexical_path::GatPath;
@@ -80,7 +111,7 @@ mod tests {
             download_window(
                 &mut operation,
                 downloads,
-                &mut FetchProgress::new(progress.clone())
+                &mut ProgressUpdates::new(progress.clone())
             ),
             Err(DownloadError::Identity(RemoteIdentityError::ForeignOwner))
         ));
@@ -89,7 +120,7 @@ mod tests {
             operation.check_remote_presence_streaming(
                 &objects,
                 |_| panic!("foreign object reported"),
-                &mut PresenceProgress::new(progress.clone())
+                &mut ProgressUpdates::new(progress.clone())
             ),
             Err(RemotePresenceError::Identity(
                 RemoteIdentityError::ForeignOwner
@@ -99,14 +130,14 @@ mod tests {
             publish_window(
                 &mut operation,
                 objects,
-                &mut PublishProgress::new(progress.clone())
+                &mut ProgressUpdates::new(progress.clone())
             ),
             Err(PublishError::Presence(RemotePresenceError::Identity(
                 RemoteIdentityError::ForeignOwner
             )))
         ));
         let repairs = vec![RepairObject::new(oid, path, remote, 1)];
-        let outcome = repair_window(&mut operation, repairs, &mut RepairProgress::new(progress));
+        let outcome = repair_window(&mut operation, repairs, &mut ProgressUpdates::new(progress));
         assert!(matches!(
             outcome.results.as_slice(),
             [Err(RepairError::Identity(
@@ -116,6 +147,3 @@ mod tests {
         assert_eq!(crate::remote_session::test_support::remote_opens(), opens);
     }
 }
-
-mod presence_progress;
-pub use presence_progress::PresenceProgress;

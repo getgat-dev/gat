@@ -303,7 +303,6 @@ fn mark_bare_repository(
 fn additional_repositories(
     options: &GcOptions<'_>,
     keep: &mut HashSet<Oid>,
-    progress: &ProgressHandle,
     limits: GcLimits,
     cancellation: &crate::TransferCancellation,
 ) -> Vec<GcRepositoryIssue> {
@@ -321,28 +320,15 @@ fn additional_repositories(
         .filter(|location| seen.insert(location.as_location_str()))
         .collect();
     if !candidates.is_empty() {
-        let mut reporting = crate::ParallelProgress::new(
-            progress.clone(),
-            crate::ParallelWork::InspectingRepositories,
+        inspect_in_bounded_batches(
+            &candidates,
+            limits.repository_concurrency,
+            |location| inspect_additional_repository(location, selection, cancellation),
+            |index, result| match result {
+                Ok(marked) => merge_keep_set(keep, marked),
+                Err(issue) => issues.push((index, issue)),
+            },
         );
-        reporting.run(|work| {
-            inspect_in_bounded_batches(
-                &candidates,
-                limits.repository_concurrency,
-                |location| {
-                    let item = work.start();
-                    let result = inspect_additional_repository(location, selection, cancellation);
-                    if result.is_ok() {
-                        item.complete();
-                    }
-                    result
-                },
-                |index, result| match result {
-                    Ok(marked) => merge_keep_set(keep, marked),
-                    Err(issue) => issues.push((index, issue)),
-                },
-            );
-        });
     }
     issues.sort_unstable_by_key(|(index, _)| *index);
     issues.into_iter().map(|(_, issue)| issue).collect()
@@ -351,7 +337,6 @@ fn additional_repositories(
 fn compute_keep_set(
     repo: &Repository,
     options: &GcOptions<'_>,
-    progress: &ProgressHandle,
     limits: GcLimits,
     scope: &'static str,
 ) -> Result<(HashSet<Oid>, bool, usize)> {
@@ -363,7 +348,7 @@ fn compute_keep_set(
     if shallow && !options.dry_run && !options.unsafe_override {
         return Err(GcError::ShallowHistory { scope });
     }
-    let issues = additional_repositories(options, &mut keep, progress, limits, &repo.cancellation);
+    let issues = additional_repositories(options, &mut keep, limits, &repo.cancellation);
     // Even an unsafe override must never sweep from an interrupted keep set.
     if repo.cancellation.is_cancelled() {
         return Err(GcError::Cancelled);
@@ -387,7 +372,7 @@ fn gc_local(
     let (keep, shallow, incomplete) = with_progress_typed(
         progress,
         ProgressSpec::indeterminate(ProgressOperation::ComputingReachability),
-        |task| compute_keep_set(repo, options, &task.handle(), limits, "local cache"),
+        |_| compute_keep_set(repo, options, limits, "local cache"),
     )?;
     let uncertain_keep_set = shallow || incomplete != 0;
     let task = progress.begin(ProgressSpec::items(
@@ -514,7 +499,7 @@ fn gc_remote_with_limits(
     let (keep, shallow, incomplete) = with_progress_typed(
         progress,
         ProgressSpec::indeterminate(ProgressOperation::ComputingReachability),
-        |task| compute_keep_set(repo, options, &task.handle(), limits, "remote"),
+        |_| compute_keep_set(repo, options, limits, "remote"),
     )?;
     let listing = progress.begin(ProgressSpec::items(
         ProgressOperation::ListingRemoteObjects,

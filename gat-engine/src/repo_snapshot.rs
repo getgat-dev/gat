@@ -439,12 +439,8 @@ impl Repo {
     {
         let (guard, config) = lock_and_load_config(self, progress)?;
         let loading = progress.begin(ProgressSpec::indeterminate(ProgressOperation::LoadingState));
-        loading
-            .handle()
-            .set_activity(ProgressActivity::OpeningMaterializedState);
-        loading
-            .handle()
-            .set_activity(ProgressActivity::RefreshingDesiredState);
+        loading.set_activity(ProgressActivity::OpeningMaterializedState);
+        loading.set_activity(ProgressActivity::RefreshingDesiredState);
         let desired = self.desired_state(&config)?;
         drop(guard);
         loading.finish();
@@ -513,9 +509,7 @@ pub(crate) fn recover_and_load_config(
     // this never nests inside it) rather than left uncovered before the
     // caller's own task begins later.
     let loading = progress.begin(ProgressSpec::indeterminate(ProgressOperation::LoadingState));
-    loading
-        .handle()
-        .set_activity(ProgressActivity::RefreshingDesiredState);
+    loading.set_activity(ProgressActivity::RefreshingDesiredState);
     let desired_revision = crate::repository_state::current_desired_revision(repo)?;
     loading.finish();
     Ok(Snapshot::new(

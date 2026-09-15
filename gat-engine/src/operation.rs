@@ -133,7 +133,7 @@ impl<'repo> Operation<'repo> {
         &mut self,
         obligations: &[T],
         on_result: impl FnMut(crate::transfer::RemotePresenceResult),
-        progress: &mut crate::PresenceProgress,
+        progress: &mut crate::ProgressUpdates,
     ) -> std::result::Result<(), crate::transfer::RemotePresenceError> {
         crate::transfer::check_remote_presence_streaming(self, obligations, on_result, progress)
     }

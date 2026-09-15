@@ -328,14 +328,7 @@ fn remote_status_progress_reports_selection_resolution_and_remote_checks() {
         task.activities,
         vec![
             ProgressActivity::ResolvingSelection,
-            ProgressActivity::RemotePresence {
-                present: 0,
-                missing: 0
-            },
-            ProgressActivity::RemotePresence {
-                present: 0,
-                missing: 1
-            },
+            ProgressActivity::CheckingRemote,
         ]
     );
     assert_eq!(task.position, outcome.checked as u64);
@@ -404,10 +397,7 @@ fn remote_status_position_equals_checked_count_and_is_never_doubled() {
         );
         assert_eq!(
             task.activities.last(),
-            Some(&gat_core::progress::ProgressActivity::RemotePresence {
-                present: 0,
-                missing: count as u64,
-            })
+            Some(&gat_core::progress::ProgressActivity::CheckingRemote)
         );
         assert_eq!(outcome.checked, count);
         assert_eq!(

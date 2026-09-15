@@ -131,13 +131,17 @@ trivially_copy_pass_by_ref = "allow"
 # RAII guards follow explicit lexical scopes; moving their release can change synchronization.
 significant_drop_tightening = "allow"
 
-# Maximum performance for binaries we publish.
+# Keep source locations in development backtraces without full debugger metadata.
+[profile.dev]
+debug = "line-tables-only"
+
+# Optimize published binaries at the expense of build time.
 [profile.release]
 lto = "fat"
 codegen-units = 1
 strip = true
 
-# Fast local builds.
+# Incremental optimized local installs.
 [profile.incremental]
 inherits = "release"
 lto = "thin"

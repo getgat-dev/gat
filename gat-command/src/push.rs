@@ -10,9 +10,9 @@ use gat_core::progress::{
 };
 use gat_core::selection::Selection;
 use gat_engine::{
-    DesiredOperation, HistoryError, PublishError, PublishObject, PublishProgress, PublishStatus,
+    DesiredOperation, HistoryError, ProgressUpdates, PublishError, PublishObject, PublishStatus,
     RemoteCatalogError, RemoteId, RemotePresenceError, RemoteSessionError, Repository,
-    ResolvedRemote, StreamingWindow, UnknownRemoteOverrideError, UploadError,
+    ResolvedRemote, SelectedObject, StreamingWindow, UnknownRemoteOverrideError, UploadError,
     visit_current_state_objects, visit_history_objects,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -135,16 +135,18 @@ pub fn push_with_desired_operation(
     let task = pushing.handle();
     task.set_activity(ProgressActivity::selection_or_state(history_selected));
 
-    let mut publication = PublishProgress::new(task);
-    let mut visit = |path: &GatPath, oid: Oid| -> Result<(), PushError> {
+    let mut publication = ProgressUpdates::new(task);
+    let mut visit = |object: SelectedObject| -> Result<(), PushError> {
+        let path = object.representative_path;
+        let oid = object.oid;
         let selected_index = next_index;
         next_index += 1;
         let policy = operation.policy();
-        if !allow_mount_owned && let Some(owner) = policy.owner_for_path(path) {
+        if !allow_mount_owned && let Some(owner) = policy.owner_for_path(&path) {
             skipped.push((
                 selected_index,
                 PushSkip {
-                    path: path.clone(),
+                    path,
                     reason: PushSkipReason::MountOwned {
                         owner_name: owner.name.clone(),
                         owner_target: owner.target.clone(),
@@ -155,7 +157,7 @@ pub fn push_with_desired_operation(
         }
 
         let remote = policy
-            .resolved_remote_for_path(operation.remotes_catalog(), request.remote, path)?
+            .resolved_remote_for_path(operation.remotes_catalog(), request.remote, &path)?
             .ok_or_else(|| super::MissingRemoteConfigError { path: path.clone() })?;
         root_owned_oids.insert(oid);
         let key = (remote.id(), oid);
@@ -163,7 +165,7 @@ pub fn push_with_desired_operation(
             key,
             || PushObligation {
                 oid,
-                representative_path: path.clone(),
+                representative_path: path,
                 remote,
                 selected_index,
             },
@@ -180,15 +182,11 @@ pub fn push_with_desired_operation(
 
     let shallow = match request.source {
         PushSource::Current => {
-            visit_current_state_objects(desired_view, &selection, |object| {
-                visit(&object.representative_path, object.oid)
-            })?;
+            visit_current_state_objects(desired_view, &selection, &mut visit)?;
             false
         }
         PushSource::History(history) => {
-            visit_history_objects(repo, history, &selection, |object| {
-                visit(&object.representative_path, object.oid)
-            })?
+            visit_history_objects(repo, history, &selection, &mut visit)?
         }
     };
 
@@ -230,7 +228,7 @@ fn run_push_window(
     operation: &mut gat_engine::SelectionOperation<'_, '_>,
     obligations: std::vec::Drain<'_, PushObligation>,
     skipped: &mut Vec<(usize, PushSkip)>,
-    task: &mut PublishProgress,
+    task: &mut ProgressUpdates,
 ) -> Result<(), PushError> {
     #[cfg(any(test, feature = "test-support"))]
     test_support::record_push_window(obligations.len());
@@ -263,13 +261,9 @@ fn run_push_window(
             PublishStatus::CacheCorrupt => Some(PushSkipReason::CacheCorrupt),
         };
         if let Some(reason) = reason {
+            // Obligations retain selection order, so the first skip is earliest.
             cache_skips
                 .entry(oid)
-                .and_modify(|existing| {
-                    if selected_index < existing.0 {
-                        *existing = (selected_index, path.clone(), reason.clone());
-                    }
-                })
                 .or_insert((selected_index, path, reason));
         }
     }

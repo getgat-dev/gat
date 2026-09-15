@@ -1,4 +1,5 @@
-use super::FetchProgress;
+use super::{cache_io_kind, diagnostic_remote};
+use crate::ProgressUpdates;
 use crate::operation::Operation;
 use crate::path_policy::{EffectivePathPolicy, ResolvedRemote};
 use crate::remote_catalog::RemoteCatalog;
@@ -7,6 +8,7 @@ use crate::remote_session::RemoteSessionError;
 use gat_core::lexical_path::GatPath;
 use gat_core::name::RouteName;
 use gat_core::oid::Oid;
+use gat_core::progress::ProgressActivity;
 use gat_io::RemoteError;
 use gat_io::{CacheError, CachePublication, ObjectVerification};
 use std::error::Error;
@@ -185,20 +187,6 @@ impl From<DownloadError> for WindowError {
     }
 }
 
-fn diagnostic_remote(
-    catalog: &RemoteCatalog,
-    policy: &EffectivePathPolicy,
-    object: &DownloadObject,
-) -> (Arc<str>, Option<RouteName>, Option<GatPath>) {
-    let remote_name = catalog.name(object.remote.id());
-    let route = object.remote.route().map(|id| policy.route_descriptor(id));
-    (
-        remote_name,
-        route.map(|descriptor| descriptor.name.clone()),
-        route.map(|descriptor| descriptor.path.clone()),
-    )
-}
-
 const fn remote_kind(source: &RemoteError) -> DownloadRemoteFailureKind {
     match source {
         RemoteError::PermissionDenied { .. } => DownloadRemoteFailureKind::PermissionDenied,
@@ -218,21 +206,7 @@ const fn remote_kind(source: &RemoteError) -> DownloadRemoteFailureKind {
 }
 
 fn cache_kind(source: &CacheError) -> DownloadCacheFailureKind {
-    let permission_denied = match source {
-        CacheError::DirectoryUnavailable { source, .. }
-        | CacheError::TempFileUnavailable { source, .. }
-        | CacheError::PathUnreadable { source, .. }
-        | CacheError::SourceUnreadable { source }
-        | CacheError::EntryUnwritable { source, .. }
-        | CacheError::EntryUnreadable { source, .. } => {
-            source.kind() == std::io::ErrorKind::PermissionDenied
-        }
-        CacheError::MaterializationFailed { .. }
-        | CacheError::State(_)
-        | CacheError::Oid(_)
-        | CacheError::Atomic(_) => false,
-    };
-    if permission_denied {
+    if cache_io_kind(source) == Some(std::io::ErrorKind::PermissionDenied) {
         DownloadCacheFailureKind::PermissionDenied
     } else {
         DownloadCacheFailureKind::Unavailable
@@ -245,7 +219,7 @@ fn remote_open(
     object: &DownloadObject,
     source: RemoteSessionError,
 ) -> DownloadError {
-    let (remote_name, route_name, route) = diagnostic_remote(catalog, policy, object);
+    let (remote_name, route_name, route) = diagnostic_remote(catalog, policy, &object.remote);
     DownloadError::RemoteOpen {
         remote_name,
         route_name,
@@ -265,7 +239,8 @@ fn worker_error(
         WorkerError::Cancelled => DownloadError::Cancelled,
         WorkerError::Remote(source) => {
             let kind = remote_kind(&source);
-            let (remote_name, route_name, route) = diagnostic_remote(catalog, policy, object);
+            let (remote_name, route_name, route) =
+                diagnostic_remote(catalog, policy, &object.remote);
             DownloadError::RemoteRead {
                 kind,
                 remote_name,
@@ -287,7 +262,8 @@ fn worker_error(
                 | std::io::ErrorKind::UnexpectedEof => DownloadRemoteFailureKind::Unavailable,
                 _ => DownloadRemoteFailureKind::OperationFailed,
             };
-            let (remote_name, route_name, route) = diagnostic_remote(catalog, policy, object);
+            let (remote_name, route_name, route) =
+                diagnostic_remote(catalog, policy, &object.remote);
             DownloadError::RemoteRead {
                 kind,
                 remote_name,
@@ -319,7 +295,7 @@ fn worker_error(
 pub fn download_window(
     operation: &mut Operation<'_>,
     objects: Vec<DownloadObject>,
-    progress: &mut FetchProgress,
+    progress: &mut ProgressUpdates,
 ) -> Result<DownloadOutcome, DownloadError> {
     if objects.is_empty() {
         return Ok(DownloadOutcome::default());
@@ -331,6 +307,7 @@ pub fn download_window(
             .and_then(|()| operation.policy().validate_remote(&object.remote))
             .map_err(DownloadError::Identity)?;
     }
+    progress.set_activity(ProgressActivity::Working);
     let services = operation.window_services();
     let cache_writer = services.cache_root.writer();
     let window_oids: Vec<Oid> = objects.iter().map(|object| object.oid).collect();
@@ -341,14 +318,7 @@ pub fn download_window(
     let result: Result<(), WindowError> = services.cache_session.verify_windows_unmemoized(
         services.cache_root,
         &window_oids,
-        |event| {
-            let (verify_oids, status_window) = match event {
-                gat_io::VerificationEvent::Started { oids } => {
-                    progress.verifying(oids.len());
-                    return Ok(Vec::new());
-                }
-                gat_io::VerificationEvent::Completed { oids, statuses } => (oids, statuses),
-            };
+        |verify_oids, status_window| {
             let object_window = &objects[verified_offset..verified_offset + verify_oids.len()];
             verified_offset += verify_oids.len();
 
@@ -356,7 +326,6 @@ pub fn download_window(
                 .iter()
                 .filter(|status| **status != ObjectVerification::Valid)
                 .count();
-            progress.verified(status_window.len(), status_window.len() - missing);
             let mut jobs = Vec::with_capacity(missing);
             for (index, status) in status_window.iter().enumerate() {
                 if *status == ObjectVerification::Valid {
@@ -371,11 +340,13 @@ pub fn download_window(
                         Some(progress.task()),
                     )
                     .map_err(|source| {
-                        progress.rejected();
                         remote_open(services.remotes_catalog, services.policy, object, source)
                     })?;
                 jobs.push(RemoteJob::new(handle, index));
             }
+            progress.set_activity(ProgressActivity::Working);
+            let mut observer =
+                progress.observe(|_, result: &Result<_, WorkerError>| u64::from(result.is_ok()));
             let results = services.remote_executor.run_download_window(
                 &jobs,
                 |handle, index| {
@@ -388,7 +359,7 @@ pub fn download_window(
                     }
                 },
                 || WorkerError::Cancelled,
-                &mut progress.observe(),
+                &mut observer,
             );
 
             let mut publications = Vec::<CachePublication>::new();

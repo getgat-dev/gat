@@ -318,7 +318,7 @@ impl<'repo> DesiredStateSession<'repo> {
         files: &[GatPath],
         strategy: IngestStrategy,
         large_file_threshold: u64,
-        progress: &gat_core::progress::WorkProgress,
+        progress: &gat_core::progress::WorkProgress<'_>,
     ) -> Result<Vec<PreparedMaterialization>, MaterializationPreparationError> {
         if !files.is_empty() {
             cache.prepare_write()?;
@@ -329,7 +329,6 @@ impl<'repo> DesiredStateSession<'repo> {
             let results = window
                 .par_iter()
                 .map(|path| {
-                    let item = progress.start();
                     let result = worktree::ingest_file(
                         self.layout.root_path(),
                         objects_dir,
@@ -337,7 +336,7 @@ impl<'repo> DesiredStateSession<'repo> {
                         strategy,
                         large_file_threshold,
                     )?;
-                    item.complete();
+                    progress.inc(1);
                     Ok((
                         PreparedMaterialization::new(
                             Entry {

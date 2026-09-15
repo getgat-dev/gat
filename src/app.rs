@@ -582,6 +582,14 @@ pub fn run(cli: Cli, context: &Context, progress: &dyn ProgressReporter) -> Resu
     // hooks via `hook`) refreshes excludes itself, right after saving the
     // lock. That per-command choice is the explicit exclude-sync policy;
     // this dispatcher deliberately does not add a second, blanket one.
+    let progress = if matches!(
+        cli.command,
+        Command::Hook { .. } | Command::MergeDriver { .. }
+    ) {
+        &NoopProgress as &dyn ProgressReporter
+    } else {
+        progress
+    };
     let dispatch = move || -> Result<Outcome> {
         // Commands with a coherent acquisition barrier recover there, under
         // the same lock as config/state capture. System repair must enter

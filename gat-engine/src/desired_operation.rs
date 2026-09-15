@@ -108,7 +108,7 @@ impl<'repo> SelectionOperation<'_, 'repo> {
         &mut self,
         obligations: &[T],
         on_result: impl FnMut(crate::RemotePresenceResult),
-        progress: &mut crate::PresenceProgress,
+        progress: &mut crate::ProgressUpdates,
     ) -> std::result::Result<(), crate::RemotePresenceError> {
         self.operation
             .check_remote_presence_streaming(obligations, on_result, progress)
@@ -116,14 +116,14 @@ impl<'repo> SelectionOperation<'_, 'repo> {
     pub fn download_window(
         &mut self,
         objects: Vec<crate::DownloadObject>,
-        progress: &mut crate::FetchProgress,
+        progress: &mut crate::ProgressUpdates,
     ) -> std::result::Result<crate::DownloadOutcome, crate::DownloadError> {
         crate::download_window(self.operation, objects, progress)
     }
     pub fn publish_window(
         &mut self,
         objects: Vec<crate::PublishObject>,
-        progress: &mut crate::PublishProgress,
+        progress: &mut crate::ProgressUpdates,
     ) -> std::result::Result<crate::PublishOutcome, crate::PublishError> {
         crate::publish_window(self.operation, objects, progress)
     }

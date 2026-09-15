@@ -256,10 +256,10 @@ mod tests {
             Some(3),
         ));
         task.inc(1);
-        task.set_activity(ProgressActivity::HashingFiles(Default::default()));
+        task.set_activity(ProgressActivity::CheckingReuseStatus);
         let handle = task.handle();
         handle.inc(1);
-        handle.set_activity(ProgressActivity::HashingFiles(Default::default()));
+        handle.set_activity(ProgressActivity::CheckingReuseStatus);
         task.finish();
         NoopProgress.finish_all();
     }

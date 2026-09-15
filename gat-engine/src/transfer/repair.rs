@@ -1,3 +1,4 @@
+use super::{cache_io_kind, diagnostic_remote};
 use crate::operation::Operation;
 use crate::path_policy::{EffectivePathPolicy, ResolvedRemote};
 use crate::remote_catalog::{RemoteCatalog, RemoteId};
@@ -144,20 +145,6 @@ pub struct RepairOutcome {
 
 use super::receive::{ReceiveError as WorkerError, receive};
 
-fn diagnostic_remote(
-    catalog: &RemoteCatalog,
-    policy: &EffectivePathPolicy,
-    object: &RepairObject,
-) -> (Arc<str>, Option<RouteName>, Option<GatPath>) {
-    let remote_name = catalog.name(object.remote.id());
-    let route = object.remote.route().map(|id| policy.route_descriptor(id));
-    (
-        remote_name,
-        route.map(|descriptor| descriptor.name.clone()),
-        route.map(|descriptor| descriptor.path.clone()),
-    )
-}
-
 const fn remote_kind(source: &RemoteError) -> RepairRemoteFailureKind {
     match source {
         RemoteError::PermissionDenied { .. } => RepairRemoteFailureKind::PermissionDenied,
@@ -177,21 +164,7 @@ const fn remote_kind(source: &RemoteError) -> RepairRemoteFailureKind {
 }
 
 fn cache_kind(source: &CacheError) -> RepairCacheFailureKind {
-    let permission_denied = match source {
-        CacheError::DirectoryUnavailable { source, .. }
-        | CacheError::TempFileUnavailable { source, .. }
-        | CacheError::PathUnreadable { source, .. }
-        | CacheError::SourceUnreadable { source }
-        | CacheError::EntryUnwritable { source, .. }
-        | CacheError::EntryUnreadable { source, .. } => {
-            source.kind() == std::io::ErrorKind::PermissionDenied
-        }
-        CacheError::MaterializationFailed { .. }
-        | CacheError::State(_)
-        | CacheError::Oid(_)
-        | CacheError::Atomic(_) => false,
-    };
-    if permission_denied {
+    if cache_io_kind(source) == Some(std::io::ErrorKind::PermissionDenied) {
         RepairCacheFailureKind::PermissionDenied
     } else {
         RepairCacheFailureKind::Unavailable
@@ -208,7 +181,8 @@ fn worker_error(
         WorkerError::Cancelled => RepairError::Cancelled,
         WorkerError::Remote(source) => {
             let kind = remote_kind(&source);
-            let (remote_name, route_name, route) = diagnostic_remote(catalog, policy, object);
+            let (remote_name, route_name, route) =
+                diagnostic_remote(catalog, policy, &object.remote);
             RepairError::RemoteRead {
                 kind,
                 remote_name,
@@ -230,7 +204,8 @@ fn worker_error(
                 | std::io::ErrorKind::UnexpectedEof => RepairRemoteFailureKind::Unavailable,
                 _ => RepairRemoteFailureKind::OperationFailed,
             };
-            let (remote_name, route_name, route) = diagnostic_remote(catalog, policy, object);
+            let (remote_name, route_name, route) =
+                diagnostic_remote(catalog, policy, &object.remote);
             RepairError::RemoteRead {
                 kind,
                 remote_name,
@@ -268,7 +243,7 @@ fn worker_error(
 pub fn repair_window(
     operation: &mut Operation<'_>,
     objects: Vec<RepairObject>,
-    progress: &mut super::RepairProgress,
+    progress: &mut crate::ProgressUpdates,
 ) -> RepairOutcome {
     if objects.is_empty() {
         return RepairOutcome::default();
@@ -286,7 +261,7 @@ pub fn repair_window(
             .err()
     }) {
         for object in &objects {
-            progress.rejected(object.entries);
+            progress.inc(object.entries);
         }
         progress.flush();
         return RepairOutcome {
@@ -323,8 +298,8 @@ pub fn repair_window(
     for (index, object) in objects.iter().enumerate() {
         if let Some(source) = unavailable.get(&object.remote.id()) {
             let (remote_name, route_name, route) =
-                diagnostic_remote(services.remotes_catalog, services.policy, object);
-            progress.rejected(object.entries);
+                diagnostic_remote(services.remotes_catalog, services.policy, &object.remote);
+            progress.inc(object.entries);
             results[index] = Some(Err(RepairError::RemoteOpen {
                 remote_name,
                 route_name,
@@ -340,6 +315,7 @@ pub fn repair_window(
     #[cfg(any(test, feature = "test-support"))]
     test_support::record_attempts(jobs.len());
 
+    progress.set_activity(gat_core::progress::ProgressActivity::Working);
     let worker_results = services.remote_executor.run_repair_window(
         &jobs,
         |handle, index| {
@@ -349,7 +325,8 @@ pub fn repair_window(
             async move { receive(services.remote_executor, client, cache_writer, oid).await }
         },
         || WorkerError::Cancelled,
-        &mut progress.observe(|index| objects[jobs[index].payload].entries),
+        &mut progress
+            .observe(|index, _: &Result<_, WorkerError>| objects[jobs[index].payload].entries),
     );
 
     let mut publications = Vec::<CachePublication>::new();

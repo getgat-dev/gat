@@ -940,13 +940,9 @@ fn render_sync(
 fn selection_scope_note(scope: gat_command::SelectionScope) -> Option<UserLine> {
     match scope {
         gat_command::SelectionScope::Unrestricted => None,
-        gat_command::SelectionScope::Configured => Some(UserLine::compose([
-            UserLine::authored(
-                "Configured path selection applied; other paths were not checked. Use ",
-            ),
-            UserLine::authored("--path .").unbroken(),
-            UserLine::authored(" to select the whole repository."),
-        ])),
+        gat_command::SelectionScope::Configured => Some(UserLine::authored(
+            "Configured path selection applied; other paths were not checked.",
+        )),
         gat_command::SelectionScope::Explicit => Some(UserLine::authored(
             "Results cover selected paths only; other paths were not checked.",
         )),
