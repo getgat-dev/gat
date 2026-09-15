@@ -478,7 +478,7 @@ pub use cache::{
     CachePublication, CacheSweepDecision, CacheSweepStats, CacheVerificationFailure, CacheWriter,
     CompletedCacheVerification, DEFAULT_INGEST_STRATEGY, ExpectedIngest, IngestStrategy, Ingested,
     OBJECT_HASH_NAMESPACE, ObjectVerification, PreparedCacheVerification, VERIFY_WINDOW,
-    VerificationEvent, object_key_oid, parse_object_key,
+    object_key_oid, parse_object_key,
 };
 pub use config::{
     CONFIG_VERSION, ConfigError, ConfigStore, ConfigWriteError, ScopedConfigError,

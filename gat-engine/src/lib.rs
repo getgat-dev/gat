@@ -233,13 +233,12 @@ pub use repository_state::{
 pub use snapshot::SnapshotError;
 pub use transfer::{
     DownloadCacheFailureKind, DownloadError, DownloadObject, DownloadOutcome,
-    DownloadRemoteFailureKind, FetchProgress, PresenceProgress, PublishError, PublishObject,
-    PublishOutcome, PublishProgress, PublishStatus, RemotePresenceError, RemotePresenceObligation,
-    RemotePresenceResult, RepairCacheFailureKind, RepairError, RepairObject, RepairOutcome,
-    RepairProgress, RepairRemoteFailureKind, SelectedObject, StreamingWindow, TransferCacheSource,
-    UploadCacheFailureKind, UploadError, UploadRemoteFailureKind, UploadWriteFailureKind,
-    WindowBatch, download_window, publish_window, repair_window, visit_current_state_objects,
-    visit_history_objects,
+    DownloadRemoteFailureKind, PublishError, PublishObject, PublishOutcome, PublishStatus,
+    RemotePresenceError, RemotePresenceObligation, RemotePresenceResult, RepairCacheFailureKind,
+    RepairError, RepairObject, RepairOutcome, RepairRemoteFailureKind, SelectedObject,
+    StreamingWindow, TransferCacheSource, UploadCacheFailureKind, UploadError,
+    UploadRemoteFailureKind, UploadWriteFailureKind, WindowBatch, download_window, publish_window,
+    repair_window, visit_current_state_objects, visit_history_objects,
 };
 pub use workspace::sync::{
     CacheFailureKind as SyncCacheFailureKind, ExcludesFailureKind as SyncExcludesFailureKind,
@@ -456,4 +455,5 @@ pub use resources::*;
 pub(crate) use mount::{LockedMount, MountAdd, MountRemove, MountUpdate};
 
 mod parallel_progress;
-pub use parallel_progress::{ParallelProgress, ParallelWork};
+pub use parallel_progress::ParallelProgress;
+pub use progress_reporting::ProgressUpdates;

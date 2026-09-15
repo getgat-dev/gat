@@ -324,9 +324,7 @@ fn sync_with_operation_impl(
         None
     } else {
         operation.reshape_lock_if_needed(|| {
-            sync_task
-                .handle()
-                .set_activity(ProgressActivity::ReshapingLock);
+            sync_task.set_activity(ProgressActivity::ReshapingLock);
         })?
     };
 

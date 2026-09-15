@@ -116,7 +116,7 @@ pub fn remote_status_with_desired_operation(
         request.history.is_some(),
     ));
 
-    let mut reporting = gat_engine::PresenceProgress::new(task);
+    let mut reporting = gat_engine::ProgressUpdates::new(task);
     let mut visit = |object: SelectedObject| -> Result<(), RemoteStatusError> {
         let remote = operation
             .policy()
@@ -195,7 +195,7 @@ fn run_status_window(
     batch: gat_engine::WindowBatch<'_, StatusObligation>,
     checked: &mut usize,
     missing: &mut Vec<MissingRemoteObject>,
-    reporting: &mut gat_engine::PresenceProgress,
+    reporting: &mut gat_engine::ProgressUpdates,
 ) -> Result<(), RemoteStatusError> {
     // Each result slot is filled in as soon as its own check completes
     // (`checked` and progress advance immediately, not after the whole window), but

@@ -114,8 +114,7 @@ pub fn move_with_progress(
             progress,
             ProgressSpec::indeterminate(ProgressOperation::ResolvingSelection),
             |task| -> Result<_> {
-                task.handle()
-                    .set_activity(ProgressActivity::MatchingSourcePath);
+                task.set_activity(ProgressActivity::MatchingSourcePath);
                 let (matches, dst_collisions) =
                     desired.resolve_move(&src, &dst).map_err(Box::new)?;
                 if matches.is_empty() {
@@ -124,8 +123,7 @@ pub fn move_with_progress(
                 assert_no_owned_entry(&policy, &matches)?;
                 validate_mutation_path(repo, &src)?;
 
-                task.handle()
-                    .set_activity(ProgressActivity::CheckingDestination);
+                task.set_activity(ProgressActivity::CheckingDestination);
                 assert_no_owned_entry(&policy, &dst_collisions)?;
                 if !dst_collisions.is_empty() && !force {
                     return Err(MoveError::DestinationTracked {

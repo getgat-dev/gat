@@ -36,7 +36,7 @@
 //!   rendered.
 
 mod work;
-pub use work::{WorkCounts, WorkItem, WorkProgress};
+pub use work::{WorkCounter, WorkProgress};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -106,39 +106,9 @@ pub enum ProgressOperation {
     /// (`gat mount add` with a remote `url`) -- an indeterminate,
     /// possibly long-running network operation with no byte/object count
     /// known up front. Remote-GC repository cloning is *not* an instance
-    /// of this: it reports its activity onto the caller's already-open
-    /// `ComputingReachability` task instead of beginning its own
-    /// `CloningSource` task (see `gat-engine/src/gc.rs`).
+    /// of this: it remains covered by the caller's already-open
+    /// `ComputingReachability` task (see `gat-engine/src/gc.rs`).
     CloningSource,
-}
-
-/// Counters for one push operation.
-///
-/// Checked/present/uploaded/rejected count remote-object obligations. Active
-/// checks and uploads count admitted, unfinished operations. Verifying counts
-/// distinct OIDs in the outstanding verification batch, including proof reuse
-/// and work waiting for a local worker, rather than simultaneous hash calls.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct PublicationProgress {
-    pub checked: u64,
-    pub already_present: u64,
-    pub uploaded: u64,
-    pub rejected: u64,
-    pub checking: u64,
-    pub verifying: u64,
-    pub uploading: u64,
-}
-
-/// Receive-side work. Totals count distinct selected objects, while the
-/// task's item counter retains its command-specific meaning.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ReceiveProgress {
-    pub verifying: u64,
-    pub downloading: u64,
-    pub checked: u64,
-    pub cached: u64,
-    pub received: u64,
-    pub failed: u64,
 }
 
 /// One activity a command can be doing while a [`ProgressOperation`] is
@@ -151,10 +121,12 @@ pub struct ReceiveProgress {
 /// This type is a neutral protocol value -- it has no wording method of
 /// its own. The root `output::progress` module alone owns the mapping
 /// from a variant to its rendered presentation line. Dynamic fields contain
-/// aggregate counts or selector text, never remote credentials or per-worker
-/// file identities. The renderer escapes free-form selector text.
+/// selector text, never remote credentials or per-worker file identities.
+/// The renderer escapes free-form selector text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProgressActivity {
+    /// The owning operation is running, with no narrower phase to report.
+    Working,
     /// Reshaping `gat.lock`'s on-disk shard layout.
     ReshapingLock,
     /// Staging matched rows ahead of replaying them (`gat mount`).
@@ -183,10 +155,6 @@ pub enum ProgressActivity {
     RegeneratingExcludes,
     /// Checking whether a candidate can reuse an existing OID.
     CheckingReuseStatus,
-    /// Concurrent file ingestion, including copy, hashing, and cache publication.
-    HashingFiles(WorkCounts),
-    /// Concurrent preparation and history inspection of additional repositories.
-    InspectingRepositories(WorkCounts),
     /// Walking a directory to discover candidate files.
     WalkingDirectory,
     /// Expanding a glob pattern to discover candidate files.
@@ -205,14 +173,6 @@ pub enum ProgressActivity {
     ListingRemoteObjects,
     /// Streaming validation and application of working-tree changes.
     ReconcilingWorkingTree,
-    /// Concurrent publication work and cumulative results.
-    Publishing(PublicationProgress),
-    /// Cache verification and downloads during fetch.
-    Fetching(ReceiveProgress),
-    /// Best-effort downloads of damaged objects during repair.
-    Repairing(ReceiveProgress),
-    /// Remote presence results across the operation.
-    RemotePresence { present: u64, missing: u64 },
     /// Classifying user-supplied selectors (literal path vs. glob).
     ClassifyingSelectors,
     /// Scanning desired state for matching rows.
@@ -336,7 +296,7 @@ impl ProgressSpec {
 /// The narrow capability a concrete renderer supplies for one running
 /// logical task: item increments, activity updates, and a finish
 /// signal. Implemented by the root crate's indicatif-backed task, its
-/// own test doubles, and this module's no-op backend -- never named
+/// own test doubles -- never named
 /// directly by command code, only reached through [`ProgressHandle`]/
 /// [`ProgressTask`]. Kept `pub` (rather than `pub(crate)`) because
 /// concrete implementations necessarily live in the root `gat` crate,
@@ -352,52 +312,42 @@ pub trait ActivityBackend: Send + Sync {
     fn finish(&self);
 }
 
-/// A no-op backend: every method does nothing. Used by [`NoopProgress`]-
-/// style reporters and as the "not the targeted occurrence" branch of
-/// test doubles that only instrument one specific task.
-struct NoopBackend;
-
-impl ActivityBackend for NoopBackend {
-    fn is_enabled(&self) -> bool {
-        false
-    }
-
-    fn inc(&self, _delta: u64) {}
-    fn set_activity(&self, _activity: &ProgressActivity) {}
-    fn finish(&self) {}
-}
-
 /// A cheap, cloneable capability for worker/window/chunk code: item
 /// increments and activity-message updates only. Cannot begin/finish a
 /// task, change its total, allocate rows, or otherwise touch renderer
 /// state -- the restriction is structural (this type simply has no such
 /// methods), not just documented.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ProgressHandle {
-    pub(crate) backend: std::sync::Arc<dyn ActivityBackend>,
+    backend: Option<std::sync::Arc<dyn ActivityBackend>>,
 }
 
 impl ProgressHandle {
     /// Whether reporting work is needed for this task.
     #[must_use]
     pub fn is_enabled(&self) -> bool {
-        self.backend.is_enabled()
+        self.backend
+            .as_ref()
+            .is_some_and(|backend| backend.is_enabled())
     }
 
     /// Advance the logical item position by `delta` (e.g. one more file
     /// hashed, one more object fetched). Cheap: a thread-safe counter
     /// update only, never a direct terminal redraw.
     pub fn inc(&self, delta: u64) {
-        self.backend.inc(delta);
+        if let Some(backend) = &self.backend {
+            backend.inc(delta);
+        }
     }
 
-    /// Update the task's current activity (e.g. the path currently
-    /// being hashed/uploaded/fetched, or a status like "checking
-    /// remote"). Only a closed [`ProgressActivity`] variant is
+    /// Update the current phase (e.g. "connecting" or "validating working
+    /// tree"). Only a closed [`ProgressActivity`] variant is
     /// accepted -- never an arbitrary string -- so wording stays owned
     /// entirely by the renderer.
     pub fn set_activity(&self, activity: ProgressActivity) {
-        self.backend.set_activity(&activity);
+        if let Some(backend) = &self.backend {
+            backend.set_activity(&activity);
+        }
     }
 }
 
@@ -416,7 +366,7 @@ impl ProgressHandle {
 ///
 /// [`begin`]: ProgressReporter::begin
 pub struct ProgressTask {
-    backend: std::sync::Arc<dyn ActivityBackend>,
+    handle: ProgressHandle,
     finished: AtomicBool,
 }
 
@@ -428,7 +378,9 @@ impl ProgressTask {
     /// as [`ActivityBackend`].
     pub fn from_backend(backend: std::sync::Arc<dyn ActivityBackend>) -> Self {
         Self {
-            backend,
+            handle: ProgressHandle {
+                backend: Some(backend),
+            },
             finished: AtomicBool::new(false),
         }
     }
@@ -437,12 +389,12 @@ impl ProgressTask {
     /// calling the same method on a [`ProgressHandle`] obtained via
     /// [`ProgressTask::handle`].
     pub fn inc(&self, delta: u64) {
-        self.backend.inc(delta);
+        self.handle.inc(delta);
     }
 
     /// Update the task's current activity.
     pub fn set_activity(&self, activity: ProgressActivity) {
-        self.backend.set_activity(&activity);
+        self.handle.set_activity(activity);
     }
 
     /// Return a cloneable, restricted capability for worker/window/chunk
@@ -450,18 +402,17 @@ impl ProgressTask {
     /// sanctioned way for non-orchestration code to touch this task at
     /// all.
     pub fn handle(&self) -> ProgressHandle {
-        ProgressHandle {
-            backend: std::sync::Arc::clone(&self.backend),
-        }
+        self.handle.clone()
     }
 
     /// Finish and clear immediately, rather than waiting for `Drop`. Safe
     /// to call and then let the task drop -- finishing twice is a no-op.
     pub fn finish(&self) {
-        if self.finished.swap(true, Ordering::SeqCst) {
-            return;
+        if let Some(backend) = &self.handle.backend
+            && !self.finished.swap(true, Ordering::SeqCst)
+        {
+            backend.finish();
         }
-        self.backend.finish();
     }
 }
 
@@ -512,13 +463,16 @@ pub fn with_progress_typed<T, E>(
 /// The no-op implementation: every method does nothing, used whenever
 /// progress must not be displayed (non-tty stderr, quiet/hook contexts,
 /// unit tests exercising command logic). Touches no terminal state and
-/// allocates nothing beyond the shared no-op backend.
+/// allocates no backend or shared state.
 #[derive(Default)]
 pub struct NoopProgress;
 
 impl ProgressReporter for NoopProgress {
     fn begin(&self, _spec: ProgressSpec) -> ProgressTask {
-        ProgressTask::from_backend(std::sync::Arc::new(NoopBackend))
+        ProgressTask {
+            handle: ProgressHandle::default(),
+            finished: AtomicBool::new(false),
+        }
     }
 }
 
@@ -597,11 +551,13 @@ mod tests {
             ProgressUnit::Files,
             Some(3),
         ));
+        assert!(task.handle.backend.is_none());
+        assert!(task.handle().backend.is_none());
         task.inc(1);
-        task.set_activity(ProgressActivity::HashingFiles(Default::default()));
+        task.set_activity(ProgressActivity::CheckingReuseStatus);
         let handle = task.handle();
         handle.inc(1);
-        handle.set_activity(ProgressActivity::HashingFiles(Default::default()));
+        handle.set_activity(ProgressActivity::CheckingReuseStatus);
         task.finish();
         NoopProgress.finish_all();
     }

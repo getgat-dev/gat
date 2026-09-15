@@ -164,10 +164,7 @@ fn add_with_limits(
             let mut rows = Vec::new();
             let mut added_count = 0;
             let mut pending_unique_files = Vec::new();
-            let flush = |context: &mut AddContext<'_, '_, '_, '_>,
-                         pending: &mut Vec<GatPath>,
-                         added: &mut AddedEntries|
-             -> Result<()> { flush_pending_files(context, pending, added) };
+            let flush = flush_pending_files;
 
             // Opening the Git index/ignore lookup can itself be expensive.
             context.discovery_activity(ProgressActivity::ClassifyingSelectors);
@@ -292,17 +289,11 @@ fn add_with_limits(
             ProgressOperation::ApplyingChanges,
         ));
         let mut desired = desired.into_mutation().map_err(Box::new)?;
-        applying
-            .handle()
-            .set_activity(ProgressActivity::PublishingDesiredState);
+        applying.set_activity(ProgressActivity::PublishingDesiredState);
         desired.publish_upserts(added).map_err(Box::new)?;
-        applying
-            .handle()
-            .set_activity(ProgressActivity::RecordingMaterializedState);
+        applying.set_activity(ProgressActivity::RecordingMaterializedState);
         desired.record_published_materialized().map_err(Box::new)?;
-        applying
-            .handle()
-            .set_activity(ProgressActivity::RegeneratingExcludes);
+        applying.set_activity(ProgressActivity::RegeneratingExcludes);
         desired.sync_excludes().map_err(Box::new)?;
         applying.finish();
 
@@ -378,7 +369,6 @@ fn flush_pending_files(
     let (reused, to_hash) = context.materialization.partition_reusable(candidates)?;
     added.extend(reused);
     added.extend(ingest_files(context, &to_hash)?);
-    pending.clear();
     Ok(())
 }
 
@@ -417,10 +407,10 @@ fn ingest_files(
             ProgressUnit::Files,
             None,
         ));
-        let reporting =
-            gat_engine::ParallelProgress::new(task.handle(), gat_engine::ParallelWork::Hashing);
+        let reporting = gat_engine::ParallelProgress::new(task.handle());
         HashingProgress { reporting, task }
     });
+    hashing.task.set_activity(ProgressActivity::Working);
     Ok(hashing.reporting.run(|work| {
         context
             .materialization

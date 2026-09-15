@@ -209,12 +209,7 @@ mod tests {
         assert_eq!(progress.max_active_tasks(), 1);
     }
 
-    /// A file above
-    /// `LARGE_FILE_INGEST_THRESHOLD` gets aggregate hashing activity
-    /// updates during ingest instead of looking frozen -- but those updates
-    /// must never advance the logical `Hashing` task's position;
-    /// the position advances exactly once, after the file is fully
-    /// ingested, exactly like any other file.
+    /// Large-file ingestion advances once after the complete file is stored.
     #[test]
     fn large_file_ingestion_counts_one_completed_file() {
         let tmp = test_repo();
@@ -235,18 +230,9 @@ mod tests {
         assert_eq!(
             task.position, 1,
             "the position must advance exactly once for the one large file ingested, \
-             regardless of how many activity snapshots were emitted along the way"
+             regardless of how many sampling intervals elapsed"
         );
         assert_eq!(task.total, None);
-        assert!(
-            task.activities.iter().any(|activity| matches!(
-                activity,
-                ProgressActivity::HashingFiles(counts)
-                    if counts.active() == 0 && counts.succeeded() == 1 && counts.failed() == 0
-            )),
-            "a file above the threshold must report completed hashing activity: {:?}",
-            task.activities
-        );
     }
 
     /// Desired-state publication,

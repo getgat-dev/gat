@@ -3,10 +3,10 @@ use super::upload::{
     ExecutedUpload, PreparedUpload, UploadError, UploadObject, cache_error_kind, execute_upload,
     worker_error,
 };
+use crate::ProgressUpdates;
 use crate::cache_session::CacheVerificationError;
 use crate::operation::Operation;
 use crate::path_policy::ResolvedRemote;
-use crate::progress_reporting::Refresh;
 use crate::remote_catalog::RemoteId;
 use crate::remote_executor::RemoteExecutor;
 use crate::remote_session::RemoteHandle;
@@ -14,12 +14,7 @@ use futures::stream::{BoxStream, SelectAll};
 use futures::{FutureExt, StreamExt};
 use gat_core::lexical_path::GatPath;
 use gat_core::oid::Oid;
-#[cfg(test)]
-use gat_core::progress::PublicationProgress;
-
-mod progress;
 use gat_io::{CacheError, CacheObject, CompletedCacheVerification, ObjectVerification};
-pub use progress::PublishProgress;
 use std::collections::{BTreeMap, VecDeque};
 
 const VERIFICATION_BATCH_SIZE: usize = 128;
@@ -304,14 +299,16 @@ impl PipelineState {
             if !upload {
                 scheduler.executor.forget_transfer_waiter(id);
             }
-            let preferred = select_queue_kind(
+            let Some(preferred) = select_queue_kind(
                 presence,
                 upload,
                 self.last_admitted_by_remote.get(&id).copied(),
-            );
+            ) else {
+                continue;
+            };
             let order = match preferred {
-                Some(QueueKind::Upload) => [QueueKind::Upload, QueueKind::Presence],
-                _ => [QueueKind::Presence, QueueKind::Upload],
+                QueueKind::Upload => [QueueKind::Upload, QueueKind::Presence],
+                QueueKind::Presence => [QueueKind::Presence, QueueKind::Upload],
             };
             for kind in order {
                 let work = match kind {
@@ -371,7 +368,7 @@ const fn select_queue_kind(
 pub fn publish_window(
     operation: &mut Operation<'_>,
     objects: Vec<PublishObject>,
-    progress: &mut PublishProgress,
+    progress: &mut ProgressUpdates,
 ) -> Result<PublishOutcome, PublishError> {
     if objects.is_empty() {
         return Ok(PublishOutcome::default());
@@ -410,21 +407,21 @@ pub fn publish_window(
         handles.insert(object.remote.id(), handle);
     }
 
+    progress.set_activity(gat_core::progress::ProgressActivity::Working);
     tokio::runtime::Handle::current().block_on(async move {
         let scheduler = RemoteScheduler {
             executor: services.remote_executor,
             handles: &handles,
             objects: &objects,
         };
-        let mut refresh_timer = None;
         let mut completions = SelectAll::<BoxStream<'_, RemoteCompletion>>::new();
-        refill_remote_work(&mut state, &mut completions, &scheduler, progress);
-        progress.report(false);
+        refill_remote_work(&mut state, &mut completions, &scheduler);
+
         // Retain the bounded batch allocation across coordinator iterations.
         let mut ready = Vec::new();
         loop {
             let completion = progress
-                .next(&mut completions, &mut refresh_timer)
+                .wait(completions.next())
                 .await;
             let Some(completion) = completion else {
                 break;
@@ -441,7 +438,6 @@ pub fn publish_window(
             for completion in ready.drain(..) {
                 match completion {
                     RemoteCompletion::Presence { index, result } => {
-                        progress.checking_finished(result.is_ok());
                         match result {
                             Ok(true) => {
                                 complete_obligation(
@@ -482,7 +478,6 @@ pub fn publish_window(
                         }
                     }
                     RemoteCompletion::Upload { upload } => {
-                        progress.uploading_finished();
                         let (object, index, result) = upload.into_parts();
                         match result {
                             Ok(()) => {
@@ -506,7 +501,6 @@ pub fn publish_window(
                     }
                     RemoteCompletion::Verification { oids, result } => {
                         state.verification_active = false;
-                        progress.verifying(0);
                         let error_index = state.verification_error_index(&oids);
                         let result = result.and_then(|completed| {
                             services
@@ -591,8 +585,6 @@ pub fn publish_window(
             if !state.verification_active && !services.remote_executor.is_cancelled() {
                 let oids = state.take_verification_batch();
                 if !oids.is_empty() {
-                    progress.verifying(oids.len());
-                    progress.report(false);
                     let prepared = services
                         .cache_session
                         .prepare_verification(services.cache_root, &oids);
@@ -614,10 +606,10 @@ pub fn publish_window(
                     );
                 }
             }
-            refill_remote_work(&mut state, &mut completions, &scheduler, progress);
-            progress.report(false);
+            refill_remote_work(&mut state, &mut completions, &scheduler);
         }
-        progress.report(true);
+
+        progress.flush();
         if let Some((_, error)) = state.error {
             return Err(error);
         }
@@ -635,7 +627,6 @@ fn refill_remote_work<'a>(
     state: &mut PipelineState,
     completions: &mut SelectAll<BoxStream<'a, RemoteCompletion>>,
     scheduler: &'a RemoteScheduler<'a>,
-    progress: &mut PublishProgress,
 ) {
     let presence_completions = |id, entries| {
         super::presence::presence_stream(
@@ -650,7 +641,6 @@ fn refill_remote_work<'a>(
     while let Some(work) = state.next_admissible_work(scheduler) {
         match work {
             AdmittedWork::Upload { upload, lease } => {
-                progress.uploading_started();
                 completions.push(
                     async move {
                         let _lease = lease;
@@ -666,7 +656,6 @@ fn refill_remote_work<'a>(
                 index,
                 lease,
             } => {
-                progress.checking_started();
                 let oid = scheduler.objects[index].oid;
                 let limit = scheduler.handles[&remote_id]
                     .client()
@@ -756,13 +745,13 @@ fn complete_obligation(
     statuses: &mut [Option<PublishStatus>],
     index: usize,
     status: PublishStatus,
-    progress: &mut PublishProgress,
+    progress: &mut ProgressUpdates,
 ) {
     assert!(
         statuses[index].replace(status).is_none(),
         "publication obligation completed more than once"
     );
-    progress.complete(status);
+    progress.inc(1);
 }
 
 #[cfg(test)]
@@ -782,18 +771,15 @@ mod tests {
             .map(|tag| publish_object(handles[0].id(), tag))
             .collect();
         let handles = BTreeMap::from([(handles[0].id(), handles[0].clone())]);
-        let backend = Arc::new(RecordingBackend::default());
         let scheduler = RemoteScheduler {
             executor: &executor,
             handles: &handles,
             objects: &objects,
         };
-        let task = ProgressTask::from_backend(backend);
-        let mut progress = PublishProgress::new(task.handle());
         let mut state = PipelineState::new(&objects);
         let mut completions = SelectAll::new();
-        refill_remote_work(&mut state, &mut completions, &scheduler, &mut progress);
-        progress.report(false);
+        refill_remote_work(&mut state, &mut completions, &scheduler);
+
         let results = runtime.block_on(completions.collect::<Vec<_>>());
         assert_eq!(results.len(), 128);
         for (expected, result) in results.into_iter().enumerate() {
@@ -807,7 +793,6 @@ mod tests {
     #[derive(Default)]
     struct RecordingBackend {
         increments: Mutex<Vec<u64>>,
-        activities: Mutex<Vec<PublicationProgress>>,
     }
 
     impl ActivityBackend for RecordingBackend {
@@ -815,11 +800,7 @@ mod tests {
             self.increments.lock().unwrap().push(delta);
         }
 
-        fn set_activity(&self, activity: &ProgressActivity) {
-            if let ProgressActivity::Publishing(counts) = activity {
-                self.activities.lock().unwrap().push(*counts);
-            }
-        }
+        fn set_activity(&self, _activity: &ProgressActivity) {}
 
         fn finish(&self) {}
     }
@@ -867,7 +848,7 @@ mod tests {
     fn completing_obligations_increments_each_terminal_result_once() {
         let backend = Arc::new(RecordingBackend::default());
         let task = ProgressTask::from_backend(backend.clone());
-        let mut progress = PublishProgress::new(task.handle());
+        let mut progress = ProgressUpdates::new(task.handle());
         let mut statuses = vec![None; 4];
 
         complete_obligation(
@@ -889,7 +870,8 @@ mod tests {
                 PublishStatus::Uploaded,
             ]
         );
-        progress.report(true);
+
+        progress.flush();
         assert_eq!(*backend.increments.lock().unwrap(), vec![4]);
     }
 
@@ -898,7 +880,7 @@ mod tests {
     fn completing_an_obligation_twice_is_rejected() {
         let backend = Arc::new(RecordingBackend::default());
         let task = ProgressTask::from_backend(backend);
-        let mut progress = PublishProgress::new(task.handle());
+        let mut progress = ProgressUpdates::new(task.handle());
         let mut statuses = vec![None];
 
         complete_obligation(

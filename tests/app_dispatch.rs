@@ -768,3 +768,32 @@ fn local_mutation_dispatch_recovers_and_loads_config_once() {
         assert_eq!(gat_engine::test_support::config_loads() - before, 1);
     }
 }
+
+#[test]
+fn internal_git_commands_suppress_supplied_progress_even_during_recovery() {
+    struct RejectProgress;
+    impl gat::progress::ProgressReporter for RejectProgress {
+        fn begin(&self, _: gat::progress::ProgressSpec) -> gat::progress::ProgressTask {
+            panic!("internal Git commands must not open a progress task");
+        }
+    }
+    let tmp = test_repo();
+    let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+        .unwrap()
+        .repository_at(tmp.path().to_path_buf());
+    let context = Context::new(repo);
+    assert!(app::run(parse(&["hook", "post-checkout"]), &context, &RejectProgress).is_ok());
+    // A directory input exercises merge-driver error handling after the shared
+    // repository recovery path, which also must remain silent.
+    let missing = tmp.path().join("input-directory");
+    std::fs::create_dir(&missing).unwrap();
+    let missing = missing.to_str().unwrap();
+    assert!(
+        app::run(
+            parse(&["merge-driver", missing, missing, missing]),
+            &context,
+            &RejectProgress
+        )
+        .is_err()
+    );
+}

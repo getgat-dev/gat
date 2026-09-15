@@ -1,3 +1,4 @@
+use super::{cache_io_kind, diagnostic_remote};
 use crate::path_policy::{EffectivePathPolicy, ResolvedRemote};
 use crate::remote_catalog::RemoteCatalog;
 use crate::remote_executor::RemoteExecutor;
@@ -234,42 +235,12 @@ impl Error for UploadError {
     }
 }
 
-fn diagnostic_remote(
-    catalog: &RemoteCatalog,
-    policy: &EffectivePathPolicy,
-    object: &UploadObject,
-) -> (Arc<str>, Option<RouteName>, Option<GatPath>) {
-    let remote_name = catalog.name(object.remote.id());
-    let route = object.remote.route().map(|id| policy.route_descriptor(id));
-    (
-        remote_name,
-        route.map(|descriptor| descriptor.name.clone()),
-        route.map(|descriptor| descriptor.path.clone()),
-    )
-}
-
 pub(crate) fn cache_error_kind(source: &CacheError) -> UploadCacheFailureKind {
-    let io_kind = match source {
-        CacheError::DirectoryUnavailable { source, .. }
-        | CacheError::TempFileUnavailable { source, .. }
-        | CacheError::PathUnreadable { source, .. }
-        | CacheError::SourceUnreadable { source }
-        | CacheError::EntryUnwritable { source, .. }
-        | CacheError::EntryUnreadable { source, .. } => Some(source.kind()),
-        CacheError::MaterializationFailed { .. }
-        | CacheError::State(_)
-        | CacheError::Oid(_)
-        | CacheError::Atomic(_) => None,
-    };
-    match io_kind {
-        Some(std::io::ErrorKind::PermissionDenied) => UploadCacheFailureKind::PermissionDenied,
-        Some(std::io::ErrorKind::NotFound) => UploadCacheFailureKind::Missing,
-        _ => UploadCacheFailureKind::Unavailable,
-    }
+    cache_io_kind(source).map_or(UploadCacheFailureKind::Unavailable, io_cache_kind)
 }
 
-fn io_cache_kind(source: &std::io::Error) -> UploadCacheFailureKind {
-    match source.kind() {
+const fn io_cache_kind(kind: std::io::ErrorKind) -> UploadCacheFailureKind {
+    match kind {
         std::io::ErrorKind::PermissionDenied => UploadCacheFailureKind::PermissionDenied,
         std::io::ErrorKind::NotFound => UploadCacheFailureKind::Missing,
         _ => UploadCacheFailureKind::Unavailable,
@@ -302,7 +273,8 @@ pub(crate) fn worker_error(
     match source {
         WorkerError::Cancelled => UploadError::Cancelled,
         WorkerError::FileWrite(source) => {
-            let (remote_name, route_name, route) = diagnostic_remote(catalog, policy, object);
+            let (remote_name, route_name, route) =
+                diagnostic_remote(catalog, policy, &object.remote);
             UploadError::FileWrite {
                 kind: if source.source.kind() == std::io::ErrorKind::PermissionDenied {
                     UploadWriteFailureKind::PermissionDenied
@@ -336,13 +308,14 @@ pub(crate) fn worker_error(
             source,
         },
         WorkerError::CacheRead(source) => UploadError::CacheRead {
-            kind: io_cache_kind(&source),
+            kind: io_cache_kind(source.kind()),
             path: object.representative_path.clone(),
             source,
         },
         WorkerError::WriterOpen(source) => {
             let kind = remote_kind(&source);
-            let (remote_name, route_name, route) = diagnostic_remote(catalog, policy, object);
+            let (remote_name, route_name, route) =
+                diagnostic_remote(catalog, policy, &object.remote);
             UploadError::WriterOpen {
                 kind,
                 remote_name,
@@ -358,7 +331,8 @@ pub(crate) fn worker_error(
             } else {
                 UploadWriteFailureKind::OperationFailed
             };
-            let (remote_name, route_name, route) = diagnostic_remote(catalog, policy, object);
+            let (remote_name, route_name, route) =
+                diagnostic_remote(catalog, policy, &object.remote);
             UploadError::WriterWrite {
                 kind,
                 remote_name,
@@ -369,7 +343,8 @@ pub(crate) fn worker_error(
             }
         }
         WorkerError::WriterFinalize(source) => {
-            let (remote_name, route_name, route) = diagnostic_remote(catalog, policy, object);
+            let (remote_name, route_name, route) =
+                diagnostic_remote(catalog, policy, &object.remote);
             UploadError::WriterFinalize {
                 remote_name,
                 route_name,

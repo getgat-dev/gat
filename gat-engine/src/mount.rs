@@ -873,18 +873,15 @@ impl<'repo> LockedMount<'repo, '_> {
                     .write(&record)
                     .map_err(MountWorkflowError::write_journal)?;
                 mount_fault("remove.journaled")?;
-                task.handle()
-                    .set_activity(ProgressActivity::DeletingOwnedRows);
+                task.set_activity(ProgressActivity::DeletingOwnedRows);
                 let removed = delete_record_rows(self.state()?, &record.change)?;
                 mount_fault("remove.deleted")?;
-                task.handle()
-                    .set_activity(ProgressActivity::PublishingConfig);
+                task.set_activity(ProgressActivity::PublishingConfig);
                 self.repo
                     .save_config_scoped(&record.post_config, record.scope)
                     .map_err(MountWorkflowError::publish_config)?;
                 mark_published(&journal, &mut record)?;
-                task.handle()
-                    .set_activity(ProgressActivity::RegeneratingExcludes);
+                task.set_activity(ProgressActivity::RegeneratingExcludes);
                 sync_mount_excludes(self.repo, self.state()?, &post_effective_config)?;
                 Ok(removed)
             },
@@ -1065,12 +1062,10 @@ pub(crate) fn recover_pending_mount_transaction_locked<'repo>(
         progress,
         ProgressSpec::indeterminate(ProgressOperation::LoadingState),
         |task| -> Result<MountMutationSession<'repo>, MountWorkflowError> {
-            task.handle()
-                .set_activity(ProgressActivity::ObservingLockState);
+            task.set_activity(ProgressActivity::ObservingLockState);
             let state = MountMutationSession::acquire(repo.layout(), levels)
                 .map_err(MountWorkflowError::open_state)?;
-            task.handle()
-                .set_activity(ProgressActivity::RefreshingDesiredState);
+            task.set_activity(ProgressActivity::RefreshingDesiredState);
             Ok(state)
         },
     )?;

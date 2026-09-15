@@ -435,7 +435,7 @@ impl MaterializationSession<'_, '_, '_> {
         &mut self,
         files: &[GatPath],
         strategy: IngestStrategy,
-        progress: &gat_core::progress::WorkProgress,
+        progress: &gat_core::progress::WorkProgress<'_>,
     ) -> Result<Vec<MaterializedEntry>, RepositoryStateError> {
         self.cache
             .ingest_materializations(

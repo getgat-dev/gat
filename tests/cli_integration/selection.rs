@@ -57,7 +57,7 @@ fn named_selection_reuse_default_and_inline_replacement() {
     let saved = gat(&repo.path().join("datasets"), &["ls-files"]);
     assert_eq!(
         stdout(&saved),
-        "✓ Tracked files: 1\n\n✓  models/a.onnx\n\nhint: Configured path selection applied; other paths were not checked. Use --path . to select the\n      whole repository.\n\n1 file(s)\n"
+        "✓ Tracked files: 1\n\n✓  models/a.onnx\n\nhint: Configured path selection applied; other paths were not checked.\n\n1 file(s)\n"
     );
     assert!(!stderr(&saved).contains("Configured path selection applied"));
     let named = gat(repo.path(), &["ls-files", "--selection", "training"]);

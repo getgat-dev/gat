@@ -9,7 +9,7 @@ use gat_core::progress::{
 };
 use gat_core::selection::Selection;
 use gat_engine::{
-    DesiredOperation, DownloadError, DownloadObject, FetchProgress, HistoryError,
+    DesiredOperation, DownloadError, DownloadObject, HistoryError, ProgressUpdates,
     RemoteCatalogError, RemoteSessionError, Repository, SelectedObject, StreamingWindow,
     UnknownRemoteOverrideError, visit_current_state_objects, visit_history_objects,
 };
@@ -96,25 +96,21 @@ pub fn fetch_with_desired_operation(
     let task = fetching.handle();
     task.set_activity(ProgressActivity::selection_or_state(history_selected));
 
-    let mut download_progress = FetchProgress::new(task);
+    let mut download_progress = ProgressUpdates::new(task);
     let mut window: StreamingWindow<Oid, SelectedObject> =
         StreamingWindow::new(operation.limits().transfer.window);
     let mut fetched = 0usize;
-    let mut visit = |object: SelectedObject| -> Result<(), FetchError> {
-        let oid = object.oid;
-        window.record(
-            oid,
-            || object,
-            |batch| {
-                run_fetch_window(
-                    &mut operation,
-                    batch.drain(),
-                    request.remote,
-                    &mut fetched,
-                    &mut download_progress,
-                )
-            },
+    let mut run_window = |batch: gat_engine::WindowBatch<'_, SelectedObject>| {
+        run_fetch_window(
+            &mut operation,
+            batch.drain(),
+            request.remote,
+            &mut fetched,
+            &mut download_progress,
         )
+    };
+    let mut visit = |object: SelectedObject| -> Result<(), FetchError> {
+        window.record(object.oid, || object, &mut run_window)
     };
 
     let shallow = match request.source {
@@ -135,15 +131,7 @@ pub fn fetch_with_desired_operation(
     };
 
     let saw_any = window.unique_count() > 0;
-    window.finish(|batch| {
-        run_fetch_window(
-            &mut operation,
-            batch.drain(),
-            request.remote,
-            &mut fetched,
-            &mut download_progress,
-        )
-    })?;
+    window.finish(run_window)?;
     fetching.finish();
 
     if !saw_any && let Some(name) = request.remote {
@@ -163,7 +151,7 @@ fn run_fetch_window(
     objects: std::vec::Drain<'_, SelectedObject>,
     remote: Option<&RemoteName>,
     fetched: &mut usize,
-    task: &mut FetchProgress,
+    task: &mut ProgressUpdates,
 ) -> Result<(), FetchError> {
     let downloads = {
         let policy = operation.policy();

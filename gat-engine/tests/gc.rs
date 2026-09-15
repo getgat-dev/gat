@@ -719,12 +719,6 @@ fn remote_gc_keeps_explicit_peer_and_reuses_one_listing_pass() {
             .iter()
             .any(|activity| matches!(activity, ProgressActivity::DeletingRemoteObjects))
     );
-    assert!(
-        state
-            .activities
-            .iter()
-            .any(|activity| matches!(activity, ProgressActivity::InspectingRepositories(counts) if counts.active() == 0 && counts.succeeded() == 1 && counts.failed() == 0))
-    );
 }
 
 #[test]

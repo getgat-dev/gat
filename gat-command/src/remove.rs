@@ -84,8 +84,7 @@ pub fn remove_with_progress(
             progress,
             ProgressSpec::indeterminate(ProgressOperation::ResolvingSelection),
             |task| -> Result<(Vec<RemoveSelector>, Vec<GatPath>)> {
-                task.handle()
-                    .set_activity(ProgressActivity::ClassifyingSelectors);
+                task.set_activity(ProgressActivity::ClassifyingSelectors);
                 let mut selectors = Vec::with_capacity(request.paths.len());
                 for scope in request.paths {
                     let path = match scope {
@@ -106,8 +105,7 @@ pub fn remove_with_progress(
                     selectors.push(selector);
                 }
 
-                task.handle()
-                    .set_activity(ProgressActivity::ScanningDesiredState);
+                task.set_activity(ProgressActivity::ScanningDesiredState);
                 let mut removed_by_arg = vec![Vec::new(); selectors.len()];
                 let mut first_owned_match = vec![None; selectors.len()];
                 let scopes = selectors

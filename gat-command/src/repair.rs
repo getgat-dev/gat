@@ -5,7 +5,7 @@ use gat_core::name::RemoteName;
 use gat_core::oid::Oid;
 use gat_core::progress::ProgressHandle;
 use gat_engine::{
-    Operation, RepairError as EngineRepairError, RepairObject, RepairProgress, StreamingWindow,
+    Operation, ProgressUpdates, RepairError as EngineRepairError, RepairObject, StreamingWindow,
     UnknownRemoteOverrideError, repair_window,
 };
 use std::collections::BTreeMap;
@@ -77,29 +77,9 @@ pub fn repair_with_operation(
             results.entry(*oid).or_default().entries += 1;
         }
     }
-    let mut reporting = RepairProgress::new(progress.clone());
+    let mut reporting = ProgressUpdates::new(progress.clone());
 
-    for (path, oid) in request.corrupted {
-        let _: Result<(), std::convert::Infallible> = window.record(
-            *oid,
-            || RepairCandidate {
-                oid: *oid,
-                path: path.clone(),
-            },
-            |batch| {
-                run_repair_window(
-                    operation,
-                    batch.drain(),
-                    request.remote,
-                    reporting_enabled,
-                    &mut results,
-                    &mut reporting,
-                );
-                Ok(())
-            },
-        );
-    }
-    let _: Result<(), std::convert::Infallible> = window.finish(|batch| {
+    let mut run_window = |batch: gat_engine::WindowBatch<'_, RepairCandidate>| {
         run_repair_window(
             operation,
             batch.drain(),
@@ -108,8 +88,19 @@ pub fn repair_with_operation(
             &mut results,
             &mut reporting,
         );
-        Ok(())
-    });
+        Ok::<(), std::convert::Infallible>(())
+    };
+    for (path, oid) in request.corrupted {
+        let _ = window.record(
+            *oid,
+            || RepairCandidate {
+                oid: *oid,
+                path: path.clone(),
+            },
+            &mut run_window,
+        );
+    }
+    let _ = window.finish(run_window);
 
     reporting.flush();
     let mut outcome = RepairOutcome::default();
@@ -136,7 +127,7 @@ fn run_repair_window(
     remote_override: Option<&RemoteName>,
     reporting_enabled: bool,
     results: &mut BTreeMap<Oid, RepairResult>,
-    progress: &mut RepairProgress,
+    progress: &mut ProgressUpdates,
 ) {
     let mut objects = Vec::with_capacity(window.len());
     for candidate in window {
@@ -168,7 +159,7 @@ fn run_repair_window(
                 entries,
             )),
             Err(error) => {
-                progress.rejected(entries);
+                progress.inc(entries);
                 results.entry(candidate.oid).or_default().result = Some(Err(Arc::new(error)));
             }
         }
