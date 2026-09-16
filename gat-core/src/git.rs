@@ -306,8 +306,7 @@ impl<'de> serde::Deserialize<'de> for GitCommitId {
     where
         D: serde::Deserializer<'de>,
     {
-        let raw = String::deserialize(deserializer)?;
-        Self::parse_hex(&raw).map_err(serde::de::Error::custom)
+        crate::serde_text::parse(deserializer, Self::parse_hex)
     }
 }
 

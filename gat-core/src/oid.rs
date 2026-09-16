@@ -216,8 +216,7 @@ impl<'de> serde::Deserialize<'de> for Oid {
     where
         D: serde::Deserializer<'de>,
     {
-        let raw = String::deserialize(deserializer)?;
-        Self::from_hex(&raw).map_err(serde::de::Error::custom)
+        crate::serde_text::parse(deserializer, Self::from_hex)
     }
 }
 

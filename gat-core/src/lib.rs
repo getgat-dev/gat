@@ -76,6 +76,8 @@
 //! use gat_core::globs::GlobFilter;
 //! ```
 
+mod serde_text;
+
 pub mod cache_location;
 pub mod config;
 pub mod config_keys;
