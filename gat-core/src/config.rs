@@ -1219,7 +1219,9 @@ impl RoutesConfig {
         self.by_name
             .iter()
             .filter(|(_, route)| path.is_or_under(&route.path))
-            .max_by_key(|(_, route)| route.path.as_str().matches('/').count())
+            // Matching canonical prefixes form an ancestor chain, so byte
+            // length gives the same specificity without rescanning components.
+            .max_by_key(|(_, route)| route.path.as_str().len())
             .map(|(name, route)| RouteMatch {
                 name,
                 route: &route.path,
