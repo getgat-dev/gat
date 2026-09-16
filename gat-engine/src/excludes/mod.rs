@@ -60,11 +60,12 @@ pub(crate) fn fingerprint(
     ignore_patterns: &[gat_core::git_ignore::GitIgnorePattern],
 ) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"gat-excludes-v3\0");
+    hasher.update(b"gat-excludes-v4\0");
     hasher.update(desired_fingerprint);
     for pattern in ignore_patterns {
+        // Patterns can contain NUL; a delimiter alone cannot frame the list.
+        hasher.update(&(pattern.as_str().len() as u64).to_le_bytes());
         hasher.update(pattern.as_str().as_bytes());
-        hasher.update(b"\0");
     }
     *hasher.finalize().as_bytes()
 }
@@ -89,18 +90,12 @@ pub(crate) fn sync_from_lock_with_config(
     cfg: &gat_core::config::Config,
 ) -> Result<SyncStatus> {
     let plan = compact::IgnoreCoveragePlan::new(cfg.git.effective_ignore_patterns());
-    let mut exact: Vec<_> = lock
+    let exact: Vec<_> = lock
         .entries
         .iter()
         .filter(|entry| !plan.covers(&entry.path))
-        .map(|entry| entry.path.as_str().to_string())
+        .map(|entry| entry.path.as_str())
         .collect();
-    // Unlike the store-backed path below, `lock.entries` carries no
-    // ordering/uniqueness guarantee of its own.
-    if !exact.is_sorted() {
-        exact.sort_unstable();
-    }
-    exact.dedup();
     render(repo, cfg, exact, dry_run)
 }
 
@@ -162,10 +157,6 @@ fn sync_from_path_source(
         }
         Ok(())
     })?;
-    if !exact.is_sorted() {
-        exact.sort_unstable();
-    }
-    exact.dedup();
     render(repo, cfg, exact, dry_run)
 }
 
@@ -178,35 +169,68 @@ pub(crate) fn sync_from_store_with_config(
     dry_run: bool,
     cfg: &gat_core::config::Config,
 ) -> Result<SyncStatus> {
-    let exact = exact_from_store(store, cfg)?;
-    // `path` is the state table's primary key and the cursor above reads
-    // it `ORDER BY path`, so the result is already sorted and duplicate-free
-    // -- no extra `sort`/`dedup` pass needed, unlike the `Lock`-based path.
-    render(repo, cfg, exact, dry_run)
+    let body = body_from_store(store, cfg)?;
+    Ok(render_with_proof(repo, body, dry_run)?.0)
 }
 
-/// Collect only uncovered paths; literal directory coverage is applied by
-/// indexed seeks before any residual Git-ignore matching in Rust.
-fn exact_from_store(store: &StateStore, cfg: &gat_core::config::Config) -> Result<Vec<String>> {
+/// Render ordered, unique store rows directly; no owned per-path collection.
+/// Literal-directory coverage is applied by indexed seeks before residual matching.
+fn body_from_store(store: &StateStore, cfg: &gat_core::config::Config) -> Result<ExcludeBody> {
     let plan = compact::IgnoreCoveragePlan::new(cfg.git.effective_ignore_patterns());
-    let mut exact = Vec::new();
+    let mut body = ExcludeBody::new(cfg);
     store.visit_desired_paths_excluding(&plan.excluded, |path| -> Result<()> {
         if !plan.residual_matches(path) {
-            exact.push(path.as_str().to_string());
+            body.push_path(path.as_str());
         }
         Ok(())
     })?;
-    Ok(exact)
+    Ok(body)
+}
+
+/// Keep rendered bytes and the rule count together; omitted LF paths are comments.
+struct ExcludeBody {
+    body: String,
+    count: usize,
+}
+
+impl ExcludeBody {
+    fn new(cfg: &gat_core::config::Config) -> Self {
+        let mut result = Self {
+            body: String::new(),
+            count: 0,
+        };
+        for pattern in cfg.git.effective_ignore_patterns() {
+            // Configured comments must not become managed-block delimiters.
+            if matches!(pattern.as_str(), BEGIN | END) {
+                result.body.push_str("# ");
+            }
+            result.body.push_str(pattern.as_str());
+            result.body.push('\n');
+            result.count += 1;
+        }
+        result
+    }
+
+    fn push_path(&mut self, path: &str) {
+        if path.contains('\n') {
+            use std::fmt::Write as _;
+            writeln!(self.body, "# No exact Git exclusion for LF path: {path:?}")
+                .expect("string write");
+            return;
+        }
+        append_exact_exclude_pattern(&mut self.body, path);
+        self.body.push('\n');
+        self.count += 1;
+    }
 }
 
 /// Encode a root-anchored literal Git-ignore rule. The caller handles LF
 /// paths separately because the line-based format cannot express them.
 /// Glob metacharacters and trailing spaces are escaped; CR uses a character
 /// class so Git cannot strip it as part of a line ending.
-fn exact_exclude_pattern(path: &str) -> String {
+fn append_exact_exclude_pattern(escaped: &mut String, path: &str) {
     let head = path.trim_end_matches(' ');
     let trailing_spaces = path.len() - head.len();
-    let mut escaped = String::with_capacity(path.len() + 1 + trailing_spaces);
     escaped.push('/');
     for c in head.chars() {
         if c == '\r' {
@@ -221,23 +245,30 @@ fn exact_exclude_pattern(path: &str) -> String {
     for _ in 0..trailing_spaces {
         escaped.push_str("\\ ");
     }
-    escaped
 }
 
-/// Render `exact` (already the final, sorted, deduplicated set of paths that
-/// need their own rule) plus `git.ignore_patterns` into the
+/// Sort and deduplicate paths needing exact rules, then render them plus
+/// `git.ignore_patterns` into the
 /// gat-managed `.git/info/exclude` block, writing it out unless `dry_run` or
-/// nothing changed. Shared tail of lock-backed and store-backed generation
-/// once each has produced its `exact` set. `exact` entries are Gat-managed
-/// paths and are rendered through [`exact_exclude_pattern`]; `git.ignore_patterns`
-/// are hand-authored and stay verbatim.
-fn render(
+/// nothing changed. Borrow loaded lock paths; streamed mutation paths own
+/// their text until rendering. `exact` entries are Gat-managed
+/// paths and are rendered through [`append_exact_exclude_pattern`]; `git.ignore_patterns`
+/// are hand-authored; comments matching block markers gain a comment prefix.
+fn render<P: AsRef<str> + Ord>(
     repo: &Repo,
     cfg: &gat_core::config::Config,
-    exact: Vec<String>,
+    mut exact: Vec<P>,
     dry_run: bool,
 ) -> Result<SyncStatus> {
-    Ok(render_with_proof(repo, cfg, exact, dry_run)?.0)
+    if !exact.is_sorted() {
+        exact.sort_unstable();
+    }
+    exact.dedup();
+    let mut body = ExcludeBody::new(cfg);
+    for path in exact {
+        body.push_path(path.as_ref());
+    }
+    Ok(render_with_proof(repo, body, dry_run)?.0)
 }
 
 /// As [`render`], but also returns the gat-managed block's own content
@@ -249,29 +280,9 @@ fn render(
 /// is replaced; content outside its markers remains user-owned.
 fn render_with_proof(
     repo: &Repo,
-    cfg: &gat_core::config::Config,
-    exact: Vec<String>,
+    ExcludeBody { body, count }: ExcludeBody,
     dry_run: bool,
 ) -> Result<(SyncStatus, [u8; 32], gat_io::InfoExcludeUpdate)> {
-    let mut body = String::new();
-    let mut count = 0;
-    for pattern in cfg.git.effective_ignore_patterns() {
-        body.push_str(pattern.as_str());
-        body.push('\n');
-        count += 1;
-    }
-    for path in exact {
-        // Git's line-delimited format cannot represent an exact LF path.
-        // A comment records the omission without inventing a broader rule.
-        if path.contains('\n') {
-            use std::fmt::Write as _;
-            writeln!(body, "# No exact Git exclusion for LF path: {path:?}").expect("string write");
-            continue;
-        }
-        body.push_str(&exact_exclude_pattern(&path));
-        body.push('\n');
-        count += 1;
-    }
     let block_identity = *blake3::hash(body.as_bytes()).as_bytes();
 
     let update = gat_io::mutate_info_exclude(repo.layout(), dry_run, |existing| {
@@ -298,7 +309,7 @@ pub fn managed_block_present(repo: &Repo) -> Result<bool> {
     let Some(snapshot) = gat_io::read_info_exclude(repo.layout())? else {
         return Ok(false);
     };
-    Ok(snapshot.contents().contains(BEGIN) && snapshot.contents().contains(END))
+    Ok(gat_core::managed_block::extract_body(snapshot.contents(), BEGIN, END).is_some())
 }
 
 /// Remove only Gat's managed block from `.git/info/exclude`, leaving every
@@ -310,10 +321,9 @@ pub fn managed_block_present(repo: &Repo) -> Result<bool> {
 /// user-owned content and revalidate it before replacement or removal.
 pub fn remove_managed_block(repo: &Repo) -> Result<bool> {
     let update = gat_io::mutate_info_exclude(repo.layout(), false, |existing| {
-        if !(existing.contains(BEGIN) && existing.contains(END)) {
+        let Some(updated) = gat_core::managed_block::remove(existing, BEGIN, END) else {
             return gat_io::InfoExcludeMutation::Unchanged;
-        }
-        let updated = gat_core::managed_block::remove(existing, BEGIN, END);
+        };
         if updated.trim().is_empty() {
             gat_io::InfoExcludeMutation::Remove
         } else {
@@ -375,8 +385,8 @@ pub(crate) fn sync_from_store_fast_path(
     // identity and (when a write actually happened) its write proof come
     // straight back from `render_with_proof` -- no re-read of the file
     // and no separate post-write stat are needed.
-    let exact = exact_from_store(store, cfg)?;
-    let (status, block_identity, update) = render_with_proof(repo, cfg, exact, false)?;
+    let body = body_from_store(store, cfg)?;
+    let (status, block_identity, update) = render_with_proof(repo, body, false)?;
     store.record_exclude_output(expected_fingerprint, status.count, block_identity, update)?;
     Ok(status)
 }
@@ -505,6 +515,64 @@ mod tests {
     }
 
     #[test]
+    fn inline_and_malformed_markers_are_not_managed_exclude_blocks() {
+        let tmp = git_repo();
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
+        let path = tmp.path().join(".git/info/exclude");
+        for user in [
+            format!("# example {BEGIN}\n*.user\n# example {END}\n"),
+            format!("{END}\n*.user\n{BEGIN}\n"),
+        ] {
+            std::fs::write(&path, &user).unwrap();
+            assert!(!managed_block_present(&repo).unwrap());
+            assert!(!remove_managed_block(&repo).unwrap());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), user);
+            sync_from_lock(&repo, &Lock::default(), false).unwrap();
+            assert!(managed_block_present(&repo).unwrap());
+            assert!(remove_managed_block(&repo).unwrap());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), user);
+        }
+    }
+
+    #[test]
+    fn changing_nul_separated_patterns_invalidates_the_exclude_proof() {
+        let tmp = git_repo();
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
+        let mut store = store_with_lock(&repo, &Lock::default());
+        set_ignore_patterns(&repo, &["first\0second"]);
+        let first = repo.load_config().unwrap();
+        assert!(
+            sync_from_store_fast_path(&repo, &mut store, &first)
+                .unwrap()
+                .changed
+        );
+        set_ignore_patterns(&repo, &["first", "second"]);
+        let second = repo.load_config().unwrap();
+        let desired = store.desired_fingerprint().unwrap();
+        assert_ne!(
+            fingerprint(&desired, first.git.effective_ignore_patterns()),
+            fingerprint(&desired, second.git.effective_ignore_patterns()),
+        );
+        let status = sync_from_store_fast_path(&repo, &mut store, &second).unwrap();
+        assert!(status.changed);
+        assert_eq!(status.count, 2);
+        let contents = std::fs::read_to_string(tmp.path().join(".git/info/exclude")).unwrap();
+        assert_eq!(
+            gat_core::managed_block::extract_body(&contents, BEGIN, END),
+            Some("first\nsecond\n"),
+        );
+        assert!(
+            !sync_from_store_fast_path(&repo, &mut store, &second)
+                .unwrap()
+                .changed
+        );
+    }
+
+    #[test]
     fn pruned_store_and_lock_render_like_the_original_matcher() {
         let tmp = git_repo();
         let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
@@ -521,6 +589,9 @@ mod tests {
             "keep.txt",
             "emptydir",
             "odd\npath",
+            "tail\r",
+            "space  ",
+            "meta[?]*",
         ] {
             insert(&mut lock, path, 'a');
         }
@@ -549,11 +620,12 @@ mod tests {
                 .collect();
             exact.sort();
             exact.dedup();
-            render(&repo, &cfg, exact, false).unwrap();
+            let expected_count = render(&repo, &cfg, exact, false).unwrap().count;
             let expected = std::fs::read_to_string(&exclude_path).unwrap();
             sync_from_lock_with_config(&repo, &lock, false, &cfg).unwrap();
             assert_eq!(std::fs::read_to_string(&exclude_path).unwrap(), expected);
-            sync_from_store_with_config(&repo, &store, false, &cfg).unwrap();
+            let status = sync_from_store_with_config(&repo, &store, false, &cfg).unwrap();
+            assert_eq!(status.count, expected_count);
             assert_eq!(std::fs::read_to_string(&exclude_path).unwrap(), expected);
         }
     }
@@ -589,6 +661,11 @@ mod tests {
 
     #[test]
     fn exact_exclude_pattern_escapes_glob_metacharacters_and_anchors_root() {
+        fn exact_exclude_pattern(path: &str) -> String {
+            let mut output = String::new();
+            append_exact_exclude_pattern(&mut output, path);
+            output
+        }
         assert_eq!(exact_exclude_pattern("data/model.bin"), "/data/model.bin");
         assert_eq!(
             exact_exclude_pattern("data/[foo]/model?.bin"),
@@ -689,6 +766,34 @@ mod tests {
     }
 
     #[test]
+    fn configured_marker_comments_cannot_split_the_managed_block() {
+        let tmp = git_repo();
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
+        let path = tmp.path().join(".git/info/exclude");
+        set_ignore_patterns(&repo, &[BEGIN, "*.model", END, "*.weights"]);
+        for eol in ["\n", "\r\n"] {
+            let user = format!("# user rules{eol}*.private{eol}");
+            std::fs::write(&path, &user).unwrap();
+            sync_from_lock(&repo, &Lock::default(), false).unwrap();
+            let installed = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(installed.lines().filter(|line| *line == BEGIN).count(), 1);
+            assert_eq!(installed.lines().filter(|line| *line == END).count(), 1);
+            assert!(is_ignored(&installed, "a.model"));
+            assert!(is_ignored(&installed, "a.weights"));
+            assert!(
+                !sync_from_lock(&repo, &Lock::default(), false)
+                    .unwrap()
+                    .changed
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), installed);
+            assert!(remove_managed_block(&repo).unwrap());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), user);
+        }
+    }
+
+    #[test]
     fn sync_is_idempotent() {
         let tmp = git_repo();
         let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
@@ -743,6 +848,27 @@ mod tests {
         assert!(status.changed);
         let status = sync(&repo, true).unwrap();
         assert!(!status.changed);
+    }
+
+    #[test]
+    fn loaded_lock_excludes_are_sorted_unique_and_idempotent() {
+        let tmp = git_repo();
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
+        let mut lock = Lock::default();
+        insert(&mut lock, "a.bin", 'a');
+        insert(&mut lock, "b.bin", 'b');
+        lock.entries.reverse();
+        lock.entries.push(lock.entries[0].clone());
+        let status = sync_from_lock(&repo, &lock, false).unwrap();
+        assert_eq!(status.count, 2);
+        let text = std::fs::read_to_string(tmp.path().join(".git/info/exclude")).unwrap();
+        assert_eq!(
+            gat_core::managed_block::extract_body(&text, BEGIN, END),
+            Some("/a.bin\n/b.bin\n")
+        );
+        assert!(!sync_from_lock(&repo, &lock, false).unwrap().changed);
     }
 
     #[test]

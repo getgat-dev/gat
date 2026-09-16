@@ -8,10 +8,14 @@ use std::{fs::ReadDir, io, path::PathBuf};
 const FILE_GC_BATCH_SIZE: usize = 128;
 
 pub struct FileObjectScan {
-    root: PathBuf,
-    started: bool,
+    state: ScanState,
+}
+
+enum ScanState {
+    Pending(PathBuf),
     // Namespace plus two fan-out directories: at most three live handles.
-    stack: Vec<(ReadDir, ScanLevel)>,
+    // An empty stack is exhausted and must never reopen the namespace.
+    Active(Vec<(ReadDir, ScanLevel)>),
 }
 
 #[derive(Clone, Copy)]
@@ -57,9 +61,7 @@ impl FileGc {
     #[must_use]
     pub fn listing(&self) -> FileObjectScan {
         FileObjectScan {
-            root: self.root.join(crate::cache::OBJECT_HASH_NAMESPACE),
-            started: false,
-            stack: Vec::new(),
+            state: ScanState::Pending(self.root.join(crate::cache::OBJECT_HASH_NAMESPACE)),
         }
     }
 
@@ -74,7 +76,7 @@ impl FileGc {
             FileDeleteBatch(
                 batch
                     .iter()
-                    .map(|oid| self.root.join(crate::cache::object_key_oid(oid)))
+                    .map(|oid| crate::cache::layout::object_path(&self.root, oid))
                     .collect(),
             )
         })
@@ -91,31 +93,28 @@ impl FileObjectScan {
     }
 
     fn read_batch(&mut self) -> io::Result<Option<Vec<Oid>>> {
-        if !self.started {
-            self.started = true;
-            match std::fs::symlink_metadata(&self.root) {
-                Ok(metadata) if metadata.is_dir() => {
-                    self.stack
-                        .push((std::fs::read_dir(&self.root)?, ScanLevel::Namespace));
-                }
-                Ok(_) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "invalid object namespace",
-                    ));
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => return Err(error),
-            }
+        if let ScanState::Pending(root) = &self.state {
+            // Commit initialization only after opening succeeds. A failed open
+            // must not turn a subsequent attempt into a false empty inventory.
+            let directory = crate::local_directory::read_directory_if_present(root)?;
+            self.state = ScanState::Active(
+                directory
+                    .map(|directory| (directory, ScanLevel::Namespace))
+                    .into_iter()
+                    .collect(),
+            );
         }
-        let mut objects = Vec::with_capacity(FILE_GC_BATCH_SIZE);
+        let ScanState::Active(stack) = &mut self.state else {
+            unreachable!("successful initialization activates the scan");
+        };
+        let mut objects = Vec::new();
         let mut visited = 0;
-        while let Some((directory, level)) = self.stack.last_mut() {
+        while let Some((directory, level)) = stack.last_mut() {
             if visited == FILE_GC_BATCH_SIZE {
                 return Ok(Some(objects));
             }
             let Some(entry) = directory.next() else {
-                self.stack.pop();
+                stack.pop();
                 continue;
             };
             let entry = entry?;
@@ -136,6 +135,9 @@ impl FileObjectScan {
                     .map(|second| ScanLevel::Objects(ObjectFanout::new(first, second))),
                 ScanLevel::Objects(fanout) if kind.is_file() => {
                     if let Some(oid) = fanout.parse_leaf(name) {
+                        if objects.capacity() == 0 {
+                            objects.reserve_exact(FILE_GC_BATCH_SIZE);
+                        }
                         objects.push(oid);
                     }
                     None
@@ -144,7 +146,7 @@ impl FileObjectScan {
             };
             if let Some(child) = child {
                 match std::fs::read_dir(entry.path()) {
-                    Ok(directory) => self.stack.push((directory, child)),
+                    Ok(directory) => stack.push((directory, child)),
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                     Err(error) => return Err(error),
                 }
@@ -265,7 +267,7 @@ mod tests {
         let mut pages = 0;
         while let Some(batch) = scan.next_batch().unwrap() {
             assert!(batch.len() <= FILE_GC_BATCH_SIZE);
-            assert!(scan.stack.len() <= 3);
+            assert!(matches!(&scan.state, ScanState::Active(stack) if stack.len() <= 3));
             seen.extend(batch);
             pages += 1;
         }
@@ -276,7 +278,7 @@ mod tests {
         seen.sort();
         expected.sort();
         assert_eq!(seen, expected);
-        assert!(scan.stack.is_empty());
+        assert!(matches!(&scan.state, ScanState::Active(stack) if stack.is_empty()));
         assert!(scan.next_batch().unwrap().is_none());
     }
 
@@ -328,6 +330,26 @@ mod tests {
         );
         std::fs::write(root.path().join("blake3"), b"invalid").unwrap();
         assert!(client.file_gc().unwrap().listing().next_batch().is_err());
+    }
+
+    #[test]
+    fn failed_namespace_open_remains_retryable_and_exhaustion_is_stable() {
+        let (root, client) = fixture();
+        let namespace = root.path().join("blake3");
+        std::fs::write(&namespace, b"obstruction").unwrap();
+        let mut scan = client.file_gc().unwrap().listing();
+        for _ in 0..2 {
+            assert!(scan.next_batch().is_err());
+        }
+        std::fs::remove_file(&namespace).unwrap();
+        object(root.path(), 1);
+        let mut seen = Vec::new();
+        while let Some(batch) = scan.next_batch().unwrap() {
+            seen.extend(batch);
+        }
+        assert_eq!(seen, [oid(1)]);
+        object(root.path(), 2);
+        assert!(scan.next_batch().unwrap().is_none());
     }
 
     #[test]

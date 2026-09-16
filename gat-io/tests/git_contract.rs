@@ -475,3 +475,84 @@ fn invalid_repository_errors_retain_the_requested_root() {
     let discovery_error = GitDiscovery::open(&layout).unwrap_err();
     assert_eq!(discovery_error.root(), temp.path());
 }
+
+#[test]
+fn exclude_mutation_retries_when_a_regular_file_appears_after_observation() {
+    let temp = repository();
+    let layout = layout(temp.path());
+    let exclude = temp.path().join(".git/info/exclude");
+    std::fs::remove_file(&exclude).unwrap();
+    let mut calls = 0;
+    let update = gat_io::mutate_info_exclude(&layout, false, |contents| {
+        calls += 1;
+        if calls == 1 {
+            assert!(contents.is_empty());
+            // Simulate another writer between observation and revalidation.
+            std::fs::write(&exclude, "user-rule\n").unwrap();
+        }
+        InfoExcludeMutation::Replace(format!("{contents}managed-rule\n"))
+    })
+    .unwrap();
+    assert!(update.changed());
+    assert_eq!(calls, 2);
+    assert_eq!(
+        std::fs::read_to_string(&exclude).unwrap(),
+        "user-rule\nmanaged-rule\n"
+    );
+}
+
+#[test]
+fn exclude_mutation_rejects_a_directory_that_appears_after_observation() {
+    let temp = repository();
+    let layout = layout(temp.path());
+    let exclude = temp.path().join(".git/info/exclude");
+    std::fs::remove_file(&exclude).unwrap();
+    let error = gat_io::mutate_info_exclude(&layout, false, |_| {
+        std::fs::create_dir(&exclude).unwrap();
+        InfoExcludeMutation::Replace("managed-rule\n".into())
+    })
+    .err()
+    .unwrap();
+    assert!(matches!(
+        error,
+        gat_io::InfoExcludeError::NotRegularFile { .. }
+    ));
+    assert!(exclude.is_dir());
+}
+
+#[test]
+#[cfg(unix)]
+fn exclude_mutation_never_replaces_or_removes_a_newly_appeared_symlink() {
+    for dangling in [false, true] {
+        for remove in [false, true] {
+            let temp = repository();
+            let layout = layout(temp.path());
+            let exclude = temp.path().join(".git/info/exclude");
+            let target = temp.path().join("user-file");
+            if !dangling {
+                std::fs::write(&target, b"user data").unwrap();
+            }
+            std::fs::remove_file(&exclude).unwrap();
+            let error = gat_io::mutate_info_exclude(&layout, false, |_| {
+                std::os::unix::fs::symlink(&target, &exclude).unwrap();
+                if remove {
+                    InfoExcludeMutation::Remove
+                } else {
+                    InfoExcludeMutation::Replace("managed-rule\n".into())
+                }
+            })
+            .err()
+            .unwrap();
+            assert!(matches!(
+                error,
+                gat_io::InfoExcludeError::NotRegularFile { .. }
+            ));
+            assert_eq!(std::fs::read_link(&exclude).unwrap(), target);
+            if dangling {
+                assert!(!target.exists());
+            } else {
+                assert_eq!(std::fs::read(&target).unwrap(), b"user data");
+            }
+        }
+    }
+}

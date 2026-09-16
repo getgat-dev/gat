@@ -27,7 +27,8 @@ fn layout_creates_a_copyable_repository_bound_worktree_capability() {
 
     worktree
         .move_path(&path("source.bin"), &path("nested/destination.bin"))
-        .unwrap();
+        .unwrap()
+        .commit();
     assert_eq!(
         std::fs::read(temp.path().join("nested/destination.bin")).unwrap(),
         b"payload"

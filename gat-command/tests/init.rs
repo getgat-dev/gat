@@ -303,9 +303,57 @@ fn unreadable_hook_fails_after_merge_integration_without_touching_hook() {
     assert!(matches!(
         error,
         InitError::Engine(ref source)
-            if source.kind() == InitializationErrorKind::NonUtf8Hook
+            if matches!(source.kind(), InitializationErrorKind::NonUtf8Hook { path: subject } if subject == path)
     ));
     assert_eq!(std::fs::read(path).expect("hook bytes"), bytes);
     assert!(merge_driver_installed(tmp.path()));
     assert!(attributes_installed(tmp.path()));
+}
+
+#[test]
+fn marker_examples_and_malformed_blocks_survive_idempotent_init() {
+    for user in [
+        "#!/bin/sh\necho '# >>> gat >>>'\necho custom\necho '# <<< gat <<<'\n",
+        "#!/bin/sh\n# <<< gat <<<\necho custom\n# >>> gat >>>\n",
+    ] {
+        let tmp = git_repo();
+        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
+        let hook = tmp.path().join(".git/hooks/post-checkout");
+        let attributes = tmp.path().join(".git/info/attributes");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(attributes.parent().unwrap()).unwrap();
+        std::fs::write(&hook, user).unwrap();
+        std::fs::write(&attributes, user).unwrap();
+        let absent = converge(
+            &repo,
+            InitRequest {
+                no_hooks: true,
+                no_merge_driver: true,
+                example_config: false,
+            },
+        );
+        assert_eq!(absent.hooks, InitHooksOutcome::AlreadyAbsent);
+        assert_eq!(absent.attributes, InitGitIntegrationOutcome::AlreadyAbsent);
+        assert_eq!(std::fs::read_to_string(&hook).unwrap(), user);
+        assert_eq!(std::fs::read_to_string(&attributes).unwrap(), user);
+        converge(&repo, InitRequest::default());
+        let again = converge(&repo, InitRequest::default());
+        assert_eq!(again.hooks, InitHooksOutcome::AlreadyInstalled);
+        assert_eq!(
+            again.attributes,
+            InitGitIntegrationOutcome::AlreadyInstalled
+        );
+        converge(
+            &repo,
+            InitRequest {
+                no_hooks: true,
+                no_merge_driver: true,
+                example_config: false,
+            },
+        );
+        assert_eq!(std::fs::read_to_string(&hook).unwrap(), user);
+        assert_eq!(std::fs::read_to_string(&attributes).unwrap(), user);
+    }
 }

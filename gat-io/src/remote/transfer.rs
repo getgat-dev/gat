@@ -181,17 +181,8 @@ impl RemoteClient {
         let info = self.operator.info();
         let cap = info.capability();
         let whole = size <= TRANSFER_CHUNK_SIZE as u64;
-        let mut options = tuning::upload_write_options(size, cap);
+        let mut options = tuning::upload_write_options(size, cap)?;
         options.if_not_exists = cap.write_with_if_not_exists;
-        if !whole {
-            options.chunk = Some(
-                options
-                    .chunk
-                    .unwrap_or(tuning::NETWORK_CHUNK_SIZE)
-                    .max(cap.write_multi_min_size.unwrap_or(1))
-                    .min(cap.write_multi_max_size.unwrap_or(usize::MAX)),
-            );
-        }
         let envelope = |options: &opendal::options::WriteOptions| {
             if whole {
                 TRANSFER_CHUNK_SIZE

@@ -1,4 +1,4 @@
-use super::layout::ObjectFanout;
+use super::layout::{ObjectFanout, parse_fanout_segment};
 use super::object::object_namespace_dir;
 use super::proof::{CacheProofError, CacheState};
 use gat_core::oid::Oid;
@@ -66,25 +66,42 @@ fn collect_entries(
 pub(crate) fn sweep_objects<E>(
     root: &super::root::CacheRootInner,
     dry_run: bool,
-    mut decide: impl FnMut(Oid) -> Result<CacheSweepDecision, E>,
+    decide: impl FnMut(Oid) -> Result<CacheSweepDecision, E>,
 ) -> Result<Result<CacheSweepStats, E>, CacheEnumerationError> {
     let objects_dir = &root.objects_dir;
     let namespace = object_namespace_dir(objects_dir);
-    let entries = match std::fs::read_dir(&namespace) {
-        Ok(entries) => collect_entries(&namespace, entries)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Ok(CacheSweepStats::default()));
-        }
-        Err(source) => return Err(CacheEnumerationError::io("read", &namespace, source)),
+    let Some(entries) = crate::local_directory::read_directory_if_present(&namespace)
+        .map_err(|source| CacheEnumerationError::io("read", &namespace, source))?
+    else {
+        return Ok(Ok(CacheSweepStats::default()));
     };
-    // Merely enumerating objects needs neither a writable proof database nor
-    // a removal buffer. Initialize them only when a deletion is selected.
-    let mut state = None;
-    let mut removed = Vec::new();
+    let entries = collect_entries(&namespace, entries)?;
+    // Keep read-only sweeps free of a proof connection and removal buffer.
+    let mut removals = None;
+    let result = sweep_entries(root, entries, dry_run, &mut removals, decide);
+    // Deletions already happened even if traversal or the decision callback failed.
+    // Attempt their proof cleanup on every exit, preserving any primary failure.
+    let flushed = removals.as_mut().map_or(Ok(()), ProofRemovals::flush);
+    match result {
+        Ok(Ok(stats)) => flushed.map(|()| Ok(stats)),
+        failed => failed,
+    }
+}
+
+fn sweep_entries<E>(
+    root: &super::root::CacheRootInner,
+    entries: Vec<std::fs::DirEntry>,
+    dry_run: bool,
+    removals: &mut Option<ProofRemovals>,
+    mut decide: impl FnMut(Oid) -> Result<CacheSweepDecision, E>,
+) -> Result<Result<CacheSweepStats, E>, CacheEnumerationError> {
     let mut stats = CacheSweepStats::default();
 
     for l1 in entries {
         let l1_name = l1.file_name();
+        let Some(first) = l1_name.to_str().and_then(parse_fanout_segment) else {
+            continue;
+        };
         let l1_path = l1.path();
         if !l1
             .file_type()
@@ -95,6 +112,11 @@ pub(crate) fn sweep_objects<E>(
         }
         let mut l1_nonempty = false;
         for l2 in directory_entries(&l1_path)? {
+            let l2_name = l2.file_name();
+            let Some(second) = l2_name.to_str().and_then(parse_fanout_segment) else {
+                l1_nonempty = true;
+                continue;
+            };
             let l2_path = l2.path();
             if !l2
                 .file_type()
@@ -104,17 +126,11 @@ pub(crate) fn sweep_objects<E>(
                 l1_nonempty = true;
                 continue;
             }
-            let l2_name = l2.file_name();
-            let fanout = l1_name
-                .to_str()
-                .zip(l2_name.to_str())
-                .and_then(|(first, second)| ObjectFanout::from_segments(first, second));
+            let fanout = ObjectFanout::new(first, second);
             let mut l2_nonempty = false;
             for leaf in directory_entries(&l2_path)? {
                 let name = leaf.file_name();
-                let Some(oid) = fanout
-                    .and_then(|fanout| name.to_str().and_then(|name| fanout.parse_leaf(name)))
-                else {
+                let Some(oid) = name.to_str().and_then(|name| fanout.parse_leaf(name)) else {
                     l2_nonempty = true;
                     continue;
                 };
@@ -133,21 +149,11 @@ pub(crate) fn sweep_objects<E>(
                         if dry_run {
                             l2_nonempty = true;
                         } else {
-                            if state.is_none() {
-                                let directory = root.prepare_directory().map_err(|error| {
-                                    CacheEnumerationError::io("prepare", error.path, error.source)
-                                })?;
-                                state = Some(CacheState::open_prepared(&directory));
-                                removed.reserve_exact(PROOF_REMOVAL_BATCH);
-                            }
-                            let path = leaf.path();
-                            std::fs::remove_file(&path).map_err(|source| {
-                                CacheEnumerationError::io("remove", path, source)
-                            })?;
-                            removed.push(oid);
-                            if removed.len() == PROOF_REMOVAL_BATCH {
-                                remove_proofs(state.as_ref(), &mut removed)?;
-                            }
+                            let removals = match &mut *removals {
+                                Some(removals) => removals,
+                                empty @ None => empty.insert(ProofRemovals::new(root)?),
+                            };
+                            removals.remove(&leaf.path(), oid)?;
                         }
                     }
                 }
@@ -164,19 +170,45 @@ pub(crate) fn sweep_objects<E>(
             remove_dir_if_empty(&l1_path)?;
         }
     }
-    remove_proofs(state.as_ref(), &mut removed)?;
     Ok(Ok(stats))
 }
 
-fn remove_proofs(
-    state: Option<&CacheState>,
-    removed: &mut Vec<Oid>,
-) -> Result<(), CacheEnumerationError> {
-    if let Some(state) = state {
-        state.remove_many(removed).map_err(CacheProofError::from)?;
+/// An active deletion batch always owns both its proof connection and buffer.
+struct ProofRemovals {
+    state: CacheState,
+    pending: Vec<Oid>,
+}
+
+impl ProofRemovals {
+    fn new(root: &super::root::CacheRootInner) -> Result<Self, CacheEnumerationError> {
+        let directory = root
+            .prepare_directory()
+            .map_err(|error| CacheEnumerationError::io("prepare", error.path, error.source))?;
+        Ok(Self {
+            state: CacheState::open_prepared(&directory),
+            pending: Vec::with_capacity(PROOF_REMOVAL_BATCH),
+        })
     }
-    removed.clear();
-    Ok(())
+
+    fn remove(&mut self, path: &Path, oid: Oid) -> Result<(), CacheEnumerationError> {
+        std::fs::remove_file(path)
+            .map_err(|source| CacheEnumerationError::io("remove", path, source))?;
+        self.pending.push(oid);
+        if self.pending.len() == PROOF_REMOVAL_BATCH {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), CacheEnumerationError> {
+        if !self.pending.is_empty() {
+            self.state
+                .remove_many(&self.pending)
+                .map_err(CacheProofError::from)?;
+            self.pending.clear();
+        }
+        Ok(())
+    }
 }
 
 fn remove_dir_if_empty(dir: &Path) -> Result<(), CacheEnumerationError> {
@@ -252,6 +284,52 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn sweep_rejects_namespace_symlinks_before_visiting_external_objects() {
+        let temp = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let oid = ingest(external.path(), std::io::Cursor::new(b"external payload"))
+            .unwrap()
+            .oid;
+        let namespace = object_namespace_dir(temp.path());
+        std::os::unix::fs::symlink(object_namespace_dir(external.path()), &namespace).unwrap();
+        let root = super::super::root::CacheRootInner::new(temp.path().to_path_buf(), None);
+        for dry_run in [true, false] {
+            let result = sweep_objects::<std::convert::Infallible>(&root, dry_run, |_| {
+                panic!("symlinked namespace must never reach the deletion policy")
+            });
+            assert!(
+                matches!(result, Err(CacheEnumerationError::Io { source, .. }) if source.kind() == std::io::ErrorKind::InvalidData)
+            );
+            assert_eq!(
+                std::fs::read(cache_path_oid(external.path(), &oid)).unwrap(),
+                b"external payload"
+            );
+            assert!(std::fs::symlink_metadata(&namespace).unwrap().is_symlink());
+        }
+    }
+
+    #[test]
+    fn invalid_fanout_directories_are_preserved_without_traversal_or_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let namespace = object_namespace_dir(temp.path());
+        for path in ["not-fanout/aa", "aa/not-fanout"] {
+            std::fs::create_dir_all(namespace.join(path)).unwrap();
+        }
+        let root = super::super::root::CacheRootInner::new(temp.path().to_path_buf(), None);
+        test_support::reset_remove_dir_attempt_count();
+        let stats = sweep_objects::<std::convert::Infallible>(&root, false, |_| {
+            panic!("no canonical objects")
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(stats, CacheSweepStats::default());
+        assert_eq!(test_support::remove_dir_attempt_count(), 0);
+        assert!(namespace.join("not-fanout/aa").is_dir());
+        assert!(namespace.join("aa/not-fanout").is_dir());
+    }
+
     #[test]
     fn sweep_removes_only_deleted_objects_and_empty_fanout_directories() {
         let temp = tempfile::tempdir().unwrap();
@@ -325,6 +403,56 @@ mod tests {
         assert_eq!(visited, vec![kept]);
         assert!(malformed.is_file());
         assert!(has_object_oid(temp.path(), &kept));
+    }
+
+    #[test]
+    fn interrupted_sweeps_flush_proofs_for_confirmed_deletions() {
+        for decision_failure in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = super::super::root::CacheRootInner::new(temp.path().to_path_buf(), None);
+            let mut objects = Vec::new();
+            for bytes in [b"first".as_slice(), b"second".as_slice()] {
+                let oid = ingest(temp.path(), std::io::Cursor::new(bytes))
+                    .unwrap()
+                    .oid;
+                let proof =
+                    file_state::observe_regular_file_no_follow(&cache_path_oid(temp.path(), &oid))
+                        .unwrap();
+                seed_cache_proof_for_test(temp.path(), &oid, &proof);
+                objects.push(oid);
+            }
+            let mut deleted = None;
+            let result = sweep_objects(&root, false, |oid| {
+                if deleted.is_none() {
+                    deleted = Some(oid);
+                } else if decision_failure {
+                    return Err("decision failed");
+                } else {
+                    // Fail the second unlink deterministically, regardless of
+                    // directory enumeration order or process permissions.
+                    let path = cache_path_oid(temp.path(), &oid);
+                    std::fs::remove_file(&path).unwrap();
+                    std::fs::create_dir(&path).unwrap();
+                }
+                Ok(CacheSweepDecision::Delete)
+            });
+            if decision_failure {
+                assert_eq!(result.unwrap(), Err("decision failed"));
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(CacheEnumerationError::Io {
+                        operation: "remove",
+                        ..
+                    })
+                ));
+            }
+            let deleted = deleted.unwrap();
+            assert!(!cache_path_oid(temp.path(), &deleted).exists());
+            for oid in objects {
+                assert_eq!(cache_has_proof_for_test(temp.path(), &oid), oid != deleted);
+            }
+        }
     }
 
     #[test]

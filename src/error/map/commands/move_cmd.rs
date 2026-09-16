@@ -11,7 +11,6 @@ impl From<MoveError> for Failure {
             MoveError::Path(source) => source.into(),
             MoveError::Acquisition(source) => (*source).into(),
             MoveError::PathPolicy(source) => source.into(),
-            MoveError::RemoteCatalog(source) => source.into(),
             MoveError::RepositoryMutation(source) => (*source).into(),
             MoveError::SourceNotTracked { ref path } => Self::expected(
                 Diagnostic::new(ErrorCode::Conflict, "This path is not tracked by gat")
@@ -43,6 +42,7 @@ impl From<MoveError> for Failure {
             MoveError::CheckDestination { source, .. } => source.into(),
             MoveError::Worktree(source) => match *source {
                 gat_engine::WorktreeMoveError::Path(source) => source.into(),
+                gat_engine::WorktreeMoveError::RestoreDestination(source) => source.into(),
                 error => {
                     let (path, source, summary) = match &error {
                         gat_engine::WorktreeMoveError::CreateParent { path, source } => (
@@ -53,7 +53,8 @@ impl From<MoveError> for Failure {
                         gat_engine::WorktreeMoveError::Rename { dst, source, .. } => {
                             (dst, source, "Could not rename the working-tree path")
                         }
-                        gat_engine::WorktreeMoveError::Path(_) => unreachable!(),
+                        gat_engine::WorktreeMoveError::Path(_)
+                        | gat_engine::WorktreeMoveError::RestoreDestination(_) => unreachable!(),
                     };
                     Self::infrastructure(
                         Diagnostic::new(super::super::io_code(source), summary)
@@ -76,7 +77,17 @@ impl From<MoveError> for Failure {
                 ref rollback_source,
                 ..
             } => {
+                if let gat_engine::WorktreeRollbackError::RestoreDestination(source) =
+                    &**rollback_source
+                {
+                    return Self::infrastructure(
+                        restore_destination_diagnostic(source)
+                            .with_detail("The source was restored, but the original destination remains in its recovery backup."),
+                        err,
+                    );
+                }
                 let code = match &**rollback_source {
+                    gat_engine::WorktreeRollbackError::RestoreDestination(_) => unreachable!(),
                     gat_engine::WorktreeRollbackError::Rename { source, .. }
                     | gat_engine::WorktreeRollbackError::Path(
                         gat_engine::WorktreePathError::Io { source, .. },
@@ -120,6 +131,23 @@ impl From<MoveError> for Failure {
     }
 }
 
+fn restore_destination_diagnostic(error: &gat_engine::RestoreMoveDestinationError) -> Diagnostic {
+    Diagnostic::new(
+        super::super::io_code(&error.source),
+        "Could not restore the original move destination",
+    )
+    .with_subject(UserLine::path(&error.backup))
+    .with_hint(
+        "Preserve this recovery backup and restore the destination before retrying the move.",
+    )
+}
+
+impl From<gat_engine::RestoreMoveDestinationError> for Failure {
+    fn from(error: gat_engine::RestoreMoveDestinationError) -> Self {
+        Self::infrastructure(restore_destination_diagnostic(&error), error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,8 +158,8 @@ mod tests {
         GatPath::parse_canonical(value).unwrap()
     }
 
-    fn publication_failure() -> MoveError {
-        MoveError::RepositoryMutation(Box::new(RepositoryMutationError::Publish {
+    fn publication_failure() -> RepositoryMutationError {
+        RepositoryMutationError::Publish {
             source: Box::new(
                 gat_io::AtomicError::PublishFailed {
                     path: "SENTINEL_PHYSICAL_PATH".into(),
@@ -142,12 +170,47 @@ mod tests {
                 }
                 .into(),
             ),
-        }))
+        }
     }
 
     fn assert_safe(failure: &Failure) {
         assert!(!format!("{:?}", failure.diagnostic()).contains("SENTINEL"));
         assert!(failure.technical_source().is_some());
+    }
+
+    #[test]
+    fn restore_failure_identifies_backup_without_exposing_io_details() {
+        for rollback in [false, true] {
+            let restore = gat_engine::RestoreMoveDestinationError {
+                backup: "recovery\n\u{1b}[31m/destination".into(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "SENTINEL_RESTORE",
+                ),
+            };
+            let error = if rollback {
+                MoveError::RollbackFailed {
+                    src: path("original"),
+                    dst: path("destination"),
+                    save_source: Box::new(publication_failure()),
+                    rollback_source: Box::new(WorktreeRollbackError::RestoreDestination(restore)),
+                }
+            } else {
+                MoveError::Worktree(Box::new(WorktreeMoveError::RestoreDestination(restore)))
+            };
+            let failure: Failure = error.into();
+            assert_eq!(failure.diagnostic().code(), ErrorCode::PermissionDenied);
+            assert!(failure.diagnostic().subject().unwrap().contains("recovery"));
+            assert!(
+                !failure
+                    .diagnostic()
+                    .subject()
+                    .unwrap()
+                    .contains(['\n', '\u{1b}'])
+            );
+            assert!(failure.diagnostic().hints().join(" ").contains("backup"));
+            assert_safe(&failure);
+        }
     }
 
     #[test]

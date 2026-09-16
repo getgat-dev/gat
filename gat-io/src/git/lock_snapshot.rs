@@ -5,7 +5,7 @@ use gat_core::git::GitRevisionSpec;
 use gat_core::lock::Entry;
 #[cfg(any(test, feature = "test-support"))]
 use gat_core::lock::Lock;
-use gat_core::lock::validated::{FilteredRowCursor, visit_filtered_matching};
+use gat_core::lock::validated::FilteredRowCursor;
 use gat_core::lock::{LockShardId, LockShardLevels};
 use gat_core::selection::Selection;
 
@@ -395,49 +395,13 @@ impl LockSnapshot {
         shard: &SnapshotShard,
         keep: impl FnMut(&str) -> bool,
     ) -> Result<Vec<Entry>, LockSnapshotError> {
-        let mut kept = Vec::new();
-        self.visit_shard_rows_matching(shard, keep, |entry| {
-            kept.push(entry);
-            Ok(())
-        })?;
-        Ok(kept)
-    }
-
-    fn visit_shard_rows_matching(
-        &self,
-        shard: &SnapshotShard,
-        keep: impl FnMut(&str) -> bool,
-        mut visit: impl FnMut(Entry) -> Result<(), LockSnapshotError>,
-    ) -> Result<(), LockSnapshotError> {
-        #[cfg(any(test, feature = "test-support"))]
-        test_support::record_shard_blob_read();
-        let blob = self.repo.find_object(shard.blob).map_err(|source| {
-            LockSnapshotError::object(
-                &self.root,
-                &self.label,
-                format!("reading {} blob", self.label),
-                source,
-            )
-        })?;
-        let text = std::str::from_utf8(&blob.data).map_err(|source| {
-            LockSnapshotError::invalid_with_detail(
-                &self.root,
-                &self.label,
-                format!("shard blob is not valid UTF-8: {source}"),
-                source,
-            )
-        })?;
-        let mut visit_err = None;
-        let outcome = visit_filtered_matching(text, keep, |entry| {
-            visit(entry).map_err(|error| {
-                visit_err = Some(error);
-                gat_core::lock::LockError::CallbackFailed
-            })
-        });
-        if let Some(error) = visit_err {
-            return Err(error);
-        }
-        outcome.map_err(|error| self.invalid(error))
+        self.with_shard_rows_matching(shard, keep, |pull| {
+            let mut kept = Vec::new();
+            while let Some(entry) = pull()? {
+                kept.push(entry);
+            }
+            Ok(kept)
+        })
     }
 
     /// Returns selected rows in certified path order; malformed or unordered
@@ -464,6 +428,18 @@ impl LockSnapshot {
     where
         E: From<LockSnapshotError>,
     {
+        self.with_shard_rows_matching(shard, |path| selection.matches_str(path), body)
+    }
+
+    fn with_shard_rows_matching<R, E>(
+        &self,
+        shard: &SnapshotShard,
+        keep: impl FnMut(&str) -> bool,
+        body: impl FnOnce(&mut dyn FnMut() -> Result<Option<Entry>, E>) -> Result<R, E>,
+    ) -> Result<R, E>
+    where
+        E: From<LockSnapshotError>,
+    {
         #[cfg(any(test, feature = "test-support"))]
         test_support::record_shard_blob_read();
         let blob = self.repo.find_object(shard.blob).map_err(|source| {
@@ -482,8 +458,8 @@ impl LockSnapshot {
                 source,
             ))
         })?;
-        let mut cursor = FilteredRowCursor::new(text, |path: &str| selection.matches_str(path))
-            .map_err(|error| E::from(self.invalid(error)))?;
+        let mut cursor =
+            FilteredRowCursor::new(text, keep).map_err(|error| E::from(self.invalid(error)))?;
         let mut pull = || Ok(cursor.next());
         body(&mut pull)
     }

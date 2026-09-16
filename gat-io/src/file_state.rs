@@ -24,7 +24,6 @@
 //! differ -- fails with an error: there is no proof-less "still
 //! trustworthy" outcome. A rewrite that preserves the exact persisted
 //! `StatProof` is not detected.
-#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -60,8 +59,8 @@ pub enum FileStateError {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct StatProof {
     pub(crate) size: u64,
-    pub(crate) mtime_secs: i64,
-    pub(crate) mtime_nanos: i64,
+    mtime_secs: i64,
+    mtime_nanos: u32,
 }
 
 impl std::fmt::Debug for StatProof {
@@ -71,6 +70,16 @@ impl std::fmt::Debug for StatProof {
 }
 
 impl StatProof {
+    #[cfg(test)]
+    pub(crate) fn for_test(size: u64, mtime_secs: i64, mtime_nanos: u32) -> Self {
+        assert!(mtime_nanos < 1_000_000_000);
+        Self {
+            size,
+            mtime_secs,
+            mtime_nanos,
+        }
+    }
+
     /// Whether `self` (a freshly observed proof) proves the file's
     /// content identity is still whatever `prior` was recorded for: an
     /// exact `(size, mtime_secs, mtime_nanos)` match. See
@@ -107,11 +116,18 @@ pub fn stat_proof_from_metadata(meta: &std::fs::Metadata) -> Option<StatProof> {
         return None;
     }
     let mtime = meta.modified().ok()?;
-    let since_epoch = mtime.duration_since(UNIX_EPOCH).unwrap_or_default();
+    proof_from_timestamp(meta.len(), mtime)
+}
+
+fn proof_from_timestamp(size: u64, mtime: std::time::SystemTime) -> Option<StatProof> {
+    let nanos = match mtime.duration_since(UNIX_EPOCH) {
+        Ok(duration) => i128::try_from(duration.as_nanos()).ok()?,
+        Err(before) => -i128::try_from(before.duration().as_nanos()).ok()?,
+    };
     Some(StatProof {
-        size: meta.len(),
-        mtime_secs: i64::try_from(since_epoch.as_secs()).unwrap_or(i64::MAX),
-        mtime_nanos: i64::from(since_epoch.subsec_nanos()),
+        size,
+        mtime_secs: i64::try_from(nanos.div_euclid(1_000_000_000)).ok()?,
+        mtime_nanos: u32::try_from(nanos.rem_euclid(1_000_000_000)).ok()?,
     })
 }
 
@@ -151,10 +167,8 @@ pub struct CoherentObservation<T> {
 /// other non-regular object on either side, or two regular-file stats
 /// that differ -- fails with an error: unlike the `Stable`/`Racy`/
 /// `Unstable` model this replaces, there is no successful-but-proof-less
-/// outcome any more. `op` still always runs (its side effects, if any,
-/// already happened by the time a caller could observe this error), but
-/// its result is only ever returned wrapped in a proof the caller can
-/// trust.
+/// outcome. `op` runs only after the initial stat succeeds; its effects may
+/// already have happened when the post-operation stat rejects the observation.
 pub fn coherent_observation<T, E>(
     path: &Path,
     op: impl FnOnce() -> std::result::Result<T, E>,
@@ -286,28 +300,30 @@ where
     })
 }
 
-/// Proof-format version 1: byte 0 is the version tag, bytes 1..9 are
+/// Proof-format version 2: byte 0 is the version tag, bytes 1..9 are
 /// `size` as a fixed-endianness `u64`, bytes 9..17 are `mtime_secs` as a
 /// fixed-endianness `i64`, and bytes 17..21 are `mtime_nanos` as a
-/// fixed-endianness `i32` -- an explicit application wire format, not a
+/// fixed-endianness `u32` -- an explicit application wire format, not a
 /// serialization of Rust's in-memory struct layout, so it stays stable
 /// and architecture-independent across `gat` versions and platforms.
-/// Carries full sub-second resolution in the version-1 wire format. The
+/// Carries full sub-second resolution in the version-2 wire format. The
 /// format is decoded only when its version and length are recognized.
-const PROOF_VERSION_1: u8 = 1;
+/// Version 1 collapsed pre-epoch timestamps to zero; its proofs are discarded
+/// so that an old observation can never incorrectly match a file at the epoch.
+const PROOF_VERSION: u8 = 2;
 
-/// The exact, fixed encoded length of a version-1 [`StatProof`].
-pub const ENCODED_LEN_V1: usize = 21;
+/// The exact, fixed encoded length of a version-2 [`StatProof`].
+pub const ENCODED_LEN: usize = 21;
 
 /// Encode `proof` into its explicit, versioned wire format (see
-/// [`PROOF_VERSION_1`]). Proof-format versioning here is independent of
+/// [`PROOF_VERSION`]). Proof-format versioning here is independent of
 /// any `SQLite` schema versioning a persisting caller may also have.
-pub fn encode_stat_proof(proof: &StatProof) -> [u8; ENCODED_LEN_V1] {
-    let mut out = [0u8; ENCODED_LEN_V1];
-    out[0] = PROOF_VERSION_1;
+pub fn encode_stat_proof(proof: &StatProof) -> [u8; ENCODED_LEN] {
+    let mut out = [0u8; ENCODED_LEN];
+    out[0] = PROOF_VERSION;
     out[1..9].copy_from_slice(&proof.size.to_le_bytes());
     out[9..17].copy_from_slice(&proof.mtime_secs.to_le_bytes());
-    out[17..21].copy_from_slice(&proof.mtime_nanos.to_le_bytes()[..4]);
+    out[17..21].copy_from_slice(&proof.mtime_nanos.to_le_bytes());
     out
 }
 
@@ -319,22 +335,22 @@ pub fn encode_stat_proof(proof: &StatProof) -> [u8; ENCODED_LEN_V1] {
 /// re-establishing identity by hash, not silently trust unverified
 /// bytes.
 pub fn decode_stat_proof(bytes: &[u8]) -> Option<StatProof> {
-    if bytes.len() != ENCODED_LEN_V1 {
+    if bytes.len() != ENCODED_LEN {
         return None;
     }
-    if bytes[0] != PROOF_VERSION_1 {
+    if bytes[0] != PROOF_VERSION {
         return None;
     }
     let size = u64::from_le_bytes(bytes[1..9].try_into().ok()?);
     let mtime_secs = i64::from_le_bytes(bytes[9..17].try_into().ok()?);
-    let mtime_nanos = i32::from_le_bytes(bytes[17..21].try_into().ok()?);
+    let mtime_nanos = u32::from_le_bytes(bytes[17..21].try_into().ok()?);
     if !(0..1_000_000_000).contains(&mtime_nanos) {
         return None;
     }
     Some(StatProof {
         size,
         mtime_secs,
-        mtime_nanos: i64::from(mtime_nanos),
+        mtime_nanos,
     })
 }
 
@@ -372,6 +388,64 @@ mod tests {
 
     fn test_oid() -> gat_core::oid::Oid {
         gat_core::oid::Oid::from_hex(&"ab".repeat(32)).unwrap()
+    }
+
+    #[test]
+    fn timestamps_preserve_signed_seconds_and_fractional_precision() {
+        use std::time::Duration;
+        for (mtime, seconds, nanos) in [
+            (UNIX_EPOCH, 0, 0),
+            // Windows SystemTime has 100 ns resolution.
+            (UNIX_EPOCH + Duration::new(12, 123_400), 12, 123_400),
+            (UNIX_EPOCH - Duration::new(12, 0), -12, 0),
+            (UNIX_EPOCH - Duration::new(12, 123_400), -13, 999_876_600),
+            (UNIX_EPOCH - Duration::new(0, 100), -1, 999_999_900),
+            #[cfg(unix)]
+            (UNIX_EPOCH + Duration::new(12, 123), 12, 123),
+            #[cfg(unix)]
+            (UNIX_EPOCH - Duration::new(12, 123), -13, 999_999_877),
+            #[cfg(unix)]
+            (UNIX_EPOCH - Duration::new(0, 1), -1, 999_999_999),
+        ] {
+            let proof = proof_from_timestamp(7, mtime).unwrap();
+            assert_eq!(proof.size, 7);
+            assert_eq!(proof.mtime_secs, seconds);
+            assert_eq!(proof.mtime_nanos, nanos);
+            assert_eq!(decode_stat_proof(&encode_stat_proof(&proof)), Some(proof));
+        }
+    }
+
+    #[test]
+    fn legacy_proofs_cannot_reuse_a_collapsed_timestamp() {
+        let proof = proof_from_timestamp(7, UNIX_EPOCH).unwrap();
+        let mut bytes = encode_stat_proof(&proof);
+        bytes[0] = 1;
+        assert_eq!(decode_stat_proof(&bytes), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn changed_pre_epoch_mtime_rehashes_same_size_content() {
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old-file");
+        fs::write(&path, b"old").unwrap();
+        let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_modified(UNIX_EPOCH - Duration::from_secs(20))
+            .unwrap();
+        let prior = observe_regular_file_no_follow(&path).unwrap();
+        assert_eq!(prior.mtime_secs, -20);
+        fs::write(&path, b"new").unwrap();
+        file.set_modified(UNIX_EPOCH - Duration::from_secs(10))
+            .unwrap();
+        let mut calls = 0;
+        let result = check_known_oid(&path, test_oid(), Some(&prior), |_| {
+            calls += 1;
+            Ok::<_, FileStateError>(test_oid())
+        })
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert!(matches!(result, IdentityCheck::Hashed { .. }));
     }
 
     #[test]
@@ -604,19 +678,19 @@ mod tests {
     }
 
     #[test]
-    fn v1_codec_exact_length_version_and_fixed_endian_round_trip() {
+    fn v2_codec_exact_length_version_and_fixed_endian_round_trip() {
         let proof = StatProof {
             size: 0x0102_0304_0506_0708,
             mtime_secs: -12345,
             mtime_nanos: 123_456_789,
         };
         let encoded = encode_stat_proof(&proof);
-        assert_eq!(encoded.len(), ENCODED_LEN_V1);
-        assert_eq!(encoded[0], 1, "version byte");
+        assert_eq!(encoded.len(), ENCODED_LEN);
+        assert_eq!(encoded[0], 2, "version byte");
         // Fixed little-endian regardless of host architecture.
         assert_eq!(&encoded[1..9], &proof.size.to_le_bytes());
         assert_eq!(&encoded[9..17], &proof.mtime_secs.to_le_bytes());
-        assert_eq!(&encoded[17..21], &proof.mtime_nanos.to_le_bytes()[..4]);
+        assert_eq!(&encoded[17..21], &proof.mtime_nanos.to_le_bytes());
         let decoded = decode_stat_proof(&encoded).unwrap();
         assert_eq!(decoded, proof);
     }
@@ -629,7 +703,7 @@ mod tests {
             mtime_nanos: 1,
         };
         let mut encoded = encode_stat_proof(&proof);
-        encoded[0] = 2;
+        encoded[0] = 3;
         assert_eq!(decode_stat_proof(&encoded), None);
     }
 
@@ -675,8 +749,8 @@ mod tests {
         // A hand-built byte sequence (as another platform/process would
         // produce) must decode identically, proving the format is an
         // explicit wire contract rather than `#[repr(Rust)]` memory.
-        let mut bytes = [0u8; ENCODED_LEN_V1];
-        bytes[0] = 1;
+        let mut bytes = [0u8; ENCODED_LEN];
+        bytes[0] = 2;
         bytes[1..9].copy_from_slice(&42u64.to_le_bytes());
         bytes[9..17].copy_from_slice(&(-7i64).to_le_bytes());
         bytes[17..21].copy_from_slice(&123_456_789i32.to_le_bytes());
@@ -716,7 +790,7 @@ mod tests {
 
     #[test]
     fn the_stat_proof_codec_never_truncates_sub_second_mtime_back_to_whole_seconds() {
-        for nanos in [0i64, 1, 999_999_999] {
+        for nanos in [0u32, 1, 999_999_999] {
             let proof = StatProof {
                 size: 10,
                 mtime_secs: 1_000,
@@ -759,7 +833,7 @@ mod tests {
         };
         let bumped = UNIX_EPOCH
             + std::time::Duration::from_secs(u64::try_from(before.mtime_secs).unwrap())
-            + std::time::Duration::from_nanos(u64::try_from(bumped_nanos).unwrap());
+            + std::time::Duration::from_nanos(u64::from(bumped_nanos));
         std::fs::OpenOptions::new()
             .write(true)
             .open(&path)

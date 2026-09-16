@@ -130,18 +130,6 @@ pub(super) fn validate_path(path: &str, line: usize) -> Result<()> {
     .into())
 }
 
-/// Whether a canonical tracked `path` falls under the canonical `scope`:
-/// either the exact tracked file, or anything nested below that directory
-/// prefix. Sibling prefixes don't match (`data` must not match
-/// `data.bin`).
-#[must_use]
-pub fn path_matches_scope(
-    path: &crate::lexical_path::GatPath,
-    scope: &crate::lexical_path::GatPath,
-) -> bool {
-    path.is_or_under(scope)
-}
-
 /// Fails if any path in `paths` is a `/`-delimited directory prefix of
 /// another path in the set (e.g. `"foo"` and `"foo/bar"` both present) --
 /// a real tree can't have a tracked file *and* tracked descendants under
@@ -152,21 +140,27 @@ pub fn path_matches_scope(
 /// (0x30) are adjacent ASCII code points, so this range captures every
 /// string with `path` as a `/`-delimited prefix and nothing else, no
 /// matter what characters sibling paths contain. `BTreeSet::range` makes
-/// each check `O(log n)`, so validating the whole set is `O(n log n)`,
-/// not quadratic.
+/// each check `O(log n)`, so validating the whole set is `O(n log n)`.
+/// Only the first key at or above the lower bound can be the first descendant;
+/// checking that key avoids allocating an upper bound. The lower-bound buffer
+/// is reused across paths.
 pub fn validate_no_path_directory_conflicts<T>(paths: &std::collections::BTreeSet<T>) -> Result<()>
 where
-    T: Ord + std::borrow::Borrow<str> + std::fmt::Debug,
+    T: Ord + std::borrow::Borrow<str>,
 {
+    let mut lower = String::new();
     for path in paths {
         let path: &str = path.borrow();
-        let lower = format!("{path}/");
-        let upper = format!("{path}0");
+        lower.clear();
+        lower.push_str(path);
+        lower.push('/');
         let bounds = (
             std::ops::Bound::Included(lower.as_str()),
-            std::ops::Bound::Excluded(upper.as_str()),
+            std::ops::Bound::Unbounded,
         );
-        if let Some(descendant) = paths.range::<str, _>(bounds).next() {
+        if let Some(descendant) = paths.range::<str, _>(bounds).next()
+            && is_directory_prefix(path, descendant.borrow())
+        {
             let descendant: &str = descendant.borrow();
             return Err(LockDomainError::DirectoryPrefixConflict {
                 ancestor: path.to_string(),
@@ -415,7 +409,7 @@ impl Lock {
     ) -> Vec<crate::lexical_path::GatPath> {
         let mut removed = Vec::new();
         self.entries.retain(|e| {
-            let matches = path_matches_scope(&e.path, path);
+            let matches = e.path.is_or_under(path);
             if matches {
                 removed.push(e.path.clone());
             }

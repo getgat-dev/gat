@@ -6,7 +6,6 @@ use gat_core::name::MountName;
 use gat_core::oid::Oid;
 use gat_core::selection::Selection;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
@@ -100,10 +99,10 @@ pub struct MountTxnRecord {
     pub phase: MountTxnPhase,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StagedRow {
-    pub path: GatPath,
-    pub oid: Oid,
+#[derive(Serialize, Deserialize)]
+struct StagedRow {
+    path: GatPath,
+    oid: Oid,
 }
 
 /// A parseable mount journal whose semantic operation shape is unsafe to
@@ -263,10 +262,8 @@ impl MountJournal {
 
     pub fn read(&self) -> Result<Option<MountTxnRecord>> {
         let path = self.path();
-        let body = match std::fs::read_to_string(&path) {
-            Ok(body) => body,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(source) => return Err(MountJournalError::io("reading", path, source)),
+        let Some(body) = read_journal_text(&path)? else {
+            return Ok(None);
         };
         let decoded: DecodedMountTxnRecord = serde_json::from_str(&body)
             .map_err(|source| MountJournalError::serde("parsing", &path, source))?;
@@ -347,7 +344,7 @@ impl MountJournal {
             .map_err(|source| MountJournalError::io("creating", rows_dir, source))
     }
 
-    pub fn write_staged_window(&self, window: usize, rows: &[StagedRow]) -> Result<()> {
+    fn write_staged_window(&self, window: usize, rows: &[StagedRow]) -> Result<()> {
         let path = self.staged_window_path(window);
         let body = serde_json::to_string(rows)
             .map_err(|source| MountJournalError::serde("serializing", &path, source))?;
@@ -356,37 +353,60 @@ impl MountJournal {
         Ok(())
     }
 
-    pub fn read_staged_window(&self, window: usize) -> Result<Vec<StagedRow>> {
+    fn read_staged_window(&self, window: usize) -> Result<Vec<StagedRow>> {
         let path = self.staged_window_path(window);
-        let body = std::fs::read_to_string(&path)
-            .map_err(|source| MountJournalError::io("reading", &path, source))?;
+        let body = read_journal_text(&path)?.ok_or_else(|| {
+            MountJournalError::io(
+                "reading",
+                &path,
+                std::io::Error::from(std::io::ErrorKind::NotFound),
+            )
+        })?;
         serde_json::from_str(&body)
             .map_err(|source| MountJournalError::serde("parsing", path, source))
     }
 
-    #[must_use]
-    pub const fn staged_windows(&self, count: usize) -> StagedWindows<'_> {
-        StagedWindows {
-            journal: self,
-            next: 0,
-            count,
-            target: None,
-        }
-    }
-
-    /// Read exactly the windows declared by a validated transaction and
-    /// reject rows outside its recorded destination target.
-    #[must_use]
-    pub const fn validated_staged_windows<'a>(
+    /// Read exactly the declared windows, rejecting empty windows and rows
+    /// outside the transaction's destination before exposing logical entries.
+    /// Remove transactions have no destination and therefore yield no rows.
+    ///
+    /// ```compile_fail
+    /// fn unchecked(journal: &gat_io::MountJournal) {
+    ///     let rows = journal.staged_windows(3);
+    /// }
+    /// ```
+    pub fn validated_staged_windows<'a>(
         &'a self,
         record: &'a MountTxnRecord,
-    ) -> StagedWindows<'a> {
-        StagedWindows {
-            journal: self,
-            next: 0,
-            count: record.change.row_windows(),
-            target: record.change.new_target(),
-        }
+    ) -> impl Iterator<Item = Result<Vec<gat_core::lock::Entry>>> + 'a {
+        record
+            .change
+            .new_target()
+            .into_iter()
+            .flat_map(move |target| {
+                (0..record.change.row_windows()).map(move |window| {
+                    let rows = self.read_staged_window(window)?;
+                    if rows.is_empty() {
+                        return Err(MountJournalError::invalid(
+                            self.staged_window_path(window),
+                            MountJournalValidationError::EmptyStagedWindow { window },
+                        ));
+                    }
+                    if rows.iter().any(|row| !row.path.is_or_under(target)) {
+                        return Err(MountJournalError::invalid(
+                            self.staged_window_path(window),
+                            MountJournalValidationError::StagedRowOutsideTarget { window },
+                        ));
+                    }
+                    Ok(rows
+                        .into_iter()
+                        .map(|row| gat_core::lock::Entry {
+                            path: row.path,
+                            oid: row.oid,
+                        })
+                        .collect())
+                })
+            })
     }
 
     /// Stream the selected source lock into bounded, durable staging
@@ -413,14 +433,14 @@ impl MountJournal {
         self.reset_staged_rows()?;
         let exact_source_path = selection
             .has_no_glob_filter()
-            .then(|| selection.scope_path().cloned())
+            .then(|| selection.scope_path())
             .flatten();
         let mut rows = Vec::with_capacity(window_size);
         let mut windows = 0usize;
         let mut flush_error = None;
         let outcome = LockStore::visit_selected(
             source_root,
-            exact_source_path.as_ref(),
+            exact_source_path,
             |path| selection.matches_str(path),
             |entry| {
                 let Some(relative) = selection.reparent_relative(&entry.path) else {
@@ -467,98 +487,87 @@ impl MountJournal {
 
     fn validate_staged_files(&self, count: usize) -> Result<()> {
         let directory = self.staged_rows_dir();
-        let entries = match std::fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound && count == 0 => {
-                return Ok(());
-            }
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-                return Err(MountJournalError::invalid(
+        let Some(entries) = crate::local_directory::read_directory_if_present(&directory)
+            .map_err(|source| MountJournalError::io("validating", &directory, source))?
+        else {
+            return if count == 0 {
+                Ok(())
+            } else {
+                Err(MountJournalError::invalid(
                     directory,
                     MountJournalValidationError::MissingStagedWindow { window: 0 },
-                ));
-            }
-            Err(source) => {
-                return Err(MountJournalError::io("validating", directory, source));
-            }
+                ))
+            };
         };
-        let mut found = BTreeSet::new();
+        let unexpected_entry = || {
+            MountJournalError::invalid(
+                &directory,
+                MountJournalValidationError::UnexpectedStagedEntry,
+            )
+        };
+        // Grow from observed entries, never from an untrusted journal count.
+        let mut found = Vec::new();
         for entry in entries {
             let entry =
                 entry.map_err(|source| MountJournalError::io("validating", &directory, source))?;
-            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                return Err(MountJournalError::invalid(
-                    &directory,
-                    MountJournalValidationError::UnexpectedStagedEntry,
-                ));
-            };
-            if !found.insert(name) {
-                return Err(MountJournalError::invalid(
-                    &directory,
-                    MountJournalValidationError::UnexpectedStagedEntry,
-                ));
+            let name = entry.file_name();
+            let window = name
+                .to_str()
+                .and_then(parse_staged_window_name)
+                .filter(|window| *window < count)
+                .ok_or_else(unexpected_entry)?;
+            let kind = entry
+                .file_type()
+                .map_err(|source| MountJournalError::io("validating", entry.path(), source))?;
+            if !kind.is_file() {
+                return Err(unexpected_entry());
             }
+            found.push(window);
         }
-        for window in 0..count {
-            if !found.remove(&format!("window-{window:05}.json")) {
-                return Err(MountJournalError::invalid(
-                    &directory,
-                    MountJournalValidationError::MissingStagedWindow { window },
-                ));
+        found.sort_unstable();
+        if found.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(unexpected_entry());
+        }
+        let mut expected = 0;
+        for window in found {
+            if window != expected {
+                break;
             }
+            expected += 1;
         }
-        if !found.is_empty() {
+        if expected != count {
             return Err(MountJournalError::invalid(
                 directory,
-                MountJournalValidationError::UnexpectedStagedEntry,
+                MountJournalValidationError::MissingStagedWindow { window: expected },
             ));
         }
         Ok(())
     }
 }
 
-pub struct StagedWindows<'a> {
-    journal: &'a MountJournal,
-    next: usize,
-    count: usize,
-    target: Option<&'a GatPath>,
+fn parse_staged_window_name(name: &str) -> Option<usize> {
+    let digits = name.strip_prefix("window-")?.strip_suffix(".json")?;
+    if digits.len() < 5
+        || (digits.len() > 5 && digits.starts_with('0'))
+        || !digits.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    digits.parse().ok()
 }
 
-impl Iterator for StagedWindows<'_> {
-    type Item = Result<Vec<StagedRow>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.next >= self.count {
-            return None;
-        }
-        let window = self.next;
-        self.next += 1;
-        Some(self.journal.read_staged_window(window).and_then(|rows| {
-            if self.target.is_some() && rows.is_empty() {
-                return Err(MountJournalError::invalid(
-                    self.journal.staged_window_path(window),
-                    MountJournalValidationError::EmptyStagedWindow { window },
-                ));
-            }
-            if let Some(target) = self.target
-                && rows.iter().any(|row| !row.path.is_or_under(target))
-            {
-                return Err(MountJournalError::invalid(
-                    self.journal.staged_window_path(window),
-                    MountJournalValidationError::StagedRowOutsideTarget { window },
-                ));
-            }
-            Ok(rows)
-        }))
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.count - self.next;
-        (remaining, Some(remaining))
-    }
+fn read_journal_text(path: &Path) -> Result<Option<String>> {
+    super::read_text_if_present(path).map_err(|error| {
+        let source = match error {
+            super::JournalReadError::Io(source) => source,
+            super::JournalReadError::NotRegular => std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "expected a regular journal file",
+            ),
+        };
+        MountJournalError::io("reading", path, source)
+    })
 }
-
-impl ExactSizeIterator for StagedWindows<'_> {}
 
 fn decode_change(
     path: &Path,
@@ -653,6 +662,173 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn special_entry(path: &Path, kind: &str) {
+        match kind {
+            "directory" => std::fs::create_dir(path).unwrap(),
+            "symlink" => {
+                let target = path
+                    .parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join("special-target.json");
+                std::fs::write(&target, b"[]").unwrap();
+                std::os::unix::fs::symlink(target, path).unwrap();
+            }
+            "dangling" => std::os::unix::fs::symlink(path.with_extension("missing"), path).unwrap(),
+            "fifo" => assert!(
+                std::process::Command::new("mkfifo")
+                    .arg(path)
+                    .status()
+                    .unwrap()
+                    .success()
+            ),
+            _ => unreachable!(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_entries_must_be_regular_files_even_when_symlink_targets_are_absent() {
+        for kind in ["directory", "symlink", "dangling", "fifo"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let journal = MountJournal::open(&layout(tmp.path()));
+            journal.ensure_directory().unwrap();
+            special_entry(&journal.path(), kind);
+            assert!(
+                matches!(journal.read(), Err(MountJournalError::Io { source, .. }) if source.kind() == std::io::ErrorKind::InvalidData),
+                "{kind}"
+            );
+            assert!(std::fs::symlink_metadata(journal.path()).is_ok());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_entries_are_checked_during_inventory_and_again_during_replay() {
+        for kind in ["directory", "symlink", "dangling", "fifo"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let journal = MountJournal::open(&layout(tmp.path()));
+            journal.reset_staged_rows().unwrap();
+            let mut transaction = record();
+            transaction.change = MountTxnChange::Add {
+                target: GatPath::parse_canonical("data").unwrap(),
+                row_windows: 1,
+            };
+            journal.write(&transaction).unwrap();
+            special_entry(&journal.staged_window_path(0), kind);
+            assert!(
+                matches!(
+                    journal.read(),
+                    Err(MountJournalError::InvalidRecord {
+                        reason: MountJournalValidationError::UnexpectedStagedEntry,
+                        ..
+                    })
+                ),
+                "{kind}"
+            );
+            assert!(
+                matches!(journal.validated_staged_windows(&transaction).next().unwrap(), Err(MountJournalError::Io { source, .. }) if source.kind() == std::io::ErrorKind::InvalidData),
+                "{kind}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_directory_symlinks_are_rejected_before_reading_external_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let journal = MountJournal::open(&layout(tmp.path()));
+        let mut transaction = record();
+        transaction.change = MountTxnChange::Add {
+            target: GatPath::parse_canonical("data").unwrap(),
+            row_windows: 1,
+        };
+        journal.write(&transaction).unwrap();
+        std::fs::write(external.path().join("window-00000.json"), b"[]").unwrap();
+        std::os::unix::fs::symlink(external.path(), journal.staged_rows_dir()).unwrap();
+        assert!(
+            matches!(journal.read(), Err(MountJournalError::Io { source, .. }) if source.kind() == std::io::ErrorKind::InvalidData)
+        );
+        assert_eq!(
+            std::fs::read(external.path().join("window-00000.json")).unwrap(),
+            b"[]"
+        );
+    }
+
+    #[test]
+    fn window_inventory_requires_canonical_indices_and_reports_the_first_gap() {
+        for index in [0, 1, 99_999, 100_000, usize::MAX] {
+            assert_eq!(
+                parse_staged_window_name(&format!("window-{index:05}.json")),
+                Some(index)
+            );
+        }
+        for invalid in [
+            "window-0.json",
+            "window-000001.json",
+            "window-+0001.json",
+            "window-00000.json.bak",
+            "window-999999999999999999999999999999.json",
+        ] {
+            assert_eq!(parse_staged_window_name(invalid), None);
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let journal = MountJournal::open(&layout(tmp.path()));
+        journal.reset_staged_rows().unwrap();
+        for window in [0, 2] {
+            journal.write_staged_window(window, &[]).unwrap();
+        }
+        assert!(matches!(
+            journal.validate_staged_files(usize::MAX),
+            Err(MountJournalError::InvalidRecord {
+                reason: MountJournalValidationError::MissingStagedWindow { window: 1 },
+                ..
+            })
+        ));
+        assert!(matches!(
+            journal.validate_staged_files(1),
+            Err(MountJournalError::InvalidRecord {
+                reason: MountJournalValidationError::UnexpectedStagedEntry,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn replay_rejects_empty_windows_and_remove_has_no_row_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let journal = MountJournal::open(&layout(tmp.path()));
+        journal.reset_staged_rows().unwrap();
+        journal.write_staged_window(0, &[]).unwrap();
+        let mut transaction = record();
+        transaction.change = MountTxnChange::Add {
+            target: GatPath::parse_canonical("data").unwrap(),
+            row_windows: 1,
+        };
+        assert!(matches!(
+            journal
+                .validated_staged_windows(&transaction)
+                .next()
+                .unwrap(),
+            Err(MountJournalError::InvalidRecord {
+                reason: MountJournalValidationError::EmptyStagedWindow { window: 0 },
+                ..
+            })
+        ));
+        transaction.change = MountTxnChange::Remove {
+            target: GatPath::parse_canonical("data").unwrap(),
+        };
+        assert!(
+            journal
+                .validated_staged_windows(&transaction)
+                .next()
+                .is_none()
+        );
+    }
+
     #[test]
     fn derives_stable_paths_and_window_names() {
         let repository = RepositoryLayout::at(PathBuf::from("/repo"));
@@ -745,8 +921,13 @@ mod tests {
                 )
                 .unwrap();
         }
+        let mut transaction = record();
+        transaction.change = MountTxnChange::Add {
+            target: GatPath::parse_canonical("data").unwrap(),
+            row_windows: 3,
+        };
         let paths: Vec<_> = journal
-            .staged_windows(3)
+            .validated_staged_windows(&transaction)
             .map(|rows| rows.unwrap().pop().unwrap().path)
             .collect();
         assert_eq!(

@@ -687,13 +687,11 @@ impl<'repo> DesiredMutationSession<'repo> {
     ) -> Result<(Vec<Entry>, Vec<Entry>), StateStoreError> {
         if self.shape_lock.can_publish_incrementally() {
             let matches = self.store.desired_rows(DesiredQuery::scope(src))?;
-            let source_paths: HashSet<&str> =
-                matches.iter().map(|entry| entry.path.as_str()).collect();
             let collisions = self
                 .store
                 .desired_rows(DesiredQuery::scope(dst))?
                 .into_iter()
-                .filter(|entry| !source_paths.contains(entry.path.as_str()))
+                .filter(|entry| !entry.path.is_or_under(src))
                 .collect();
             return Ok((matches, collisions));
         }
@@ -702,15 +700,14 @@ impl<'repo> DesiredMutationSession<'repo> {
         let matches = lock
             .entries
             .iter()
-            .filter(|entry| gat_core::lock::path_matches_scope(&entry.path, src))
+            .filter(|entry| entry.path.is_or_under(src))
             .cloned()
             .collect::<Vec<_>>();
-        let source_paths: HashSet<&str> = matches.iter().map(|entry| entry.path.as_str()).collect();
         let collisions = lock
             .entries
             .iter()
-            .filter(|entry| gat_core::lock::path_matches_scope(&entry.path, dst))
-            .filter(|entry| !source_paths.contains(entry.path.as_str()))
+            .filter(|entry| entry.path.is_or_under(dst))
+            .filter(|entry| !entry.path.is_or_under(src))
             .cloned()
             .collect();
         self.full_lock = Some(lock);
@@ -731,7 +728,7 @@ impl<'repo> DesiredMutationSession<'repo> {
                     if collisions.contains(entry.path.as_str()) {
                         return None;
                     }
-                    if gat_core::lock::path_matches_scope(&entry.path, src) {
+                    if entry.path.is_or_under(src) {
                         entry.path = entry.path.with_replaced_prefix(src, dst);
                     }
                     Some(entry)

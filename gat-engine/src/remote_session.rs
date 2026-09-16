@@ -190,17 +190,13 @@ impl RemoteSession {
         catalog
             .validate_id(id)
             .map_err(RemoteSessionError::Identity)?;
-        let resolver = self.resolver.clone();
-        let options = self.options;
-        self.open_with(id, |request_budget| {
-            Self::build(catalog, id, request_budget, progress, &resolver, options)
-        })
+        self.open_with(id, |session| session.build(catalog, id, progress))
     }
 
     fn open_with(
         &mut self,
         id: RemoteId,
-        initialize: impl FnOnce(&gat_io::RemoteRequestBudget) -> Result<gat_io::RemoteClient>,
+        initialize: impl FnOnce(&Self) -> Result<gat_io::RemoteClient>,
     ) -> Result<gat_io::RemoteClient> {
         if let Some((first_id, client)) = &self.first {
             if *first_id == id {
@@ -209,12 +205,12 @@ impl RemoteSession {
             if let Some(client) = self.additional.get(&id) {
                 return client.clone();
             }
-            let built = initialize(&self.request_budget);
+            let built = initialize(self);
             self.additional.insert(id, built.clone());
             return built;
         }
 
-        let built = initialize(&self.request_budget);
+        let built = initialize(self);
         self.first = Some((id, built.clone()));
         built
     }
@@ -238,29 +234,27 @@ impl RemoteSession {
     }
 
     fn build(
+        &self,
         catalog: &RemoteCatalog,
         id: RemoteId,
-        request_budget: &gat_io::RemoteRequestBudget,
         progress: Option<&ProgressHandle>,
-        resolver: &gat_io::TemplateResolver,
-        options: gat_core::settings::NetworkOptions,
     ) -> Result<gat_io::RemoteClient> {
+        let template = catalog.url(id);
         let result = gat_io::RemoteClient::open_with_request_budget(
-            catalog.url(id).as_template_str(),
-            Some(request_budget),
-            resolver,
-            options,
+            template.as_template_str(),
+            Some(&self.request_budget),
+            &self.resolver,
+            self.options,
         );
         let client = result.map_err(|source| RemoteSessionError::Open {
             source: Arc::new(crate::remote_open::RemoteOpenError::from_io(
-                catalog.url(id),
-                source,
+                template, source,
             )),
         })?;
         #[cfg(any(test, feature = "test-support"))]
         test_support::record_remote_open(catalog.name(id).as_ref());
         if client.requires_readiness() {
-            let budget = options.readiness_timeout.duration();
+            let budget = self.options.readiness_timeout.duration();
             if let Some(progress) = progress {
                 progress.set_activity(ProgressActivity::Connecting);
             }
@@ -270,7 +264,7 @@ impl RemoteSession {
             }
             checked.map_err(|source| RemoteSessionError::Open {
                 source: Arc::new(crate::remote_open::RemoteOpenError::from_io(
-                    catalog.url(id),
+                    template,
                     source.into(),
                 )),
             })?;

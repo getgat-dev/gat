@@ -8,6 +8,7 @@
 //! Only `super::execute` is allowed to write.
 
 use std::borrow::Borrow;
+use std::num::NonZeroUsize;
 
 use super::{ConflictResolution, PlanSink, Result, SyncAction, SyncError, SyncPlan, Validation};
 use crate::repository::Repository as Repo;
@@ -53,15 +54,6 @@ fn file_status_without_prior(
         expected,
         validation == Validation::TrustState,
     )?)
-}
-
-/// Route a cache object through the shared verification boundary
-/// (`CacheClient::verify`) rather than a presence-only `has_object`
-/// check, so correctness-sensitive materialization never consumes
-/// unverified cache bytes. `Validation::TrustState` may skip *worktree*
-/// validation, but it must never bypass cache-object integrity.
-fn cache_object_status(cache: &CacheClient, oid: &Oid) -> Result<ObjectVerification> {
-    Ok(cache.verify(oid)?)
 }
 
 /// Explicit intent for a verified desired object, including local-edit policy.
@@ -128,27 +120,11 @@ impl PendingCache {
     }
 }
 
-fn resolve_pending(
-    statuses: &std::collections::HashMap<Oid, ObjectVerification>,
-    kind: PendingCache,
-) -> SyncAction {
-    // A window's `statuses` map is always populated for every oid that
-    // window's `verify_windows_unmemoized` call was given (one entry per
-    // distinct pending oid; see `MergeBuffer::flush`) -- `unwrap_or` here
-    // only guards against a logic error in that pairing, not a real
-    // "unverified" case, so it degrades to `Missing` rather than panicking.
-    let status = statuses
-        .get(&kind.entry.oid)
-        .copied()
-        .unwrap_or(ObjectVerification::Missing);
-    classify_object(status, kind.entry, kind.intent)
-}
-
-/// One buffered merge row, in merge order. Cache-dependent rows retain their
-/// entry's OID directly; neither identity nor intent needs a parallel copy.
+/// One buffered merge row, in merge order. Pending rows reference a slot in
+/// the deduplicated verification batch, preserving the I/O layer's alignment.
 enum BufferedRow {
     Ready(SyncAction),
-    Pending(PendingCache),
+    Pending { kind: PendingCache, slot: usize },
 }
 
 /// How many buffered merge rows -- resolved or still-pending -- accumulate
@@ -194,17 +170,13 @@ pub(crate) mod test_support {
 /// `Vec<SyncAction>` merely so a later phase can apply or collect it.
 struct MergeBuffer<'a> {
     cache: &'a CacheClient,
-    merge_window: usize,
+    merge_window: NonZeroUsize,
     sink: &'a mut dyn PlanSink,
     rows: Vec<BufferedRow>,
     pending_oids: Vec<Oid>,
-    /// Dedups `pending_oids` within the current window: several buffered
-    /// rows may share the same oid (e.g. many desired paths pointing at
-    /// one object), but each must be verified at most once per window --
-    /// [`CacheClient::verify_windows_unmemoized`] requires its input
-    /// already deduplicated, since it no longer performs its own
-    /// per-window dedup pass. Cleared alongside `pending_oids` on flush.
-    pending_seen: std::collections::HashSet<Oid>,
+    /// Maps each distinct OID to its position in `pending_oids` and `statuses`.
+    pending_slots: std::collections::HashMap<Oid, usize>,
+    statuses: Vec<ObjectVerification>,
     /// Which [`CacheClient`] verification retention policy `flush` uses
     /// for this reconciliation, derived once from
     /// `ReconciliationPolicy::rematerialize`:
@@ -231,7 +203,7 @@ struct MergeBuffer<'a> {
 impl<'a> MergeBuffer<'a> {
     fn new(
         cache: &'a CacheClient,
-        merge_window: usize,
+        merge_window: NonZeroUsize,
         sink: &'a mut dyn PlanSink,
         rematerialize: bool,
     ) -> Self {
@@ -241,7 +213,8 @@ impl<'a> MergeBuffer<'a> {
             sink,
             rows: Vec::new(),
             pending_oids: Vec::new(),
-            pending_seen: std::collections::HashSet::new(),
+            pending_slots: std::collections::HashMap::new(),
+            statuses: Vec::new(),
             rematerialize,
         }
     }
@@ -259,10 +232,12 @@ impl<'a> MergeBuffer<'a> {
     /// first.
     fn push_pending(&mut self, kind: PendingCache) -> Result<()> {
         let oid = kind.entry.oid;
-        if self.pending_seen.insert(oid) {
+        let slot = *self.pending_slots.entry(oid).or_insert_with(|| {
+            let slot = self.pending_oids.len();
             self.pending_oids.push(oid);
-        }
-        self.rows.push(BufferedRow::Pending(kind));
+            slot
+        });
+        self.rows.push(BufferedRow::Pending { kind, slot });
         if self.pending_oids.len() >= VERIFY_WINDOW {
             return self.flush();
         }
@@ -280,7 +255,7 @@ impl<'a> MergeBuffer<'a> {
     }
 
     fn flush_if_full(&mut self) -> Result<()> {
-        if self.rows.len() >= self.merge_window {
+        if self.rows.len() >= self.merge_window.get() {
             self.flush()?;
         }
         Ok(())
@@ -291,28 +266,19 @@ impl<'a> MergeBuffer<'a> {
     /// classification directly from that batch's aligned statuses -- to
     /// the sink in order. A no-op when nothing is buffered.
     ///
-    /// Chooses between [`CacheClient::verify_windows`] and
-    /// [`CacheClient::verify_windows_unmemoized`] based on
-    /// `self.rematerialize` (see the field's doc comment); either way,
-    /// this window's own `statuses` map -- built directly from the
-    /// callback's aligned `(oid, status)` pairs -- is exactly what every
-    /// `resolve_pending` call below needs, so there is never a second
-    /// per-row `CacheClient::verify` lookup after the batch (unlike the
-    /// old `verify_many(...)` -> discard `Vec` -> `verify(...)` per row
-    /// pattern this replaced).
+    /// Retains the status vector allocation across windows. Shared OIDs use
+    /// the same slot, avoiding a second hash table and per-row status hashing.
     fn flush(&mut self) -> Result<()> {
         if self.rows.is_empty() {
             return Ok(());
         }
         #[cfg(any(test, feature = "test-support"))]
         test_support::record_merge_buffer_flush(self.rows.len());
-        let mut statuses: std::collections::HashMap<Oid, ObjectVerification> =
-            std::collections::HashMap::with_capacity(self.pending_oids.len());
+        self.statuses.clear();
         if !self.pending_oids.is_empty() {
             let on_window = |window: &[Oid], window_statuses: &[ObjectVerification]| {
-                for (oid, status) in window.iter().zip(window_statuses.iter()) {
-                    statuses.insert(*oid, *status);
-                }
+                assert_eq!(window.len(), window_statuses.len());
+                self.statuses.extend_from_slice(window_statuses);
                 Ok(())
             };
             if self.rematerialize {
@@ -322,13 +288,16 @@ impl<'a> MergeBuffer<'a> {
                 self.cache
                     .verify_windows::<SyncError>(&self.pending_oids, on_window)?;
             }
+            assert_eq!(self.statuses.len(), self.pending_oids.len());
             self.pending_oids.clear();
-            self.pending_seen.clear();
+            self.pending_slots.clear();
         }
         for row in self.rows.drain(..) {
             let action = match row {
                 BufferedRow::Ready(action) => action,
-                BufferedRow::Pending(kind) => resolve_pending(&statuses, kind),
+                BufferedRow::Pending { kind, slot } => {
+                    classify_object(self.statuses[slot], kind.entry, kind.intent)
+                }
             };
             self.sink.action(action)?;
         }
@@ -359,11 +328,8 @@ fn desired_only_pending(
     if validation == Validation::TrustState {
         // Under Validation::TrustState the planner intentionally skips all
         // working-tree access, so we do not know whether the destination
-        // exists.  Emit Materialize: do_materialize handles the case where
-        // a regular file is already present by renaming it aside before
-        // calling storage::materialize and restoring it if every mode fails,
-        // so a pre-existing user-owned file is never silently destroyed on
-        // an error.
+        // exists. Materialization prepares the new representation privately
+        // before publishing it, so failed strategies leave existing data intact.
         return Ok(PendingCache::new(
             d.clone(),
             MaterializationIntent::Materialize,
@@ -473,8 +439,7 @@ fn next_matching_prior(
 pub fn plan(repo: &Repo, selection: &Selection, validation: Validation) -> Result<SyncPlan> {
     let merge_window = crate::limits::ExecutionLimits::production()
         .sync
-        .merge_window
-        .get();
+        .merge_window;
     let store = StateStore::open_if_exists(repo.layout())?;
     let policy = crate::ReconciliationPolicy::from(validation)
         .for_ledger(store.as_ref().is_some_and(StateStore::validation_required));
@@ -482,7 +447,7 @@ pub fn plan(repo: &Repo, selection: &Selection, validation: Validation) -> Resul
     // desired-index freshness guarantee, so the authoritative on-disk
     // `gat.lock` -- not the SQLite mirror -- is the only correct source
     // here. Callers that already refreshed the mirror plan through
-    // `plan_with_store(.., None, ..)` instead, which streams.
+    // `DesiredSource::Store` instead, which streams.
     let desired_lock = LockStore::load_repository(repo.layout())?;
     // This standalone read-only entry point has no operation/`Operation`
     // to source a shared cache from -- it is used outside the `Operation`
@@ -495,9 +460,9 @@ pub fn plan(repo: &Repo, selection: &Selection, validation: Validation) -> Resul
     plan_with_store(
         repo,
         &cache,
-        DesiredSource {
+        DesiredSource::Lock {
             store: store.as_ref(),
-            desired_lock: Some(&desired_lock),
+            lock: &desired_lock,
         },
         selection,
         // This read-only planning API never rematerializes: only
@@ -509,26 +474,7 @@ pub fn plan(repo: &Repo, selection: &Selection, validation: Validation) -> Resul
     )
 }
 
-/// Like [`plan`], but optionally takes an already-loaded `desired_lock`
-/// (`Some`) instead of streaming desired rows from `SQLite` (`None`).
-/// Callers that cannot assume the mirror is fresh (a `--dry-run` sync, or
-/// any use before the mirror has been built) must pass a freshly-loaded
-/// [`Lock`]. Callers that *can* assume the mirror is fresh should pass
-/// `None`: planning then streams the desired side directly from `SQLite`
-/// through the shared desired-query layer and never materializes a full
-/// [`Lock`] at all; exclude regeneration afterwards streams
-/// desired paths from the same store (`excludes::sync_from_store`).
-///
-/// `store` may also be `None`, for a store that is genuinely absent
-/// (see [`StateStore::open_if_exists`]) rather than merely empty:
-/// there is no materialized cursor to drive at all, so every desired path
-/// is compared against an implicit "nothing has ever been materialized
-/// here" prior, exactly as the merge loop treats a desired path with no
-/// matching materialized row.
-/// [`super::PlanSink`] that reconstructs a complete [`SyncPlan`] -- the
-/// read-only planning API's behavior (`plan()`, `--dry-run`, and any other
-/// caller that genuinely needs the whole plan for inspection) unchanged
-/// from before `plan_into_sink` existed.
+/// Collects a complete plan for callers that need to inspect its actions.
 #[derive(Default)]
 pub(crate) struct CollectPlanSink {
     actions: Vec<SyncAction>,
@@ -547,89 +493,78 @@ impl super::PlanSink for CollectPlanSink {
     }
 }
 
-/// Like [`plan_with_store`], but delivers every classified action (and
-/// stat refresh) to `sink` as it's produced instead of collecting a
-/// complete [`SyncPlan`]. The mutating `Validation::Validate`
-/// sync path drives this directly with an
-/// [`super::execute::ExecutePlanSink`] so a huge repository's full
-/// desired/materialized merge never has to be fully classified in memory
-/// before the first action is applied.
-/// The store/`Lock` combination [`plan_into_sink`]/[`plan_with_store`]
-/// merge desired rows against a prior materialized cursor with -- bundled
-/// into one value so adding `merge_window` alongside them didn't push
-/// either function over clippy's argument-count lint (which this codebase
-/// treats as a real "too many independently-supplied values" signal, not
-/// boilerplate to suppress.
-/// [`Self::desired_lock`] documents the same `Some`/`None` streaming
-/// contract [`plan_into_sink`] always had.
-pub(crate) struct DesiredSource<'a> {
-    pub(crate) store: Option<&'a StateStore>,
-    pub(crate) desired_lock: Option<&'a Lock>,
+/// An authoritative desired source, with prior materialized state when available.
+pub(crate) enum DesiredSource<'a> {
+    /// Use a freshly loaded lock when the desired mirror may be stale or absent.
+    Lock {
+        lock: &'a Lock,
+        store: Option<&'a StateStore>,
+    },
+    /// Stream desired and materialized rows from an already refreshed store.
+    Store(&'a StateStore),
 }
 
+/// Delivers classified actions and stat refreshes in bounded batches to `sink`.
+/// Mutating sync can apply each batch without retaining a complete plan.
 pub(crate) fn plan_into_sink(
     repo: &Repo,
     cache: &CacheClient,
     desired: DesiredSource<'_>,
     selection: &Selection,
     policy: crate::ReconciliationPolicy,
-    merge_window: usize,
+    merge_window: NonZeroUsize,
     sink: &mut dyn super::PlanSink,
 ) -> Result<()> {
-    let DesiredSource {
-        store,
-        desired_lock,
-    } = desired;
     let scope = selection.scope_path();
 
-    if let Some(desired_lock) = desired_lock {
-        let desired = filter_desired_entries(&desired_lock.entries, selection);
-        debug_assert_sorted_entries(&desired);
-        let mut desired_iter = desired.into_iter();
-        match store {
-            Some(store) => store.with_rows_in_scope(scope, |mut materialized| {
-                let mut next_prior = || materialized.next();
-                merge_desired_with_prior(
+    match desired {
+        DesiredSource::Lock { lock, store } => {
+            let desired = filter_desired_entries(&lock.entries, selection);
+            debug_assert_sorted_entries(&desired);
+            let mut desired_iter = desired.into_iter();
+            match store {
+                Some(store) => store.with_rows_in_scope(scope, |mut materialized| {
+                    let mut next_prior = || materialized.next();
+                    merge_desired_with_prior(
+                        repo,
+                        cache,
+                        policy,
+                        &mut || Ok(desired_iter.next()),
+                        &mut || next_matching_prior(&mut next_prior, selection),
+                        merge_window,
+                        sink,
+                    )
+                })?,
+                None => merge_desired_with_prior(
                     repo,
                     cache,
                     policy,
                     &mut || Ok(desired_iter.next()),
-                    &mut || next_matching_prior(&mut next_prior, selection),
+                    &mut || Ok(None),
                     merge_window,
                     sink,
-                )
-            })?,
-            None => merge_desired_with_prior(
-                repo,
-                cache,
-                policy,
-                &mut || Ok(desired_iter.next()),
-                &mut || Ok(None),
-                merge_window,
-                sink,
-            )?,
+                )?,
+            }
         }
-    } else {
-        let Some(store) = store else {
-            return Err(SyncError::missing_materialized_store());
-        };
-        // The desired side is narrowed by `Selection::scope_path()` in
-        // SQL and filtered by `Selection::matches` as the residual
-        // authority; see `DesiredQuery::for_selection`.
-        store.with_desired_rows(DesiredQuery::for_selection(selection), |mut desired| {
-            store.with_rows_in_scope(scope, |mut materialized| {
-                let mut next_prior = || materialized.next();
-                merge_desired_with_prior(
-                    repo,
-                    cache,
-                    policy,
-                    &mut || Ok(desired.next()?.map(DesiredRow::into_entry)),
-                    &mut || next_matching_prior(&mut next_prior, selection),
-                    merge_window,
-                    sink,
-                )
-            })
-        })?;
+        DesiredSource::Store(store) => {
+            // The desired side is narrowed by `Selection::scope_path()` in
+            // SQL and filtered by `Selection::matches` as the residual
+            // authority; see `DesiredQuery::for_selection`.
+            store.with_desired_rows(DesiredQuery::for_selection(selection), |mut desired| {
+                store.with_rows_in_scope(scope, |mut materialized| {
+                    let mut next_prior = || materialized.next();
+                    merge_desired_with_prior(
+                        repo,
+                        cache,
+                        policy,
+                        &mut || Ok(desired.next()?.map(DesiredRow::into_entry)),
+                        &mut || next_matching_prior(&mut next_prior, selection),
+                        merge_window,
+                        sink,
+                    )
+                })
+            })?;
+        }
     }
     Ok(())
 }
@@ -640,7 +575,7 @@ pub(crate) fn plan_with_store(
     desired: DesiredSource<'_>,
     selection: &Selection,
     policy: crate::ReconciliationPolicy,
-    merge_window: usize,
+    merge_window: NonZeroUsize,
 ) -> Result<SyncPlan> {
     let mut sink = CollectPlanSink::default();
     plan_into_sink(
@@ -677,7 +612,7 @@ fn merge_desired_with_prior<D: Borrow<Entry>>(
     policy: crate::ReconciliationPolicy,
     next_desired: &mut dyn FnMut() -> Result<Option<D>>,
     next_prior: &mut dyn FnMut() -> Result<Option<MaterializedRow>>,
-    merge_window: usize,
+    merge_window: NonZeroUsize,
     sink: &mut dyn super::PlanSink,
 ) -> Result<()> {
     let validation = policy.validation();
@@ -791,7 +726,7 @@ fn merge_desired_with_prior<D: Borrow<Entry>>(
                                     // Recreate this already-correct path
                                     // using the current materialization
                                     // strategy. Skip persisting
-                                    // `proof_refresh` here: `do_rematerialize`
+                                    // `proof_refresh` here: materialization
                                     // records a fresh stat proof off the
                                     // representation it's about to write,
                                     // making any proof observed here
@@ -898,59 +833,41 @@ pub(crate) fn plan_from_dirty_rows(
     rows: Vec<DirtyRow>,
     selection: &Selection,
 ) -> Result<Vec<SyncAction>> {
-    // Set-batch this chunk's cache verification instead of
-    // leaving `classify_object` below to each
-    // discover their oid cold: derive the distinct desired oids this dirty
-    // chunk actually needs classified and verify them in one bounded
-    // bounded verification pass, so the per-row loop below only ever hits the
-    // resulting operation-local memo.
-    let selected_oids: Vec<Oid> = rows
-        .iter()
-        .filter(|row| selection.is_unrestricted() || selection.matches(&row.path))
-        .filter_map(|row| row.desired)
-        .collect();
-    if !selected_oids.is_empty() {
-        cache.verify_windows(&selected_oids, |_, _| Ok::<(), SyncError>(()))?;
-    }
-
-    let mut actions = Vec::with_capacity(rows.len());
+    let Some(window) = NonZeroUsize::new(rows.len()) else {
+        return Ok(Vec::new());
+    };
+    let mut sink = CollectPlanSink {
+        actions: Vec::with_capacity(rows.len()),
+        ..Default::default()
+    };
+    // Dirty chunks already have their own bound. Share classification and
+    // aligned verification with the full merge, without per-row memo lookups.
+    let mut buffer = MergeBuffer::new(cache, window, &mut sink, false);
     for row in rows {
-        if !selection.is_unrestricted() && !selection.matches(&row.path) {
+        if !selection.matches(&row.path) {
             continue;
         }
         match (row.desired, row.materialized) {
-            (Some(oid), Some(_)) => {
-                let entry = Entry {
-                    path: row.path,
-                    oid,
+            (Some(oid), prior) => {
+                let intent = if prior.is_some() {
+                    MaterializationIntent::Replace
+                } else {
+                    MaterializationIntent::Materialize
                 };
-                actions.push(classify_object(
-                    cache_object_status(cache, &entry.oid)?,
-                    entry,
-                    MaterializationIntent::Replace,
-                ));
+                buffer.push_pending(PendingCache::new(
+                    Entry {
+                        path: row.path,
+                        oid,
+                    },
+                    intent,
+                ))?;
             }
-            (Some(oid), None) => {
-                let entry = Entry {
-                    path: row.path,
-                    oid,
-                };
-                actions.push(classify_object(
-                    cache_object_status(cache, &entry.oid)?,
-                    entry,
-                    MaterializationIntent::Materialize,
-                ));
-            }
-            (None, Some(_)) => {
-                actions.push(SyncAction::Remove(row.path));
-            }
-            (None, None) => {
-                // Already reconciled by the time this ran (e.g. removed
-                // then re-added within the same refresh); nothing to do.
-            }
+            (None, Some(_)) => buffer.push_ready(SyncAction::Remove(row.path))?,
+            (None, None) => {}
         }
     }
-    Ok(actions)
+    buffer.flush()?;
+    Ok(sink.actions)
 }
 
 #[cfg(test)]
@@ -989,6 +906,134 @@ mod tests {
             .ingest(content)
             .unwrap()
             .0
+    }
+
+    #[test]
+    fn verification_slots_preserve_mixed_results_across_reused_windows() {
+        let tmp = git_repo();
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
+        let valid = ingest(&repo, b"valid".as_slice()).oid;
+        let corrupt = ingest(&repo, b"corrupt".as_slice()).oid;
+        let missing = Oid::from_bytes([42; 32]);
+        let root = repo.resolved_cache_root().unwrap();
+        root.make_object_writable_for_test(&corrupt).unwrap();
+        std::fs::write(root.object_path_for_test(&corrupt), b"changed").unwrap();
+        let _window = gat_io::cache_object_test_support::with_verify_window(2);
+        for unmemoized in [false, true] {
+            let cache = root.open_client();
+            let mut sink = CollectPlanSink::default();
+            let mut expected = Vec::new();
+            let mut buffer =
+                MergeBuffer::new(&cache, NonZeroUsize::new(5).unwrap(), &mut sink, unmemoized);
+            let mut allocation = None;
+            for (round, oids) in [
+                [valid, missing, corrupt, valid],
+                [corrupt, valid, missing, corrupt],
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                for (index, oid) in oids.into_iter().enumerate() {
+                    let path = GatPath::parse_canonical(&format!("{round}-{index}.bin")).unwrap();
+                    expected.push(if oid == valid {
+                        SyncAction::Materialize(Entry {
+                            path: path.clone(),
+                            oid,
+                        })
+                    } else if oid == corrupt {
+                        SyncAction::Corrupted {
+                            path: path.clone(),
+                            oid,
+                        }
+                    } else {
+                        SyncAction::MissingObject {
+                            path: path.clone(),
+                            oid,
+                        }
+                    });
+                    buffer
+                        .push_pending(PendingCache::new(
+                            Entry { path, oid },
+                            MaterializationIntent::Materialize,
+                        ))
+                        .unwrap();
+                }
+                let removal = SyncAction::Remove(
+                    GatPath::parse_canonical(&format!("{round}-removed")).unwrap(),
+                );
+                expected.push(removal.clone());
+                buffer.push_ready(removal).unwrap();
+                if let Some(previous) = allocation {
+                    assert_eq!(
+                        buffer.statuses.as_ptr(),
+                        previous,
+                        "reuse the bounded status allocation"
+                    );
+                }
+                allocation = Some(buffer.statuses.as_ptr());
+            }
+            buffer.flush().unwrap();
+            assert_eq!(sink.actions, expected);
+        }
+    }
+
+    #[test]
+    fn dirty_planning_filters_once_and_uses_batch_results_without_point_lookups() {
+        let tmp = git_repo();
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
+        let valid = ingest(&repo, b"valid".as_slice()).oid;
+        let missing = Oid::from_bytes([42; 32]);
+        let path = |text: &str| GatPath::parse_canonical(text).unwrap();
+        let rows = [
+            ("a.bin", Some(valid), None),
+            ("b.bin", Some(valid), Some(missing)),
+            ("c.bin", Some(missing), None),
+            ("d.bin", None, Some(valid)),
+            ("noop.bin", None, None),
+            ("skip.bin", Some(Oid::from_bytes([43; 32])), None),
+        ]
+        .into_iter()
+        .map(|(name, desired, materialized)| DirtyRow {
+            path: path(name),
+            desired,
+            materialized,
+        })
+        .collect();
+        let cache = repo.resolved_cache_root().unwrap().open_client();
+        let before = gat_io::cache_proof_test_support::snapshot();
+        let actions =
+            plan_from_dirty_rows(&cache, rows, &selection(None, &["*.bin"], &["skip.bin"]))
+                .unwrap();
+        let after = gat_io::cache_proof_test_support::snapshot();
+        assert_eq!(
+            actions,
+            [
+                SyncAction::Materialize(Entry {
+                    path: path("a.bin"),
+                    oid: valid
+                }),
+                SyncAction::Replace(Entry {
+                    path: path("b.bin"),
+                    oid: valid
+                }),
+                SyncAction::MissingObject {
+                    path: path("c.bin"),
+                    oid: missing
+                },
+                SyncAction::Remove(path("d.bin")),
+            ]
+        );
+        assert_eq!(after.fs_verifications - before.fs_verifications, 2);
+        assert_eq!(after.memo_hits - before.memo_hits, 0);
+        assert!(
+            plan_from_dirty_rows(&cache, Vec::new(), &Selection::root())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// RAII guard clearing [`gat_io::cache_race_test_hooks`] on
@@ -1162,7 +1207,7 @@ mod tests {
     /// aligned status, never re-entering the filesystem verifier *and*
     /// never needing a second, separately memoized lookup for the same
     /// oid (`MergeBuffer::flush` resolves every buffered row straight
-    /// from its window's `HashMap<Oid, ObjectVerification>`, not by
+    /// from its window's aligned status buffer, not by
     /// calling back into `CacheClient::verify`).
     #[test]
     fn a_differing_desired_only_conflict_verifies_its_cache_oid_only_once() {
@@ -1718,10 +1763,8 @@ mod tests {
         // the desired path, sync must succeed and materialize the file rather
         // than producing a link-mode-dependent "delete then fail" error.
         // Under Validation::TrustState the planner emits Materialize without probing
-        // the filesystem; do_materialize handles a pre-existing regular file by
-        // renaming it aside before calling storage::materialize (which removes
-        // dest as cleanup between fallback modes), then restores it only if
-        // every mode fails so the pre-existing file is never silently destroyed.
+        // the filesystem. All strategies prepare their output privately before
+        // publication, leaving a pre-existing destination intact on failure.
         let tmp = git_repo();
         let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
             .unwrap()

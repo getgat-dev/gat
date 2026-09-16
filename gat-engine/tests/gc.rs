@@ -387,10 +387,7 @@ fn depth_is_consumed_before_time_filtering() {
             traversal: HistoryTraversal::Ancestors {
                 per_root: NonZeroUsize::new(2),
             },
-            time: TimeWindow {
-                since: Some(GitTimestamp::from(900)),
-                until: None,
-            },
+            time: TimeWindow::new(Some(GitTimestamp::from(900)), None).unwrap(),
             ..Default::default()
         },
         false,

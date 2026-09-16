@@ -163,19 +163,12 @@ fn diff_with_no_args_compares_head_against_the_working_tree() {
     add_paths(&repo, &[PathBuf::from("b.bin")]);
 
     let outcome = working_diff(&repo, "HEAD", Selection::root()).unwrap();
-    let DiffOutcome::Changes {
-        from,
-        to,
-        rows,
-        changes,
-        ..
-    } = outcome
-    else {
+    let DiffOutcome::Changes { from, to, rows, .. } = outcome else {
         panic!("expected changes");
     };
     assert_eq!(from.as_str(), "HEAD");
     assert_eq!(to, DiffTarget::WorkingTree);
-    assert_eq!(changes, 2);
+    assert_eq!(rows.len(), 2);
     let mut paths = rows.iter().map(|row| row.path.as_str()).collect::<Vec<_>>();
     paths.sort_unstable();
     assert_eq!(paths, vec!["a.bin", "b.bin"]);
@@ -286,10 +279,10 @@ fn diff_restricts_output_to_the_given_path() {
     add_paths(&repo, &[PathBuf::from("dir")]);
 
     let outcome = working_diff(&repo, "HEAD", scoped_selection(Path::new("a.bin"))).unwrap();
-    let DiffOutcome::Changes { rows, changes, .. } = outcome else {
+    let DiffOutcome::Changes { rows, .. } = outcome else {
         panic!("expected changes");
     };
-    assert_eq!(changes, 1);
+    assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].path.as_str(), "a.bin");
 }
 
@@ -336,10 +329,10 @@ fn diff_compares_across_a_flat_to_sharded_reshape() {
     remove_paths(&repo, &[PathBuf::from("c.bin")]);
 
     let outcome = working_diff(&repo, "flat", Selection::root()).unwrap();
-    let DiffOutcome::Changes { rows, changes, .. } = outcome else {
+    let DiffOutcome::Changes { rows, .. } = outcome else {
         panic!("expected changes");
     };
-    assert_eq!(changes, 2);
+    assert_eq!(rows.len(), 2);
     assert_eq!(
         rows.iter()
             .map(|row| (row.path.as_str(), row_status(&row.change)))
@@ -351,10 +344,10 @@ fn diff_compares_across_a_flat_to_sharded_reshape() {
     );
 
     let outcome = working_diff(&repo, "flat", scoped_selection(Path::new("a.bin"))).unwrap();
-    let DiffOutcome::Changes { rows, changes, .. } = outcome else {
+    let DiffOutcome::Changes { rows, .. } = outcome else {
         panic!("expected changes");
     };
-    assert_eq!(changes, 1);
+    assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].path.as_str(), "a.bin");
 }
 
@@ -383,10 +376,10 @@ fn diff_compares_two_revisions_with_different_lock_shapes() {
         &NoopProgress,
     )
     .unwrap();
-    let DiffOutcome::Changes { rows, changes, .. } = outcome else {
+    let DiffOutcome::Changes { rows, .. } = outcome else {
         panic!("expected changes");
     };
-    assert_eq!(changes, 2);
+    assert_eq!(rows.len(), 2);
     assert_eq!(
         rows.iter()
             .map(|row| (row.path.as_str(), row_status(&row.change)))
@@ -411,10 +404,10 @@ fn diff_reads_a_sharded_gat_lock_at_a_revision() {
     add_paths(&repo, &[PathBuf::from("a.bin")]);
 
     let outcome = working_diff(&repo, "HEAD", Selection::root()).unwrap();
-    let DiffOutcome::Changes { rows, changes, .. } = outcome else {
+    let DiffOutcome::Changes { rows, .. } = outcome else {
         panic!("expected changes");
     };
-    assert_eq!(changes, 1);
+    assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].path.as_str(), "a.bin");
 }
 

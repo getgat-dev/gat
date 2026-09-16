@@ -21,13 +21,14 @@ pub(crate) use presence::check_remote_presence_streaming;
 pub use presence::{RemotePresenceError, RemotePresenceObligation, RemotePresenceResult};
 pub use publish::{PublishError, PublishObject, PublishOutcome, PublishStatus, publish_window};
 pub use repair::{
-    RepairCacheFailureKind, RepairError, RepairObject, RepairOutcome, RepairRemoteFailureKind,
+    RepairCacheFailureKind, RepairError, RepairObject, RepairRemoteFailureKind, RepairResult,
     repair_window,
 };
 #[doc(hidden)]
 pub use selection::{SelectedObject, visit_current_state_objects, visit_history_objects};
 pub use upload::{
-    UploadCacheFailureKind, UploadError, UploadRemoteFailureKind, UploadWriteFailureKind,
+    FileUploadFailure, UploadCacheFailureKind, UploadError, UploadRemoteFailureKind,
+    UploadWriteFailureKind,
 };
 
 fn cache_io_kind(source: &gat_io::CacheError) -> Option<std::io::ErrorKind> {
@@ -39,29 +40,51 @@ fn cache_io_kind(source: &gat_io::CacheError) -> Option<std::io::ErrorKind> {
         | CacheError::SourceUnreadable { source }
         | CacheError::EntryUnwritable { source, .. }
         | CacheError::EntryUnreadable { source, .. } => Some(source.kind()),
-        CacheError::MaterializationFailed { .. }
-        | CacheError::State(_)
-        | CacheError::Oid(_)
-        | CacheError::Atomic(_) => None,
+        CacheError::Atomic(source) => source.io_kind(),
+        CacheError::MaterializationFailed { .. } | CacheError::State(_) | CacheError::Oid(_) => {
+            None
+        }
     }
 }
 
-// Keep remote and route metadata consistent across transfer error types.
+/// The complete route context attached to a transfer failure.
+/// A route always has both its configured name and its canonical path.
+///
+/// ```compile_fail
+/// use gat_engine::TransferRoute;
+/// let route = TransferRoute { name: "assets".into() };
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransferRoute {
+    pub name: gat_core::name::RouteName,
+    pub path: gat_core::lexical_path::GatPath,
+}
+
+fn write_remote_context(
+    f: &mut std::fmt::Formatter<'_>,
+    remote_name: &str,
+    route: Option<&TransferRoute>,
+) -> std::fmt::Result {
+    write!(f, "remote `{remote_name}`")?;
+    if let Some(route) = route {
+        write!(f, " via route `{}` (`{}`)", route.name, route.path)?;
+    }
+    Ok(())
+}
+
 fn diagnostic_remote(
     catalog: &crate::remote_catalog::RemoteCatalog,
     policy: &crate::path_policy::EffectivePathPolicy,
     remote: &crate::path_policy::ResolvedRemote,
-) -> (
-    std::sync::Arc<str>,
-    Option<gat_core::name::RouteName>,
-    Option<gat_core::lexical_path::GatPath>,
-) {
-    let route = remote.route().map(|id| policy.route_descriptor(id));
-    (
-        catalog.name(remote.id()),
-        route.map(|descriptor| descriptor.name.clone()),
-        route.map(|descriptor| descriptor.path.clone()),
-    )
+) -> (std::sync::Arc<str>, Option<TransferRoute>) {
+    let route = remote.route().map(|id| {
+        let descriptor = policy.route_descriptor(id);
+        TransferRoute {
+            name: descriptor.name.clone(),
+            path: descriptor.path.clone(),
+        }
+    });
+    (catalog.name(remote.id()), route)
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -84,6 +107,29 @@ mod tests {
     use gat_core::name::RemoteName;
     use gat_core::oid::Oid;
     use gat_core::progress::{NoopProgress, ProgressOperation, ProgressReporter, ProgressSpec};
+
+    #[test]
+    fn atomic_cache_failures_preserve_the_io_classification() {
+        let source = gat_io::CacheError::Atomic(gat_io::AtomicError::PublishFailed {
+            path: std::path::PathBuf::from("PRIVATE_PATH_SENTINEL"),
+            source: std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "PRIVATE_IO_SENTINEL",
+            ),
+        });
+        assert_eq!(
+            cache_io_kind(&source),
+            Some(std::io::ErrorKind::PermissionDenied)
+        );
+        assert_eq!(
+            upload::cache_error_kind(&source),
+            UploadCacheFailureKind::PermissionDenied
+        );
+        let source = gat_io::CacheError::Atomic(gat_io::AtomicError::LockTimedOut {
+            path: std::path::PathBuf::from("PRIVATE_PATH_SENTINEL"),
+        });
+        assert_eq!(cache_io_kind(&source), None);
+    }
 
     #[test]
     fn foreign_obligations_fail_all_public_windows_before_io() {
@@ -136,14 +182,24 @@ mod tests {
                 RemoteIdentityError::ForeignOwner
             )))
         ));
-        let repairs = vec![RepairObject::new(oid, path, remote, 1)];
-        let outcome = repair_window(&mut operation, repairs, &mut ProgressUpdates::new(progress));
-        assert!(matches!(
-            outcome.results.as_slice(),
-            [Err(RepairError::Identity(
-                RemoteIdentityError::ForeignOwner
-            ))]
-        ));
+        let second_oid = Oid::from_bytes([17; 32]);
+        let repairs = vec![
+            RepairObject::new(oid, path.clone(), remote, 1),
+            RepairObject::new(second_oid, path, remote, 1),
+        ];
+        let outcome = repair_window(
+            &mut operation,
+            &repairs,
+            &mut ProgressUpdates::new(progress),
+        );
+        assert_eq!(
+            outcome.iter().map(|result| result.oid).collect::<Vec<_>>(),
+            [oid, second_oid]
+        );
+        assert!(outcome.iter().all(|result| matches!(
+            result.result,
+            Err(RepairError::Identity(RemoteIdentityError::ForeignOwner))
+        )));
         assert_eq!(crate::remote_session::test_support::remote_opens(), opens);
     }
 }

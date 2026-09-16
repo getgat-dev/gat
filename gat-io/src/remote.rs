@@ -28,10 +28,11 @@ pub use transfer::{
 };
 
 pub use file::{
-    FileObjectWriter, FilePublication, FileReceiveError, FileUploadError, FileWriteError,
-    FileWritePhase, PreparedFilePresence, PreparedFileRead, PreparedFileWrite,
+    FileObjectWriter, FileReceiveError, FileUploadError, FileWriteError, FileWritePhase,
+    PreparedFilePresence, PreparedFileRead, PreparedFileWrite,
 };
 pub use interpolate::InterpolateError;
+pub(crate) use tuning::upload_buffer_bytes;
 pub use tuning::{STREAM_BUFFER_SIZE, with_stream_buffer};
 
 /// Shared operation-scoped remote request budget for network remotes.

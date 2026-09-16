@@ -233,12 +233,12 @@ pub use repository_state::{
 pub use snapshot::SnapshotError;
 pub use transfer::{
     DownloadCacheFailureKind, DownloadError, DownloadObject, DownloadOutcome,
-    DownloadRemoteFailureKind, PublishError, PublishObject, PublishOutcome, PublishStatus,
-    RemotePresenceError, RemotePresenceObligation, RemotePresenceResult, RepairCacheFailureKind,
-    RepairError, RepairObject, RepairOutcome, RepairRemoteFailureKind, SelectedObject,
-    StreamingWindow, TransferCacheSource, UploadCacheFailureKind, UploadError,
-    UploadRemoteFailureKind, UploadWriteFailureKind, WindowBatch, download_window, publish_window,
-    repair_window, visit_current_state_objects, visit_history_objects,
+    DownloadRemoteFailureKind, FileUploadFailure, PublishError, PublishObject, PublishOutcome,
+    PublishStatus, RemotePresenceError, RemotePresenceObligation, RemotePresenceResult,
+    RepairCacheFailureKind, RepairError, RepairObject, RepairRemoteFailureKind, RepairResult,
+    SelectedObject, StreamingWindow, TransferCacheSource, TransferRoute, UploadCacheFailureKind,
+    UploadError, UploadRemoteFailureKind, UploadWriteFailureKind, WindowBatch, download_window,
+    publish_window, repair_window, visit_current_state_objects, visit_history_objects,
 };
 pub use workspace::sync::{
     CacheFailureKind as SyncCacheFailureKind, ExcludesFailureKind as SyncExcludesFailureKind,
@@ -250,10 +250,11 @@ pub use workspace::sync::{
     plan as plan_sync, sync_from_snapshot,
 };
 pub use worktree::{
-    DestinationKind, EntryKind, MoveError as WorktreeMoveError, RemoveError as WorktreeRemoveError,
+    DestinationKind, EntryKind, MoveError as WorktreeMoveError, PendingMove,
+    RemoveError as WorktreeRemoveError, RestoreMoveDestinationError,
     RollbackError as WorktreeRollbackError, WorktreePathError, inspect_move_destination,
     inspect_read_path, move_path as move_worktree_path, reject_infrastructure_path,
-    remove_and_prune, rollback_move as rollback_worktree_move, validate_mutation_path,
+    remove_and_prune, validate_mutation_path,
 };
 
 /// Initializes the remote backends once during process bootstrap.

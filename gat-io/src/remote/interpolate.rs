@@ -23,9 +23,9 @@ pub enum InterpolateError {
     /// before this variant is ever constructed, so it can't itself carry
     /// secret content from elsewhere in the input.
     #[error("environment variable `{name}` is not set")]
-    MissingVariable { name: String },
+    MissingVariable { name: crate::EnvironmentName },
     #[error("environment variable is not Unicode")]
-    NonUnicodeVariable { name: String },
+    NonUnicodeVariable { name: crate::EnvironmentName },
 }
 
 pub(crate) type Result<T> = std::result::Result<T, InterpolateError>;
@@ -35,9 +35,9 @@ pub(crate) type Result<T> = std::result::Result<T, InterpolateError>;
 /// `$$` produces a literal dollar, and bare `$NAME` stays unchanged.
 /// Replacement values are never scanned for further references.
 /// Injected lookup keeps tests independent of process environment mutations.
-pub(crate) fn interpolate_with(
+pub(crate) fn interpolate_with<V: AsRef<str>>(
     input: &str,
-    lookup: impl Fn(&str) -> Result<String>,
+    lookup: impl Fn(&gat_core::name::EnvironmentName<'_>) -> Result<V>,
 ) -> Result<String> {
     use gat_core::endpoint::{TemplateSyntaxError, TemplateToken, tokenize_template};
     let tokens = tokenize_template(input).map_err(|error| match error {
@@ -54,7 +54,8 @@ pub(crate) fn interpolate_with(
             TemplateToken::Literal(text) => out.push_str(text),
             TemplateToken::EscapedDollar => out.push('$'),
             TemplateToken::Reference(name) => {
-                let value = lookup(name)?;
+                let value = lookup(&name)?;
+                let value = value.as_ref();
                 // Only escape a substituted query value. Leave literal URL syntax
                 // and whole-URL references for OpenDAL to interpret as before.
                 let in_query_value = url::Url::parse(&out).is_ok_and(|url| {
@@ -67,7 +68,7 @@ pub(crate) fn interpolate_with(
                 if in_query_value {
                     out.extend(url::form_urlencoded::byte_serialize(value.as_bytes()));
                 } else {
-                    out.push_str(&value);
+                    out.push_str(value);
                 }
             }
         }
@@ -79,13 +80,15 @@ pub(crate) fn interpolate_with(
 mod tests {
     use super::*;
 
-    fn map_lookup(vars: &[(&str, &str)]) -> impl Fn(&str) -> Result<String> {
-        move |name: &str| {
+    fn map_lookup(
+        vars: &[(&str, &str)],
+    ) -> impl Fn(&gat_core::name::EnvironmentName<'_>) -> Result<String> {
+        move |name: &gat_core::name::EnvironmentName<'_>| {
             vars.iter()
-                .find(|(key, _)| *key == name)
+                .find(|(key, _)| *key == name.as_str())
                 .map(|(_, value)| (*value).to_string())
                 .ok_or_else(|| InterpolateError::MissingVariable {
-                    name: name.to_string(),
+                    name: name.clone().into_owned(),
                 })
         }
     }

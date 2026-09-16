@@ -37,3 +37,46 @@ fn resident_validation_matches_pairwise_tree_invariants_in_any_order() {
         }
     }
 }
+
+#[test]
+fn indexed_directory_validation_matches_pairwise_conflicts() {
+    use gat_core::lock::{
+        LockDomainError, LockError, validated::validate_no_path_directory_conflicts,
+    };
+    let pool = [
+        "a", "a!", "a!/b", "a.b", "a/b", "a/b/c", "a0", "b", "é", "é\n", "é\n/x", "é/x",
+    ];
+    for mask in 0..(1usize << pool.len()) {
+        let paths: std::collections::BTreeSet<_> = pool
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| mask & (1 << index) != 0)
+            .map(|(_, path)| *path)
+            .collect();
+        let expected = paths.iter().find_map(|ancestor| {
+            paths
+                .iter()
+                .find(|descendant| {
+                    descendant
+                        .strip_prefix(*ancestor)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+                })
+                .map(|descendant| (*ancestor, *descendant))
+        });
+        match (validate_no_path_directory_conflicts(&paths), expected) {
+            (Ok(()), None) => {}
+            (
+                Err(LockError::Domain(LockDomainError::DirectoryPrefixConflict {
+                    ancestor,
+                    descendant,
+                })),
+                Some(expected),
+            ) => {
+                assert_eq!((ancestor.as_str(), descendant.as_str()), expected);
+            }
+            (actual, expected) => {
+                panic!("mismatched validation for {paths:?}: {actual:?}, {expected:?}")
+            }
+        }
+    }
+}

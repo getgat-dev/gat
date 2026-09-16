@@ -98,6 +98,8 @@ impl From<gat_io::WorktreePathError> for WorktreePathError {
 #[derive(Debug, thiserror::Error)]
 pub enum MoveError {
     #[error(transparent)]
+    RestoreDestination(#[from] RestoreMoveDestinationError),
+    #[error(transparent)]
     Path(#[from] WorktreePathError),
     #[error("creating parent directory for {path}")]
     CreateParent {
@@ -117,6 +119,8 @@ pub enum MoveError {
 #[derive(Debug, thiserror::Error)]
 pub enum RollbackError {
     #[error(transparent)]
+    RestoreDestination(#[from] RestoreMoveDestinationError),
+    #[error(transparent)]
     Path(#[from] WorktreePathError),
     #[error("moving {dst} back to {src}")]
     Rename {
@@ -125,6 +129,48 @@ pub enum RollbackError {
         #[source]
         source: std::io::Error,
     },
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("restoring the move destination from {}", backup.display())]
+pub struct RestoreMoveDestinationError {
+    pub backup: std::path::PathBuf,
+    #[source]
+    pub source: std::io::Error,
+}
+
+impl From<gat_io::RestoreMoveDestinationError> for RestoreMoveDestinationError {
+    fn from(error: gat_io::RestoreMoveDestinationError) -> Self {
+        Self {
+            backup: error.backup,
+            source: error.source,
+        }
+    }
+}
+
+/// A completed worktree move awaiting tracking-state publication.
+/// Dropping it without resolution preserves any destination backup for recovery.
+#[must_use = "commit after publication or roll back the move"]
+pub struct PendingMove(gat_io::PendingMove);
+
+impl PendingMove {
+    /// Accept publication and clean up the destination backup on a best-effort basis.
+    pub fn commit(self) {
+        self.0.commit();
+    }
+
+    /// Restore the source and any replaced destination; failed recovery retains the backup.
+    pub fn rollback(self) -> Result<(), RollbackError> {
+        self.0.rollback().map_err(|error| match error {
+            gat_io::RollbackMoveError::Path(source) => RollbackError::Path(source.into()),
+            gat_io::RollbackMoveError::RestoreDestination(source) => {
+                RollbackError::RestoreDestination(source.into())
+            }
+            gat_io::RollbackMoveError::Rename { src, dst, source } => {
+                RollbackError::Rename { src, dst, source }
+            }
+        })
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -186,29 +232,24 @@ pub fn inspect_move_destination(
         .map_err(WorktreePathError::from)
 }
 
-pub fn move_path(repo: &Repository, src: &GatPath, dst: &GatPath) -> Result<(), MoveError> {
+pub fn move_path(
+    repo: &Repository,
+    src: &GatPath,
+    dst: &GatPath,
+) -> Result<PendingMove, MoveError> {
     repo.worktree_client()
         .move_path(src, dst)
+        .map(PendingMove)
         .map_err(|error| match error {
+            gat_io::MovePathError::RestoreDestination(source) => {
+                MoveError::RestoreDestination(source.into())
+            }
             gat_io::MovePathError::Path(source) => MoveError::Path(WorktreePathError::from(source)),
             gat_io::MovePathError::CreateParent { path, source } => {
                 MoveError::CreateParent { path, source }
             }
             gat_io::MovePathError::Rename { src, dst, source } => {
                 MoveError::Rename { src, dst, source }
-            }
-        })
-}
-
-pub fn rollback_move(repo: &Repository, src: &GatPath, dst: &GatPath) -> Result<(), RollbackError> {
-    repo.worktree_client()
-        .rollback_move(src, dst)
-        .map_err(|error| match error {
-            gat_io::RollbackMoveError::Path(source) => {
-                RollbackError::Path(WorktreePathError::from(source))
-            }
-            gat_io::RollbackMoveError::Rename { src, dst, source } => {
-                RollbackError::Rename { src, dst, source }
             }
         })
 }
@@ -265,7 +306,9 @@ mod tests {
             .repository_at(tmp.path().to_path_buf());
         std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
 
-        move_path(&repo, &gp("a.bin"), &gp("nested/b.bin")).unwrap();
+        move_path(&repo, &gp("a.bin"), &gp("nested/b.bin"))
+            .unwrap()
+            .commit();
         assert!(!tmp.path().join("a.bin").exists());
         assert_eq!(
             std::fs::read(tmp.path().join("nested/b.bin")).unwrap(),
@@ -283,7 +326,10 @@ mod tests {
             .unwrap()
             .repository_at(tmp.path().to_path_buf());
 
-        let error = rollback_move(&repo, &gp("a.bin"), &gp("missing.bin")).unwrap_err();
+        std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
+        let pending = move_path(&repo, &gp("a.bin"), &gp("moved.bin")).unwrap();
+        std::fs::remove_file(tmp.path().join("moved.bin")).unwrap();
+        let error = pending.rollback().unwrap_err();
 
         assert!(matches!(
             error,

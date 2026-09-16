@@ -4,6 +4,19 @@ use super::super::{Diagnostic, ErrorCode, Failure};
 use crate::presentation::UserLine;
 use gat_engine::{HistoryError, HistoryErrorKind};
 
+impl From<gat_core::history::ReversedTimeWindow> for Failure {
+    fn from(err: gat_core::history::ReversedTimeWindow) -> Self {
+        Self::expected_with_source(
+            Diagnostic::new(
+                ErrorCode::InvalidArgumentValue,
+                "The history start date must not be later than the end date",
+            )
+            .with_hint("Use --since with a date at or before --until."),
+            err,
+        )
+    }
+}
+
 impl From<HistoryError> for Failure {
     fn from(err: HistoryError) -> Self {
         match err.kind() {

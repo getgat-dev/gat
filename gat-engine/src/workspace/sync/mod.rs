@@ -425,7 +425,7 @@ fn plan_dry_run(
     let (repo, snapshot, session) = operation.split_for_sync();
     let cfg = snapshot.config();
     let cache_root = snapshot.cache_root();
-    let merge_window = session.limits().sync.merge_window.get();
+    let merge_window = session.limits().sync.merge_window;
 
     set_phase(progress, ProgressActivity::LoadingMaterializedState);
     let store = StateStore::open_if_exists(repo.layout())?;
@@ -459,9 +459,9 @@ fn plan_dry_run(
             plan::plan_into_sink(
                 repo,
                 cache,
-                plan::DesiredSource {
+                plan::DesiredSource::Lock {
                     store: store.as_ref(),
-                    desired_lock: Some(&desired_lock),
+                    lock: &desired_lock,
                 },
                 &opts.selection,
                 policy,
@@ -525,7 +525,7 @@ fn execute_mutating_sync(
     let cache_root = snapshot.cache_root();
     let mode = snapshot.materialization_strategy();
     let sync_window = session.limits().sync.dirty_window.get();
-    let merge_window = session.limits().sync.merge_window.get();
+    let merge_window = session.limits().sync.merge_window;
 
     // Same validation-required downgrade as the dry-run path above, but
     // reading the flag this store already loaded when it opened, so this
@@ -625,10 +625,7 @@ fn execute_mutating_sync(
                     plan::plan_into_sink(
                         repo,
                         cache,
-                        plan::DesiredSource {
-                            store: Some(&store),
-                            desired_lock: None,
-                        },
+                        plan::DesiredSource::Store(&store),
                         &opts.selection,
                         policy,
                         merge_window,

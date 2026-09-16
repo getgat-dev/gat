@@ -24,6 +24,7 @@ mod identity;
 mod maintenance;
 mod observation;
 mod persistence;
+mod reshape_record;
 
 pub use gat_core::lock::{
     CanonicalDesiredIdentity, LockShardId, LockShardLevels, ShardContentIdentity,
@@ -86,6 +87,7 @@ impl LockStore {
         persistence::load(layout.root_path())
     }
 
+    #[cfg(test)]
     pub(crate) fn load_all(root: &std::path::Path) -> Result<Lock> {
         persistence::load(root)
     }

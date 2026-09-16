@@ -23,13 +23,10 @@ pub(crate) fn definition<'a, T>(
     layers: &'a ConfigLayers,
     get: impl Fn(&'a Config) -> Option<&'a T>,
 ) -> Option<(&'a T, ConfigScope)> {
-    [
-        ConfigScope::Local,
-        ConfigScope::Project,
-        ConfigScope::Global,
-    ]
-    .into_iter()
-    .find_map(|scope| get(layers.scoped(scope)).map(|value| (value, scope)))
+    ConfigScope::ALL
+        .into_iter()
+        .rev()
+        .find_map(|scope| get(layers.scoped(scope)).map(|value| (value, scope)))
 }
 
 /// Index only the requested resource family; definitions remain borrowed.
@@ -38,11 +35,7 @@ pub(crate) fn definitions<'a, K: Ord, T>(
     get: impl Fn(&'a Config) -> &'a std::collections::BTreeMap<K, T>,
 ) -> std::collections::BTreeMap<&'a K, (&'a T, ConfigScope)> {
     let mut result = std::collections::BTreeMap::new();
-    for scope in [
-        ConfigScope::Global,
-        ConfigScope::Project,
-        ConfigScope::Local,
-    ] {
+    for scope in ConfigScope::ALL {
         result.extend(
             get(layers.scoped(scope))
                 .iter()
@@ -66,13 +59,7 @@ pub(crate) fn candidate_definition<'a, T>(
     candidate: &'a Config,
     get: impl Fn(&'a Config) -> Option<&'a T>,
 ) -> Option<(&'a T, ConfigScope)> {
-    [
-        ConfigScope::Local,
-        ConfigScope::Project,
-        ConfigScope::Global,
-    ]
-    .into_iter()
-    .find_map(|scope| {
+    ConfigScope::ALL.into_iter().rev().find_map(|scope| {
         get(if scope == changed {
             candidate
         } else {
@@ -83,13 +70,10 @@ pub(crate) fn candidate_definition<'a, T>(
 }
 
 fn find_scope(contains: impl Fn(ConfigScope) -> bool) -> Option<ConfigScope> {
-    [
-        ConfigScope::Local,
-        ConfigScope::Project,
-        ConfigScope::Global,
-    ]
-    .into_iter()
-    .find(|scope| contains(*scope))
+    ConfigScope::ALL
+        .into_iter()
+        .rev()
+        .find(|scope| contains(*scope))
 }
 
 pub(crate) fn check_scope(

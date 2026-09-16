@@ -16,7 +16,6 @@ use futures::stream::FuturesUnordered;
 use futures::stream::{BoxStream, SelectAll};
 use futures::{FutureExt, StreamExt};
 use gat_core::lexical_path::GatPath;
-use gat_core::name::RouteName;
 use gat_core::oid::Oid;
 use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
@@ -67,8 +66,7 @@ pub enum RemotePresenceError {
     #[error("could not open remote `{remote_name}` for `{path}`")]
     RemoteOpen {
         remote_name: Arc<str>,
-        route_name: Option<RouteName>,
-        route: Option<GatPath>,
+        route: Option<super::TransferRoute>,
         path: GatPath,
         #[source]
         source: Box<RemoteSessionError>,
@@ -76,8 +74,7 @@ pub enum RemotePresenceError {
     #[error("could not check remote `{remote_name}` for `{path}`")]
     PresenceCheck {
         remote_name: Arc<str>,
-        route_name: Option<RouteName>,
-        route: Option<GatPath>,
+        route: Option<super::TransferRoute>,
         path: GatPath,
         #[source]
         source: Box<dyn Error + Send + Sync>,
@@ -91,11 +88,9 @@ impl RemotePresenceError {
         obligation: &T,
         source: RemoteSessionError,
     ) -> Self {
-        let (remote_name, route_name, route) =
-            diagnostic_remote(catalog, policy, obligation.resolved_remote());
+        let (remote_name, route) = diagnostic_remote(catalog, policy, obligation.resolved_remote());
         Self::RemoteOpen {
             remote_name,
-            route_name,
             route,
             path: obligation.representative_path().clone(),
             source: Box::new(source),
@@ -111,11 +106,9 @@ impl RemotePresenceError {
         if matches!(source, PresenceProbeError::Cancelled) {
             return Self::Cancelled;
         }
-        let (remote_name, route_name, route) =
-            diagnostic_remote(catalog, policy, obligation.resolved_remote());
+        let (remote_name, route) = diagnostic_remote(catalog, policy, obligation.resolved_remote());
         Self::PresenceCheck {
             remote_name,
-            route_name,
             route,
             path: obligation.representative_path().clone(),
             source: Box::new(source),

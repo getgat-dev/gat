@@ -1,7 +1,7 @@
 use gat_core::lexical_path::GatPath;
 use gat_core::lock::Entry;
 use gat_core::name::MountName;
-use gat_engine::EffectivePathPolicy;
+use gat_engine::MountOwnership;
 
 #[derive(Debug, Clone, thiserror::Error)]
 #[error(
@@ -14,7 +14,7 @@ pub struct OwnershipError {
 }
 
 pub(crate) fn assert_root_owned(
-    policy: &EffectivePathPolicy,
+    policy: &MountOwnership,
     path: &GatPath,
 ) -> Result<(), OwnershipError> {
     if let Some(owner) = policy.owner_for_path(path) {
@@ -28,20 +28,17 @@ pub(crate) fn assert_root_owned(
 }
 
 pub(crate) fn assert_no_owned_entry(
-    policy: &EffectivePathPolicy,
+    policy: &MountOwnership,
     entries: &[Entry],
 ) -> Result<(), OwnershipError> {
-    if let Some(entry) = entries
-        .iter()
-        .find(|entry| policy.owner_for_path(&entry.path).is_some())
-    {
-        return assert_root_owned(policy, &entry.path);
+    for entry in entries {
+        assert_root_owned(policy, &entry.path)?;
     }
     Ok(())
 }
 
 pub(crate) fn assert_no_first_owned_match(
-    policy: &EffectivePathPolicy,
+    policy: &MountOwnership,
     first_owned_match: Vec<Option<GatPath>>,
 ) -> Result<(), OwnershipError> {
     if let Some(path) = first_owned_match.into_iter().flatten().next() {

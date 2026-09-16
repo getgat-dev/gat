@@ -5,7 +5,6 @@ use crate::remote_executor::RemoteExecutor;
 use crate::remote_executor::RemoteJob;
 use crate::remote_session::{RemoteHandle, RemoteSessionError};
 use gat_core::lexical_path::GatPath;
-use gat_core::name::RouteName;
 use gat_core::oid::Oid;
 use gat_io::RemoteError;
 use gat_io::{CacheError, CacheObject, CacheObjectOpenError};
@@ -57,6 +56,14 @@ pub enum UploadWriteFailureKind {
     OperationFailed,
 }
 
+/// Publication status of a failed file upload. Cancellation is pre-publication.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileUploadFailure {
+    Cancelled,
+    NotPublished,
+    Published,
+}
+
 /// Everything one bounded upload window can fail with.
 #[derive(Debug)]
 pub enum UploadError {
@@ -64,11 +71,9 @@ pub enum UploadError {
     Cancelled,
     FileWrite {
         kind: UploadWriteFailureKind,
-        published: bool,
-        cancelled: bool,
+        state: FileUploadFailure,
         remote_name: Arc<str>,
-        route_name: Option<RouteName>,
-        route: Option<GatPath>,
+        route: Option<super::TransferRoute>,
         path: GatPath,
         source: Box<gat_io::FileWriteError>,
     },
@@ -97,31 +102,27 @@ pub enum UploadError {
     },
     RemoteOpen {
         remote_name: Arc<str>,
-        route_name: Option<RouteName>,
-        route: Option<GatPath>,
+        route: Option<super::TransferRoute>,
         path: GatPath,
         source: Box<RemoteSessionError>,
     },
     WriterOpen {
         kind: UploadRemoteFailureKind,
         remote_name: Arc<str>,
-        route_name: Option<RouteName>,
-        route: Option<GatPath>,
+        route: Option<super::TransferRoute>,
         path: GatPath,
         source: Box<RemoteError>,
     },
     WriterWrite {
         kind: UploadWriteFailureKind,
         remote_name: Arc<str>,
-        route_name: Option<RouteName>,
-        route: Option<GatPath>,
+        route: Option<super::TransferRoute>,
         path: GatPath,
         source: std::io::Error,
     },
     WriterFinalize {
         remote_name: Arc<str>,
-        route_name: Option<RouteName>,
-        route: Option<GatPath>,
+        route: Option<super::TransferRoute>,
         path: GatPath,
         source: std::io::Error,
     },
@@ -129,22 +130,6 @@ pub enum UploadError {
         path: GatPath,
         source: tokio::task::JoinError,
     },
-}
-
-fn write_remote_context(
-    f: &mut std::fmt::Formatter<'_>,
-    remote_name: &str,
-    route_name: Option<&RouteName>,
-    route: Option<&GatPath>,
-) -> std::fmt::Result {
-    match (route_name, route) {
-        (Some(route_name), Some(route)) => write!(
-            f,
-            "remote `{remote_name}` via route `{route_name}` (`{route}`)"
-        ),
-        (_, Some(route)) => write!(f, "remote `{remote_name}` via route `{route}`"),
-        _ => write!(f, "remote `{remote_name}`"),
-    }
 }
 
 impl std::fmt::Display for UploadError {
@@ -165,46 +150,42 @@ impl std::fmt::Display for UploadError {
             }
             Self::RemoteOpen {
                 remote_name,
-                route_name,
                 route,
                 path,
                 ..
             } => {
                 f.write_str("could not resolve/open ")?;
-                write_remote_context(f, remote_name, route_name.as_ref(), route.as_ref())?;
+                super::write_remote_context(f, remote_name, route.as_ref())?;
                 write!(f, " for `{path}`")
             }
             Self::WriterOpen {
                 remote_name,
-                route_name,
                 route,
                 path,
                 ..
             } => {
                 f.write_str("could not open an upload to ")?;
-                write_remote_context(f, remote_name, route_name.as_ref(), route.as_ref())?;
+                super::write_remote_context(f, remote_name, route.as_ref())?;
                 write!(f, " for `{path}`")
             }
             Self::WriterWrite {
                 remote_name,
-                route_name,
                 route,
                 path,
                 ..
             } => {
                 f.write_str("could not write the upload to ")?;
-                write_remote_context(f, remote_name, route_name.as_ref(), route.as_ref())?;
+                super::write_remote_context(f, remote_name, route.as_ref())?;
                 write!(f, " for `{path}`")
             }
             Self::WriterFinalize {
                 remote_name,
-                route_name,
                 route,
                 path,
                 ..
             } => {
                 f.write_str("could not finalize the upload to ")?;
-                write_remote_context(f, remote_name, route_name.as_ref(), route.as_ref())?;
+                super::write_remote_context(f, remote_name, route.as_ref())?;
                 write!(f, " for `{path}`")
             }
             Self::TaskFailed { path, .. } => {
@@ -273,18 +254,21 @@ pub(crate) fn worker_error(
     match source {
         WorkerError::Cancelled => UploadError::Cancelled,
         WorkerError::FileWrite(source) => {
-            let (remote_name, route_name, route) =
-                diagnostic_remote(catalog, policy, &object.remote);
+            let (remote_name, route) = diagnostic_remote(catalog, policy, &object.remote);
             UploadError::FileWrite {
                 kind: if source.source.kind() == std::io::ErrorKind::PermissionDenied {
                     UploadWriteFailureKind::PermissionDenied
                 } else {
                     UploadWriteFailureKind::OperationFailed
                 },
-                published: source.publication != gat_io::FilePublication::NotPublished,
-                cancelled: source.phase == gat_io::FileWritePhase::Cancelled,
+                state: if source.is_published() {
+                    FileUploadFailure::Published
+                } else if source.phase == gat_io::FileWritePhase::Cancelled {
+                    FileUploadFailure::Cancelled
+                } else {
+                    FileUploadFailure::NotPublished
+                },
                 remote_name,
-                route_name,
                 route,
                 path: object.representative_path.clone(),
                 source: Box::new(source),
@@ -299,11 +283,7 @@ pub(crate) fn worker_error(
             cleanup,
         },
         WorkerError::CacheOpen(source) => UploadError::CacheOpen {
-            kind: match source.io_kind() {
-                std::io::ErrorKind::PermissionDenied => UploadCacheFailureKind::PermissionDenied,
-                std::io::ErrorKind::NotFound => UploadCacheFailureKind::Missing,
-                _ => UploadCacheFailureKind::Unavailable,
-            },
+            kind: io_cache_kind(source.io_kind()),
             path: object.representative_path.clone(),
             source,
         },
@@ -314,12 +294,10 @@ pub(crate) fn worker_error(
         },
         WorkerError::WriterOpen(source) => {
             let kind = remote_kind(&source);
-            let (remote_name, route_name, route) =
-                diagnostic_remote(catalog, policy, &object.remote);
+            let (remote_name, route) = diagnostic_remote(catalog, policy, &object.remote);
             UploadError::WriterOpen {
                 kind,
                 remote_name,
-                route_name,
                 route,
                 path: object.representative_path.clone(),
                 source: Box::new(source),
@@ -331,23 +309,19 @@ pub(crate) fn worker_error(
             } else {
                 UploadWriteFailureKind::OperationFailed
             };
-            let (remote_name, route_name, route) =
-                diagnostic_remote(catalog, policy, &object.remote);
+            let (remote_name, route) = diagnostic_remote(catalog, policy, &object.remote);
             UploadError::WriterWrite {
                 kind,
                 remote_name,
-                route_name,
                 route,
                 path: object.representative_path.clone(),
                 source,
             }
         }
         WorkerError::WriterFinalize(source) => {
-            let (remote_name, route_name, route) =
-                diagnostic_remote(catalog, policy, &object.remote);
+            let (remote_name, route) = diagnostic_remote(catalog, policy, &object.remote);
             UploadError::WriterFinalize {
                 remote_name,
-                route_name,
                 route,
                 path: object.representative_path.clone(),
                 source,
@@ -446,12 +420,10 @@ impl PreparedUpload {
     pub(crate) fn new(
         object: UploadObject,
         handle: RemoteHandle,
-        source: CacheObject,
+        source: gat_io::VerifiedCacheObject,
         result_index: usize,
     ) -> Self {
-        let size = source
-            .verified_size()
-            .expect("publication source is verified");
+        let size = source.size();
         let prepared = match handle.client().prepare_file_write(&object.oid, size) {
             Some(write) => Ok(PreparedWrite::File(write)),
             None => handle
@@ -462,7 +434,7 @@ impl PreparedUpload {
         Self {
             object,
             handle,
-            source,
+            source: source.into_object(),
             result_index,
             prepared,
         }
@@ -537,7 +509,6 @@ async fn upload_bytes(
                 .local_transfer(move || {
                     write
                         .upload(source, || cancellation.is_cancelled())
-                        .map(|_| ())
                         .map_err(WorkerError::from)
                 })
                 .await
@@ -579,7 +550,7 @@ async fn upload_bytes(
         let mut sent = 0u64;
         let (returned, first) = executor
             .local_transfer(move || {
-                let bytes = reader.read_chunk(gat_io::TRANSFER_CHUNK_SIZE);
+                let bytes = reader.read_chunk();
                 (reader, bytes)
             })
             .await
@@ -607,9 +578,7 @@ async fn upload_bytes(
                 async {
                     executor
                         .local_transfer(move || {
-                            let bytes = reader
-                                .read_chunk(gat_io::TRANSFER_CHUNK_SIZE)
-                                .map_err(WorkerError::CacheRead)?;
+                            let bytes = reader.read_chunk().map_err(WorkerError::CacheRead)?;
                             Ok::<_, WorkerError>((reader, bytes))
                         })
                         .await
@@ -685,8 +654,19 @@ mod tests {
                 GatPath::parse_canonical("file.bin").unwrap(),
                 ResolvedRemote::for_test(handles[0].id()),
             );
-            let prepared =
-                PreparedUpload::new(object, handles[0].clone(), cache.object(&ingested.oid), 0);
+            let completed = cache
+                .prepare_verification(&[ingested.oid])
+                .verify()
+                .unwrap();
+            let source = cache
+                .commit_verified_objects(completed)
+                .unwrap()
+                .pop()
+                .unwrap();
+            let gat_io::VerifiedCacheEntry::Valid(source) = source else {
+                panic!("fixture source must be verified");
+            };
+            let prepared = PreparedUpload::new(object, handles[0].clone(), source, 0);
             assert_eq!(
                 prepared.buffer_bytes(),
                 (size + 1).min(gat_io::TRANSFER_CHUNK_SIZE)

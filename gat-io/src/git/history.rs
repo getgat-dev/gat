@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use gat_core::git::{GitCommitId, GitRevisionSpec, GitTimestamp};
 use gat_core::history::{HistoryRoot, HistorySelection, HistoryTraversal, ParentMode, TimeWindow};
@@ -27,63 +27,90 @@ pub enum GitHistoryErrorKind {
 
 /// Failure to parse or traverse Git history without exposing Gix errors.
 #[derive(Debug)]
-pub struct GitHistoryError {
-    kind: GitHistoryErrorKind,
-    root: Option<PathBuf>,
-    subject: String,
-    detail: Option<String>,
-    source: Option<BoxedSource>,
+pub struct GitHistoryError(HistoryFailure);
+
+#[derive(Debug)]
+enum HistoryFailure {
+    OpenRepository(super::GitOpenError),
+    InvalidDate {
+        input: String,
+        source: BoxedSource,
+    },
+    RevisionResolution {
+        revision: String,
+        source: BoxedSource,
+    },
+    Traversal {
+        operation: String,
+        source: BoxedSource,
+    },
+    InvalidLockSnapshot {
+        label: String,
+        detail: String,
+        source: BoxedSource,
+    },
+    UnsupportedHashKind,
 }
 
 impl GitHistoryError {
     /// The semantic stage that failed.
     #[must_use]
     pub const fn kind(&self) -> GitHistoryErrorKind {
-        self.kind
+        match &self.0 {
+            HistoryFailure::OpenRepository(_) => GitHistoryErrorKind::OpenRepository,
+            HistoryFailure::InvalidDate { .. } => GitHistoryErrorKind::InvalidDate,
+            HistoryFailure::RevisionResolution { .. } => GitHistoryErrorKind::RevisionResolution,
+            HistoryFailure::Traversal { .. } => GitHistoryErrorKind::Traversal,
+            HistoryFailure::InvalidLockSnapshot { .. } => GitHistoryErrorKind::InvalidLockSnapshot,
+            HistoryFailure::UnsupportedHashKind => GitHistoryErrorKind::UnsupportedHashKind,
+        }
     }
 
     /// Repository root involved in the failure, when applicable.
     #[must_use]
     pub fn root(&self) -> Option<&Path> {
-        self.root.as_deref()
+        match &self.0 {
+            HistoryFailure::OpenRepository(source) => Some(source.path()),
+            _ => None,
+        }
     }
 
     /// Revision, date input, operation, or snapshot label involved.
     #[must_use]
     pub fn subject(&self) -> &str {
-        &self.subject
+        match &self.0 {
+            HistoryFailure::OpenRepository(_) => "opening repository",
+            HistoryFailure::InvalidDate { input, .. } => input,
+            HistoryFailure::RevisionResolution { revision, .. } => revision,
+            HistoryFailure::Traversal { operation, .. } => operation,
+            HistoryFailure::InvalidLockSnapshot { label, .. } => label,
+            HistoryFailure::UnsupportedHashKind => "selected commit",
+        }
     }
 
     /// Safe structural detail for an invalid historical lock snapshot.
     #[must_use]
     pub fn detail(&self) -> Option<&str> {
-        self.detail.as_deref()
+        match &self.0 {
+            HistoryFailure::InvalidLockSnapshot { detail, .. } => Some(detail),
+            _ => None,
+        }
     }
 }
 
 impl std::fmt::Display for GitHistoryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.kind {
-            GitHistoryErrorKind::OpenRepository => write!(
-                f,
-                "could not open the git repository at `{}`",
-                self.root
-                    .as_deref()
-                    .expect("open errors carry a root")
-                    .display()
-            ),
-            GitHistoryErrorKind::InvalidDate => write!(f, "invalid date `{}`", self.subject),
-            GitHistoryErrorKind::RevisionResolution => {
-                write!(f, "could not resolve revision `{}`", self.subject)
+        match &self.0 {
+            HistoryFailure::OpenRepository(source) => std::fmt::Display::fmt(source, f),
+            HistoryFailure::InvalidDate { input, .. } => write!(f, "invalid date `{input}`"),
+            HistoryFailure::RevisionResolution { revision, .. } => {
+                write!(f, "could not resolve revision `{revision}`")
             }
-            GitHistoryErrorKind::Traversal => write!(f, "{} failed", self.subject),
-            GitHistoryErrorKind::InvalidLockSnapshot => write!(
-                f,
-                "{} is not a valid gat lock file: {}",
-                self.subject,
-                self.detail.as_deref().unwrap_or("invalid snapshot")
-            ),
-            GitHistoryErrorKind::UnsupportedHashKind => {
+            HistoryFailure::Traversal { operation, .. } => write!(f, "{operation} failed"),
+            HistoryFailure::InvalidLockSnapshot { label, detail, .. } => {
+                write!(f, "{label} is not a valid gat lock file: {detail}")
+            }
+            HistoryFailure::UnsupportedHashKind => {
                 f.write_str("a selected commit uses an unsupported hash kind")
             }
         }
@@ -92,54 +119,45 @@ impl std::fmt::Display for GitHistoryError {
 
 impl std::error::Error for GitHistoryError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source
-            .as_deref()
-            .map(|source| source as &(dyn std::error::Error + 'static))
+        match &self.0 {
+            HistoryFailure::OpenRepository(source) => Some(source),
+            HistoryFailure::InvalidDate { source, .. }
+            | HistoryFailure::RevisionResolution { source, .. }
+            | HistoryFailure::Traversal { source, .. }
+            | HistoryFailure::InvalidLockSnapshot { source, .. } => Some(source.as_ref()),
+            HistoryFailure::UnsupportedHashKind => None,
+        }
     }
 }
 
 impl From<super::GitOpenError> for GitHistoryError {
     fn from(source: super::GitOpenError) -> Self {
-        Self {
-            kind: GitHistoryErrorKind::OpenRepository,
-            root: Some(source.path().to_path_buf()),
-            subject: "opening repository".to_string(),
-            detail: None,
-            source: Some(Box::new(source)),
-        }
+        Self(HistoryFailure::OpenRepository(source))
     }
 }
 
-fn with_source(
-    kind: GitHistoryErrorKind,
-    root: Option<&Path>,
-    subject: impl Into<String>,
+fn revision_failure(
+    revision: &str,
     source: impl std::error::Error + Send + Sync + 'static,
 ) -> GitHistoryError {
-    GitHistoryError {
-        kind,
-        root: root.map(Path::to_path_buf),
-        subject: subject.into(),
-        detail: None,
-        source: Some(Box::new(source)),
-    }
+    GitHistoryError(HistoryFailure::RevisionResolution {
+        revision: revision.to_owned(),
+        source: Box::new(source),
+    })
 }
 
 fn traversal(
     operation: impl Into<String>,
     source: impl std::error::Error + Send + Sync + 'static,
 ) -> GitHistoryError {
-    with_source(GitHistoryErrorKind::Traversal, None, operation, source)
+    traversal_boxed(operation, Box::new(source))
 }
 
 fn traversal_boxed(operation: impl Into<String>, source: BoxedSource) -> GitHistoryError {
-    GitHistoryError {
-        kind: GitHistoryErrorKind::Traversal,
-        root: None,
-        subject: operation.into(),
-        detail: None,
-        source: Some(source),
-    }
+    GitHistoryError(HistoryFailure::Traversal {
+        operation: operation.into(),
+        source,
+    })
 }
 
 fn invalid_snapshot(
@@ -147,13 +165,11 @@ fn invalid_snapshot(
     detail: impl Into<String>,
     source: impl std::error::Error + Send + Sync + 'static,
 ) -> GitHistoryError {
-    GitHistoryError {
-        kind: GitHistoryErrorKind::InvalidLockSnapshot,
-        root: None,
-        subject: label.into(),
-        detail: Some(detail.into()),
-        source: Some(Box::new(source)),
-    }
+    GitHistoryError(HistoryFailure::InvalidLockSnapshot {
+        label: label.into(),
+        detail: detail.into(),
+        source: Box::new(source),
+    })
 }
 
 /// Outcome of visiting a resolved history selection.
@@ -184,17 +200,27 @@ impl ResolvedHistory<'_> {
         E: From<GitHistoryError>,
     {
         let mut selected = BTreeSet::new();
-        if matches!(
-            self.traversal,
-            HistoryTraversal::Ancestors { per_root: None }
-        ) {
-            selected.extend(
-                self.walk_ancestors(self.roots.iter().copied(), None)
-                    .map_err(E::from)?,
-            );
-        } else {
-            for &root in &self.roots {
-                selected.extend(self.select_from_root(root).map_err(E::from)?);
+        match self.traversal {
+            HistoryTraversal::Ancestors { per_root: None } => {
+                self.walk_ancestors(self.roots.iter().copied(), None, &mut selected)
+                    .map_err(E::from)?;
+            }
+            HistoryTraversal::Ancestors {
+                per_root: Some(limit),
+            } => {
+                for &root in &self.roots {
+                    self.walk_ancestors([root], Some(limit), &mut selected)
+                        .map_err(E::from)?;
+                }
+            }
+            HistoryTraversal::Tips => {
+                for &root in &self.roots {
+                    if self.time.is_unbounded()
+                        || self.commit_time_in_window(root).map_err(E::from)?
+                    {
+                        selected.insert(root);
+                    }
+                }
             }
         }
         for &id in &selected {
@@ -204,19 +230,6 @@ impl ResolvedHistory<'_> {
             visited: selected.len(),
             shallow: self.shallow,
         })
-    }
-
-    fn select_from_root(&self, tip: gix::ObjectId) -> Result<Vec<gix::ObjectId>, GitHistoryError> {
-        match self.traversal {
-            HistoryTraversal::Tips => {
-                if self.time.is_unbounded() || self.commit_time_in_window(tip)? {
-                    Ok(vec![tip])
-                } else {
-                    Ok(Vec::new())
-                }
-            }
-            HistoryTraversal::Ancestors { per_root } => self.walk_ancestors([tip], per_root),
-        }
     }
 
     fn commit_time_in_window(&self, id: gix::ObjectId) -> Result<bool, GitHistoryError> {
@@ -234,7 +247,8 @@ impl ResolvedHistory<'_> {
         &self,
         tips: impl IntoIterator<Item = gix::ObjectId>,
         per_root: Option<NonZeroUsize>,
-    ) -> Result<Vec<gix::ObjectId>, GitHistoryError> {
+        selected: &mut impl Extend<gix::ObjectId>,
+    ) -> Result<(), GitHistoryError> {
         let mut platform = self.repo.rev_walk(tips);
         if !self.hidden.is_empty() {
             platform = platform.with_hidden(self.hidden.clone());
@@ -246,14 +260,13 @@ impl ResolvedHistory<'_> {
             .all()
             .map_err(|source| traversal("walking commit history", source))?;
 
-        let mut selected = Vec::new();
         let mut traversed = 0usize;
         for info in walk {
             let info =
                 info.map_err(|source| traversal("reading commit during history walk", source))?;
             traversed += 1;
             if self.time.is_unbounded() {
-                selected.push(info.id);
+                selected.extend([info.id]);
             } else {
                 let commit = info
                     .object()
@@ -262,7 +275,7 @@ impl ResolvedHistory<'_> {
                     .time()
                     .map_err(|source| traversal("reading commit time", source))?;
                 if self.time.contains(GitTimestamp::from(time.seconds)) {
-                    selected.push(info.id);
+                    selected.extend([info.id]);
                 }
             }
             if let Some(limit) = per_root
@@ -271,19 +284,18 @@ impl ResolvedHistory<'_> {
                 break;
             }
         }
-        Ok(selected)
+        Ok(())
     }
 }
 
 #[cfg(test)]
 fn open(root: &Path) -> Result<gix::Repository, GitHistoryError> {
     gix::open(root).map_err(|source| {
-        with_source(
-            GitHistoryErrorKind::OpenRepository,
-            Some(root),
-            "opening repository",
-            source,
-        )
+        super::GitOpenError {
+            path: root.to_path_buf(),
+            source: Box::new(source),
+        }
+        .into()
     })
 }
 
@@ -324,15 +336,13 @@ fn resolve_commit_strict(
     let text = revision.as_str();
     let object = repo
         .rev_parse_single(text)
-        .map_err(|source| with_source(GitHistoryErrorKind::RevisionResolution, None, text, source))?
+        .map_err(|source| revision_failure(text, source))?
         .object()
-        .map_err(|source| {
-            with_source(GitHistoryErrorKind::RevisionResolution, None, text, source)
-        })?;
+        .map_err(|source| revision_failure(text, source))?;
     object
         .peel_to_commit()
         .map(|commit| commit.id)
-        .map_err(|source| with_source(GitHistoryErrorKind::RevisionResolution, None, text, source))
+        .map_err(|source| revision_failure(text, source))
 }
 
 fn resolve_root(
@@ -437,18 +447,12 @@ fn push_peeled_ref(
     Ok(())
 }
 
-fn semantic_commit_id(id: gix::ObjectId) -> Result<GitCommitId, GitHistoryError> {
+const fn semantic_commit_id(id: gix::ObjectId) -> Result<GitCommitId, GitHistoryError> {
     match id {
         gix::ObjectId::Sha1(bytes) => Ok(GitCommitId::Sha1(bytes)),
         gix::ObjectId::Sha256(bytes) => Ok(GitCommitId::Sha256(bytes)),
         #[allow(unreachable_patterns)]
-        _ => Err(GitHistoryError {
-            kind: GitHistoryErrorKind::UnsupportedHashKind,
-            root: None,
-            subject: "selected commit".to_string(),
-            detail: None,
-            source: None,
-        }),
+        _ => Err(GitHistoryError(HistoryFailure::UnsupportedHashKind)),
     }
 }
 
@@ -603,12 +607,10 @@ pub fn parse_cli_date(input: &str) -> Result<GitTimestamp, GitHistoryError> {
     gix::date::parse(input, Some(gix::date::Zoned::now()))
         .map(|time| GitTimestamp::from(time.seconds))
         .map_err(|source| {
-            with_source(
-                GitHistoryErrorKind::InvalidDate,
-                None,
-                input,
-                source.into_error(),
-            )
+            GitHistoryError(HistoryFailure::InvalidDate {
+                input: input.to_owned(),
+                source: Box::new(source.into_error()),
+            })
         })
 }
 
@@ -992,8 +994,9 @@ mod ownership_tests {
             ..Default::default()
         };
         let resolved = resolve_selection(&repo, &selection).unwrap();
-        let walked = resolved
-            .walk_ancestors(resolved.roots.iter().copied(), None)
+        let mut walked = Vec::new();
+        resolved
+            .walk_ancestors(resolved.roots.iter().copied(), None, &mut walked)
             .unwrap();
         assert_eq!(walked.len(), 3, "shared ancestors must be enumerated once");
         let (_ids, stats) = visit_all(&resolved);
@@ -1533,10 +1536,7 @@ mod ownership_tests {
         let selection = HistorySelection {
             roots: vec![HistoryRoot::Head],
             traversal: HistoryTraversal::Ancestors { per_root: None },
-            time: TimeWindow {
-                since: Some(GitTimestamp::from(mid_time)),
-                until: None,
-            },
+            time: TimeWindow::new(Some(GitTimestamp::from(mid_time)), None).unwrap(),
             ..Default::default()
         };
         let resolved = resolve_selection(&repo, &selection).unwrap();
@@ -1577,10 +1577,7 @@ mod ownership_tests {
             traversal: HistoryTraversal::Ancestors {
                 per_root: NonZeroUsize::new(2),
             },
-            time: TimeWindow {
-                since: Some(GitTimestamp::from(900)),
-                until: None,
-            },
+            time: TimeWindow::new(Some(GitTimestamp::from(900)), None).unwrap(),
             ..Default::default()
         };
         let resolved = resolve_selection(&repo, &selection).unwrap();
@@ -1614,10 +1611,7 @@ mod ownership_tests {
             traversal: HistoryTraversal::Ancestors {
                 per_root: NonZeroUsize::new(2),
             },
-            time: TimeWindow {
-                since: None,
-                until: Some(GitTimestamp::from(900)),
-            },
+            time: TimeWindow::new(None, Some(GitTimestamp::from(900))).unwrap(),
             ..Default::default()
         };
         let resolved = resolve_selection(&repo, &selection).unwrap();
@@ -1643,10 +1637,7 @@ mod ownership_tests {
             traversal: HistoryTraversal::Ancestors {
                 per_root: NonZeroUsize::new(2),
             },
-            time: TimeWindow {
-                since: Some(GitTimestamp::from(10_000)),
-                until: None,
-            },
+            time: TimeWindow::new(Some(GitTimestamp::from(10_000)), None).unwrap(),
             ..Default::default()
         };
         let resolved = resolve_selection(&repo, &selection).unwrap();
@@ -1689,10 +1680,7 @@ mod ownership_tests {
             traversal: HistoryTraversal::Ancestors {
                 per_root: NonZeroUsize::new(2),
             },
-            time: TimeWindow {
-                since: Some(GitTimestamp::from(900)),
-                until: None,
-            },
+            time: TimeWindow::new(Some(GitTimestamp::from(900)), None).unwrap(),
             ..Default::default()
         };
         let resolved = resolve_selection(&repo, &selection).unwrap();
@@ -1734,10 +1722,7 @@ mod ownership_tests {
             traversal: HistoryTraversal::Ancestors {
                 per_root: NonZeroUsize::new(2),
             },
-            time: TimeWindow {
-                since: Some(GitTimestamp::from(900)),
-                until: None,
-            },
+            time: TimeWindow::new(Some(GitTimestamp::from(900)), None).unwrap(),
             parents: ParentMode::First,
             ..Default::default()
         };
@@ -1792,10 +1777,7 @@ mod ownership_tests {
             traversal: HistoryTraversal::Ancestors {
                 per_root: NonZeroUsize::new(2),
             },
-            time: TimeWindow {
-                since: Some(GitTimestamp::from(900)),
-                until: None,
-            },
+            time: TimeWindow::new(Some(GitTimestamp::from(900)), None).unwrap(),
             excluded: vec![topic_tip.to_string().into()],
             ..Default::default()
         };

@@ -15,7 +15,7 @@ mod merge;
 mod reader;
 mod shard;
 
-pub use codec::{Entry, EscapedPath, Lock, VERSION, path_matches_scope};
+pub use codec::{Entry, EscapedPath, Lock, VERSION};
 pub use error::{InvalidOidReason, LockDomainError, LockError, MalformedRowReason, Result};
 pub use identity::{
     CanonicalDesiredIdentity, LOCK_VERSION, ShardContentIdentity, ShardContentIdentityDecodeError,

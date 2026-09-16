@@ -67,10 +67,7 @@
 //! [`ObjectVerification`] is consumed through the operation-scoped
 //! [`crate::CacheClient`] capability.
 use crate::cache::object::{cache_path_oid, hash_file_oid};
-use crate::file_state::{
-    StatProof, coherent_observation, decode_stat_proof, encode_stat_proof,
-    observe_regular_file_no_follow,
-};
+use crate::file_state::{StatProof, coherent_observation, decode_stat_proof, encode_stat_proof};
 use gat_core::oid::Oid;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value};
 use std::cell::RefCell;
@@ -213,7 +210,7 @@ impl From<gat_core::oid::OidFormatError> for CacheStateError {
 
 /// The filename the shared proof cache always uses, directly under the
 /// content-addressed objects directory it accelerates.
-const CACHE_DB_FILENAME: &str = "cache.sqlite3";
+pub(super) const CACHE_DB_FILENAME: &str = "cache.sqlite3";
 
 /// The schema version this build of `gat` writes and requires. Unlike
 /// the repository-local materialized-state database, an
@@ -812,7 +809,8 @@ pub(super) fn verify_object_path_fs(
         ));
     }
 
-    if let (Some(prior), Some(current)) = (prior, observe_regular_file_no_follow(path))
+    if let (Some(prior), Some(current)) =
+        (prior, crate::file_state::stat_proof_from_metadata(&meta))
         && current.matches(prior)
     {
         return Ok((CacheObservation::Valid { size: current.size }, None));
@@ -1104,11 +1102,7 @@ mod tests {
         let oid = Oid::from_hex(&"ab".repeat(32)).unwrap();
         assert_eq!(state.lookup(&oid).unwrap(), None);
 
-        let proof = StatProof {
-            size: 5,
-            mtime_secs: 1234,
-            mtime_nanos: 0,
-        };
+        let proof = StatProof::for_test(5, 1234, 0);
         state.upsert(&oid, &proof).unwrap();
         assert_eq!(state.lookup(&oid).unwrap(), Some(proof));
 
@@ -1124,11 +1118,7 @@ mod tests {
         let state = CacheState::open_for_test(&objects_dir);
         let oid_a = Oid::from_hex(&"aa".repeat(32)).unwrap();
         let oid_b = Oid::from_hex(&"bb".repeat(32)).unwrap();
-        let proof = StatProof {
-            size: 1,
-            mtime_secs: 1,
-            mtime_nanos: 0,
-        };
+        let proof = StatProof::for_test(1, 1, 0);
         state.upsert(&oid_a, &proof).unwrap();
         state.upsert(&oid_b, &proof).unwrap();
 
@@ -1206,9 +1196,8 @@ mod tests {
         // touched the file's mtime without changing its bytes) by
         // storing a stale proof directly.
         let path = cache_path_oid(&objects_dir, &oid);
-        let real = observe_regular_file_no_follow(&path).unwrap();
-        let mut stale = real;
-        stale.mtime_secs -= 100;
+        let real = crate::file_state::observe_regular_file_no_follow(&path).unwrap();
+        let stale = StatProof::for_test(real.size, 1, 0);
         state.upsert(&oid, &stale).unwrap();
 
         let status = verify_through_client(&objects_dir, &oid);
@@ -1288,28 +1277,32 @@ mod tests {
         );
     }
     #[test]
-    fn malformed_proof_bytes_behave_as_absent_and_are_rewritten() {
+    fn malformed_and_legacy_proofs_are_reestablished_by_verification() {
         let tmp = tempfile::tempdir().unwrap();
         let objects_dir = tmp.path().join("objects");
         let oid = write_object(&objects_dir, b"payload");
         let state = CacheState::open_for_test(&objects_dir);
-
-        // Write a malformed (garbage) proof BLOB directly, bypassing the
-        // encoder.
-        {
-            let conn_ref = state.conn.borrow();
-            let conn = conn_ref.as_ref().unwrap();
-            conn.execute(
-                "INSERT INTO objects (oid, proof) VALUES (?1, ?2)",
-                params![oid.as_bytes().as_slice(), b"not-a-real-proof".as_slice()],
-            )
-            .unwrap();
+        let path = cache_path_oid(&objects_dir, &oid);
+        let proof = crate::file_state::observe_regular_file_no_follow(&path).unwrap();
+        let mut legacy = encode_stat_proof(&proof);
+        legacy[0] = 1;
+        for bytes in [b"not-a-real-proof".as_slice(), legacy.as_slice()] {
+            {
+                let conn_ref = state.conn.borrow();
+                let conn = conn_ref.as_ref().unwrap();
+                conn.execute(
+                    "INSERT OR REPLACE INTO objects (oid, proof) VALUES (?1, ?2)",
+                    params![oid.as_bytes().as_slice(), bytes],
+                )
+                .unwrap();
+            }
+            assert_eq!(state.lookup(&oid).unwrap(), None);
+            assert_eq!(
+                verify_through_client(&objects_dir, &oid),
+                ObjectVerification::Valid
+            );
+            assert_eq!(state.lookup(&oid).unwrap(), Some(proof));
         }
-        assert_eq!(state.lookup(&oid).unwrap(), None);
-
-        let status = verify_through_client(&objects_dir, &oid);
-        assert_eq!(status, ObjectVerification::Valid);
-        assert!(state.lookup(&oid).unwrap().is_some());
     }
 
     #[test]
@@ -1451,11 +1444,7 @@ mod tests {
             .map(|i| {
                 let state = state.clone();
                 std::thread::spawn(move || {
-                    let proof = StatProof {
-                        size: 100 + i,
-                        mtime_secs: 1000 + i as i64,
-                        mtime_nanos: 0,
-                    };
+                    let proof = StatProof::for_test(100 + i, 1000 + i as i64, 0);
                     state.lock().unwrap().upsert(&oid, &proof).unwrap();
                 })
             })
@@ -1485,11 +1474,7 @@ mod tests {
                 let state = state.clone();
                 std::thread::spawn(move || {
                     let oid = Oid::from_hex(&format!("{i:02x}").repeat(32)).unwrap();
-                    let proof = StatProof {
-                        size: u64::from(i),
-                        mtime_secs: i64::from(i),
-                        mtime_nanos: 0,
-                    };
+                    let proof = StatProof::for_test(u64::from(i), i64::from(i), 0);
                     state.lock().unwrap().upsert(&oid, &proof).unwrap();
                     oid
                 })
@@ -1516,11 +1501,7 @@ mod tests {
         fs::create_dir_all(&objects_dir).unwrap();
         let state = CacheState::open_for_test(&objects_dir);
 
-        let proof = StatProof {
-            size: 1,
-            mtime_secs: 1,
-            mtime_nanos: 0,
-        };
+        let proof = StatProof::for_test(1, 1, 0);
         let oids: Vec<Oid> = (0..100).map(oid_from_index).collect();
         state
             .apply_many(
@@ -1557,11 +1538,7 @@ mod tests {
         fs::create_dir_all(&objects_dir).unwrap();
         let state = CacheState::open_for_test(&objects_dir);
 
-        let proof = StatProof {
-            size: 7,
-            mtime_secs: 7,
-            mtime_nanos: 0,
-        };
+        let proof = StatProof::for_test(7, 7, 0);
         let deltas: Vec<CachePublication> = (0..200)
             .map(|i| CachePublication::upsert(oid_from_index(i), proof))
             .collect();
@@ -1592,11 +1569,7 @@ mod tests {
         fs::create_dir_all(&objects_dir).unwrap();
         let state = CacheState::open_for_test(&objects_dir);
 
-        let proof = StatProof {
-            size: 9,
-            mtime_secs: 9,
-            mtime_nanos: 0,
-        };
+        let proof = StatProof::for_test(9, 9, 0);
         // Larger than one `TRANSACTION_CHUNK` (4096), so `apply_many`
         // must commit more than one bounded transaction rather than
         // holding a single transaction open across the entire input
@@ -1628,11 +1601,7 @@ mod tests {
         fs::create_dir_all(&objects_dir).unwrap();
         let state = CacheState::open_for_test(&objects_dir);
 
-        let proof = StatProof {
-            size: 7,
-            mtime_secs: 7,
-            mtime_nanos: 0,
-        };
+        let proof = StatProof::for_test(7, 7, 0);
         // Fill a first bounded transaction group with an `Upsert` for
         // `oid_from_index(0)`, then push the total past one
         // `TRANSACTION_CHUNK` and finish with a `Remove` for that same
@@ -1682,11 +1651,7 @@ mod tests {
         fs::create_dir_all(&objects_dir).unwrap();
         let state = CacheState::open_for_test(&objects_dir);
 
-        let proof = StatProof {
-            size: 3,
-            mtime_secs: 3,
-            mtime_nanos: 0,
-        };
+        let proof = StatProof::for_test(3, 3, 0);
         let oids: Vec<Oid> = (0..150).map(oid_from_index).collect();
         state
             .apply_many(
@@ -1740,11 +1705,7 @@ mod tests {
         let state = CacheState::open_for_test(&objects_dir);
         state.break_for_test();
 
-        let proof = StatProof {
-            size: 1,
-            mtime_secs: 1,
-            mtime_nanos: 0,
-        };
+        let proof = StatProof::for_test(1, 1, 0);
         let deltas = vec![CachePublication::upsert(oid_from_index(0), proof)];
         assert!(state.apply_many(&deltas).is_err());
     }

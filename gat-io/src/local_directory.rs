@@ -1,9 +1,25 @@
-//! Lazy initialization of repository-owned, self-ignoring local storage.
+//! Directory inspection and lazy initialization of self-ignoring local storage.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+
+/// Open an existing directory without accepting a symlink at its final
+/// component. Missing directories are empty inventories; other objects are
+/// errors. Concurrent replacement of the directory or its ancestors remains
+/// outside this contract.
+pub(crate) fn read_directory_if_present(path: &Path) -> std::io::Result<Option<std::fs::ReadDir>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => std::fs::read_dir(path).map(Some),
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "expected a directory, not a symlink or file",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
 
 /// Filesystem preparation failures retain their target at the owning boundary.
 /// Callers translate the structured fields into their subsystem error type.

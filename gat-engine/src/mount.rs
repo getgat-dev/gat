@@ -159,19 +159,13 @@ impl MountSourceLocation {
     ) -> Result<PreparedMountSource, MountSourceError> {
         let worktree = match self.location.kind() {
             gat_io::GitLocationKind::LocalPath => {
-                gat_io::prepare_worktree(&self.location, &self.spec, cancellation.git_interrupt())
+                gat_io::prepare_worktree(&self.location, cancellation.git_interrupt())
                     .map_err(MountSourceError::prepare)?
             }
             gat_io::GitLocationKind::Clone => with_progress_typed(
                 progress,
                 ProgressSpec::indeterminate(ProgressOperation::CloningSource),
-                |_| {
-                    gat_io::prepare_worktree(
-                        &self.location,
-                        &self.spec,
-                        cancellation.git_interrupt(),
-                    )
-                },
+                |_| gat_io::prepare_worktree(&self.location, cancellation.git_interrupt()),
             )
             .map_err(MountSourceError::prepare)?,
         };
@@ -943,15 +937,7 @@ fn replay_record(
                     return Ok(None);
                 };
                 replay_fault("replay.before_publish")?;
-                Ok(Some(
-                    rows?
-                        .into_iter()
-                        .map(|row| gat_core::lock::Entry {
-                            path: row.path,
-                            oid: row.oid,
-                        })
-                        .collect(),
-                ))
+                Ok(Some(rows?))
             },
             result,
             || {

@@ -93,18 +93,10 @@ impl DesiredStateWrite<'_> {
         if moved.is_empty() {
             return Ok(());
         }
-        let destination = self
-            .desired_rows(DesiredQuery::scope(dst))
-            .map_err(E::from)?;
         let mut touched = self
-            .desired_shard_ids_for_paths(
-                moved
-                    .iter()
-                    .map(|entry| &entry.path)
-                    .chain(destination.iter().map(|entry| &entry.path)),
-            )
+            .desired_shard_ids_for_paths(moved.iter().map(|entry| &entry.path))
             .map_err(E::from)?;
-        drop(destination);
+        touched.extend(desired_shard_ids_for_scope_inner(&self.tx, dst).map_err(E::from)?);
         self.move_entries(
             &mut moved,
             src,
@@ -517,17 +509,46 @@ fn desired_shard_ids_for_paths_inner<'a>(
                  WHERE path IN ({placeholders}) AND desired_shard_id IS NOT NULL"
             ))
             .state_context("preparing desired-shard-id lookup")?;
-        let rows = stmt
-            .query_map(params_from_iter(chunk.iter().map(|p| p.as_str())), |row| {
-                row.get::<_, String>(0)
-            })
-            .state_context("querying desired-shard-id lookup")?;
-        for row in rows {
-            let text = row.state_context("reading desired-shard-id row")?;
-            shard_ids.insert(decode_shard_id(&text, "desired_shard_id")?);
-        }
+        query_shard_ids(
+            &mut stmt,
+            params_from_iter(chunk.iter().map(|p| p.as_str())),
+            &mut shard_ids,
+        )?;
     }
     Ok(shard_ids)
+}
+
+/// Discover destination publication work without materializing displaced rows.
+fn desired_shard_ids_for_scope_inner(
+    conn: &Connection,
+    scope: &GatPath,
+) -> Result<std::collections::BTreeSet<LockShardId>> {
+    let (lower, upper) = descendant_range(scope.as_str());
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT desired_shard_id FROM state
+             WHERE desired_shard_id IS NOT NULL
+             AND (path = ?1 OR (path >= ?2 AND path < ?3))",
+        )
+        .state_context("preparing desired-shard-id lookup")?;
+    let mut shard_ids = std::collections::BTreeSet::new();
+    query_shard_ids(&mut stmt, (scope.as_str(), lower, upper), &mut shard_ids)?;
+    Ok(shard_ids)
+}
+
+fn query_shard_ids(
+    stmt: &mut rusqlite::Statement<'_>,
+    params: impl rusqlite::Params,
+    shard_ids: &mut std::collections::BTreeSet<LockShardId>,
+) -> Result<()> {
+    let rows = stmt
+        .query_map(params, |row| row.get::<_, String>(0))
+        .state_context("querying desired-shard-id lookup")?;
+    for row in rows {
+        let text = row.state_context("reading desired-shard-id row")?;
+        shard_ids.insert(decode_shard_id(&text, "desired_shard_id")?);
+    }
+    Ok(())
 }
 
 fn desired_rows_by_shard_ids_inner(
@@ -1031,6 +1052,43 @@ impl StateStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shard_scope_lookup_includes_exact_and_nested_paths_but_not_prefix_siblings() {
+        let temp = tempfile::tempdir().unwrap();
+        let layout = crate::RepositoryLayout::at(temp.path().to_path_buf());
+        let mut store = StateStore::open(&layout).unwrap();
+        let cases = [
+            ("target", "gat.lock/01.tsv"),
+            ("target/child", "gat.lock/02.tsv"),
+            ("target/deep/child", "gat.lock/02.tsv"),
+            ("target.other", "gat.lock/03.tsv"),
+            ("target0/child", "gat.lock/04.tsv"),
+        ];
+        for (path, shard) in cases {
+            let tx = store.conn.transaction().unwrap();
+            apply_shard_entries_tx(
+                &tx,
+                LockShardId::parse_canonical(shard).unwrap(),
+                &[Entry {
+                    path: GatPath::parse_canonical(path).unwrap(),
+                    oid: gat_core::oid::Oid::from_bytes([0; 32]),
+                }],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        let actual = desired_shard_ids_for_scope_inner(
+            &store.conn,
+            &GatPath::parse_canonical("target").unwrap(),
+        )
+        .unwrap();
+        let expected = ["gat.lock/01.tsv", "gat.lock/02.tsv"]
+            .into_iter()
+            .map(|raw| LockShardId::parse_canonical(raw).unwrap())
+            .collect();
+        assert_eq!(actual, expected);
+    }
 
     #[test]
     fn shard_refresh_binds_shared_id_across_chunks_and_clears_stale_rows() {

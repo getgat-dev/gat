@@ -55,12 +55,14 @@ impl Admission {
     }
 
     pub(super) fn forget_waiter(&self, remote: RemoteId) {
-        self.state
-            .lock()
-            .unwrap()
-            .waiting
-            .retain(|(id, _)| *id != remote);
-        self.changed.notify_waiters();
+        let mut state = self.state.lock().unwrap();
+        let before = state.waiting.len();
+        state.waiting.retain(|(id, _)| *id != remote);
+        let removed = state.waiting.len() != before;
+        drop(state);
+        if removed {
+            self.changed.notify_waiters();
+        }
     }
 
     pub(super) fn try_acquire(
@@ -155,6 +157,28 @@ impl Admission {
 mod tests {
     use super::*;
     use std::num::NonZeroUsize;
+
+    #[test]
+    fn forgetting_an_absent_waiter_does_not_wake_coordinators() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _entered = runtime.enter();
+        let (_dir, handles) = crate::remote_session::test_support::open_handles(&["a", "b"]);
+        let admission = Admission::new(RemoteConcurrency {
+            global: NonZeroUsize::new(1).unwrap(),
+            per_remote: NonZeroUsize::new(1).unwrap(),
+        });
+        let _held = admission.try_acquire(handles[0].id(), 1).unwrap();
+        assert!(admission.try_acquire(handles[1].id(), 1).is_none());
+        runtime.block_on(async {
+            let changed = admission.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            admission.forget_waiter(handles[0].id());
+            assert!(futures::poll!(&mut changed).is_pending());
+            admission.forget_waiter(handles[1].id());
+            assert!(futures::poll!(&mut changed).is_ready());
+        });
+    }
 
     #[test]
     fn last_lease_removes_idle_accounting_without_losing_a_waiter() {

@@ -5,8 +5,7 @@ use crate::presentation::UserLine;
 
 fn remote_resolution_context_for(
     remote_name: &str,
-    route_name: Option<&str>,
-    route: Option<&str>,
+    route: Option<&gat_engine::TransferRoute>,
 ) -> UserLine {
     let mut parts = vec![
         UserLine::authored("remote `"),
@@ -14,17 +13,13 @@ fn remote_resolution_context_for(
         UserLine::authored("`"),
     ];
     if let Some(route) = route {
-        parts.push(UserLine::authored(" via route `"));
-        if let Some(name) = route_name {
-            parts.extend([
-                UserLine::identifier(name),
-                UserLine::authored("` (`"),
-                UserLine::path_text(route),
-                UserLine::authored("`)"),
-            ]);
-        } else {
-            parts.extend([UserLine::path_text(route), UserLine::authored("`")]);
-        }
+        parts.extend([
+            UserLine::authored(" via route `"),
+            UserLine::identifier(route.name.as_str()),
+            UserLine::authored("` (`"),
+            UserLine::path_text(route.path.as_str()),
+            UserLine::authored("`)"),
+        ]);
     }
     UserLine::compose(parts)
 }
@@ -91,7 +86,6 @@ impl From<gat_engine::DownloadError> for Failure {
             )),
             DownloadError::RemoteOpen {
                 remote_name,
-                route_name,
                 route,
                 path,
                 source,
@@ -99,11 +93,7 @@ impl From<gat_engine::DownloadError> for Failure {
                 let code = source
                     .kind()
                     .map_or(ErrorCode::Internal, super::super::remote::remote_open_code);
-                let description = remote_resolution_context_for(
-                    remote_name,
-                    route_name.as_ref().map(gat_core::name::RouteName::as_str),
-                    route.as_ref().map(gat_core::lexical_path::GatPath::as_str),
-                );
+                let description = remote_resolution_context_for(remote_name, route.as_ref());
                 Self::infrastructure(
                     Diagnostic::new(
                         code,
@@ -117,7 +107,6 @@ impl From<gat_engine::DownloadError> for Failure {
             DownloadError::RemoteRead {
                 kind,
                 remote_name,
-                route_name,
                 route,
                 path,
                 ..
@@ -128,11 +117,7 @@ impl From<gat_engine::DownloadError> for Failure {
                     DownloadRemoteFailureKind::Unavailable => ErrorCode::RemoteUnavailable,
                     DownloadRemoteFailureKind::OperationFailed => ErrorCode::RemoteOperationFailed,
                 };
-                let description = remote_resolution_context_for(
-                    remote_name,
-                    route_name.as_ref().map(gat_core::name::RouteName::as_str),
-                    route.as_ref().map(gat_core::lexical_path::GatPath::as_str),
-                );
+                let description = remote_resolution_context_for(remote_name, route.as_ref());
                 Self::infrastructure(
                     Diagnostic::new(
                         code,
@@ -225,17 +210,14 @@ impl From<gat_engine::UploadError> for Failure {
             }
             UploadError::FileWrite {
                 kind,
-                published,
-                cancelled,
+                state,
                 remote_name,
-                route_name,
                 route,
                 path,
                 source,
             } => {
                 let code = match kind {
-                    _ if *cancelled
-                        && !*published
+                    _ if *state == gat_engine::FileUploadFailure::Cancelled
                         && !cleanup_failed
                         && source.cleanup.is_none() =>
                     {
@@ -244,17 +226,15 @@ impl From<gat_engine::UploadError> for Failure {
                     UploadWriteFailureKind::PermissionDenied => ErrorCode::RemotePermissionDenied,
                     UploadWriteFailureKind::OperationFailed => ErrorCode::RemoteOperationFailed,
                 };
-                let description = remote_resolution_context_for(
-                    remote_name,
-                    route_name.as_ref().map(gat_core::name::RouteName::as_str),
-                    route.as_ref().map(gat_core::lexical_path::GatPath::as_str),
-                );
-                let message = if *published {
-                    "The object is published, but upload cleanup or durability failed on "
-                } else if *cancelled {
-                    "File upload cancelled on "
-                } else {
-                    "Could not publish the file upload to "
+                let description = remote_resolution_context_for(remote_name, route.as_ref());
+                let message = match state {
+                    gat_engine::FileUploadFailure::Published => {
+                        "The object is published, but upload cleanup or durability failed on "
+                    }
+                    gat_engine::FileUploadFailure::Cancelled => "File upload cancelled on ",
+                    gat_engine::FileUploadFailure::NotPublished => {
+                        "Could not publish the file upload to "
+                    }
                 };
                 Self::infrastructure(
                     Diagnostic::new(
@@ -281,7 +261,6 @@ impl From<gat_engine::UploadError> for Failure {
             }
             UploadError::RemoteOpen {
                 remote_name,
-                route_name,
                 route,
                 path,
                 source,
@@ -289,11 +268,7 @@ impl From<gat_engine::UploadError> for Failure {
                 let code = source
                     .kind()
                     .map_or(ErrorCode::Internal, super::super::remote::remote_open_code);
-                let description = remote_resolution_context_for(
-                    remote_name,
-                    route_name.as_ref().map(gat_core::name::RouteName::as_str),
-                    route.as_ref().map(gat_core::lexical_path::GatPath::as_str),
-                );
+                let description = remote_resolution_context_for(remote_name, route.as_ref());
                 Self::infrastructure(
                     Diagnostic::new(
                         code,
@@ -306,7 +281,6 @@ impl From<gat_engine::UploadError> for Failure {
             UploadError::WriterOpen {
                 kind,
                 remote_name,
-                route_name,
                 route,
                 path,
                 ..
@@ -316,11 +290,7 @@ impl From<gat_engine::UploadError> for Failure {
                     UploadRemoteFailureKind::Unavailable => ErrorCode::RemoteUnavailable,
                     UploadRemoteFailureKind::OperationFailed => ErrorCode::RemoteOperationFailed,
                 };
-                let description = remote_resolution_context_for(
-                    remote_name,
-                    route_name.as_ref().map(gat_core::name::RouteName::as_str),
-                    route.as_ref().map(gat_core::lexical_path::GatPath::as_str),
-                );
+                let description = remote_resolution_context_for(remote_name, route.as_ref());
                 Self::infrastructure(
                     Diagnostic::new(
                         code,
@@ -336,7 +306,6 @@ impl From<gat_engine::UploadError> for Failure {
             UploadError::WriterWrite {
                 kind,
                 remote_name,
-                route_name,
                 route,
                 path,
                 ..
@@ -345,11 +314,7 @@ impl From<gat_engine::UploadError> for Failure {
                     UploadWriteFailureKind::PermissionDenied => ErrorCode::PermissionDenied,
                     UploadWriteFailureKind::OperationFailed => ErrorCode::RemoteOperationFailed,
                 };
-                let description = remote_resolution_context_for(
-                    remote_name,
-                    route_name.as_ref().map(gat_core::name::RouteName::as_str),
-                    route.as_ref().map(gat_core::lexical_path::GatPath::as_str),
-                );
+                let description = remote_resolution_context_for(remote_name, route.as_ref());
                 Self::infrastructure(
                     Diagnostic::new(
                         code,
@@ -364,16 +329,11 @@ impl From<gat_engine::UploadError> for Failure {
             }
             UploadError::WriterFinalize {
                 remote_name,
-                route_name,
                 route,
                 path,
                 ..
             } => {
-                let description = remote_resolution_context_for(
-                    remote_name,
-                    route_name.as_ref().map(gat_core::name::RouteName::as_str),
-                    route.as_ref().map(gat_core::lexical_path::GatPath::as_str),
-                );
+                let description = remote_resolution_context_for(remote_name, route.as_ref());
                 Self::infrastructure(
                     Diagnostic::new(
                         ErrorCode::RemoteOperationFailed,
@@ -415,7 +375,7 @@ impl From<gat_engine::RemotePresenceError> for Failure {
                 err,
             );
         }
-        let (code, action, remote_name, route_name, route, path) = match &err {
+        let (code, action, remote_name, route, path) = match &err {
             gat_engine::RemotePresenceError::Identity(source) => return (*source).into(),
             gat_engine::RemotePresenceError::Cancelled => {
                 return Self::expected(Diagnostic::new(
@@ -425,7 +385,6 @@ impl From<gat_engine::RemotePresenceError> for Failure {
             }
             gat_engine::RemotePresenceError::RemoteOpen {
                 remote_name,
-                route_name,
                 route,
                 path,
                 source,
@@ -435,13 +394,11 @@ impl From<gat_engine::RemotePresenceError> for Failure {
                     .map_or(ErrorCode::Internal, super::super::remote::remote_open_code),
                 "Could not open ",
                 remote_name,
-                route_name.as_ref(),
                 route.as_ref(),
                 path,
             ),
             gat_engine::RemotePresenceError::PresenceCheck {
                 remote_name,
-                route_name,
                 route,
                 path,
                 ..
@@ -449,16 +406,11 @@ impl From<gat_engine::RemotePresenceError> for Failure {
                 ErrorCode::RemoteOperationFailed,
                 "Could not check ",
                 remote_name,
-                route_name.as_ref(),
                 route.as_ref(),
                 path,
             ),
         };
-        let description = remote_resolution_context_for(
-            remote_name,
-            route_name.map(gat_core::name::RouteName::as_str),
-            route.map(gat_core::lexical_path::GatPath::as_str),
-        );
+        let description = remote_resolution_context_for(remote_name, route);
         let suffix = if matches!(err, gat_engine::RemotePresenceError::PresenceCheck { .. }) {
             " for this object"
         } else {
@@ -509,8 +461,10 @@ mod tests {
         let failure: Failure = gat_engine::DownloadError::RemoteRead {
             kind: gat_engine::DownloadRemoteFailureKind::NotFound,
             remote_name: "origin".into(),
-            route_name: Some(gat_core::name::RouteName::from_string("assets".into())),
-            route: Some(gat_core::lexical_path::GatPath::parse_canonical("data files").unwrap()),
+            route: Some(gat_engine::TransferRoute {
+                name: gat_core::name::RouteName::from_string("assets".into()),
+                path: gat_core::lexical_path::GatPath::parse_canonical("data files").unwrap(),
+            }),
             path: gat_core::lexical_path::GatPath::parse_canonical("file.bin").unwrap(),
             source: Box::new(source),
         }
@@ -570,8 +524,10 @@ mod tests {
         const SENTINEL: &str = "SECRET-BACKEND-SENTINEL";
         let err = gat_engine::RemotePresenceError::PresenceCheck {
             remote_name: "origin".into(),
-            route_name: Some(gat_core::name::RouteName::from_string("assets".to_string())),
-            route: Some(gat_core::lexical_path::GatPath::parse_canonical("vendor/assets").unwrap()),
+            route: Some(gat_engine::TransferRoute {
+                name: gat_core::name::RouteName::from_string("assets".to_string()),
+                path: gat_core::lexical_path::GatPath::parse_canonical("vendor/assets").unwrap(),
+            }),
             path: gat_core::lexical_path::GatPath::parse_canonical("vendor/assets/a.bin").unwrap(),
             source: Box::new(std::io::Error::other(SENTINEL)),
         };
@@ -593,7 +549,6 @@ mod tests {
         );
         let err = gat_engine::DownloadError::RemoteOpen {
             remote_name: "origin".into(),
-            route_name: None,
             route: None,
             path: gat_core::lexical_path::GatPath::parse_canonical("assets/a.bin").unwrap(),
             source: Box::new(source),
@@ -615,8 +570,10 @@ mod tests {
         let err = gat_engine::DownloadError::RemoteRead {
             kind: gat_engine::DownloadRemoteFailureKind::OperationFailed,
             remote_name: "origin".into(),
-            route_name: Some(gat_core::name::RouteName::from_string("assets".to_string())),
-            route: Some(gat_core::lexical_path::GatPath::parse_canonical("vendor/assets").unwrap()),
+            route: Some(gat_engine::TransferRoute {
+                name: gat_core::name::RouteName::from_string("assets".to_string()),
+                path: gat_core::lexical_path::GatPath::parse_canonical("vendor/assets").unwrap(),
+            }),
             path: gat_core::lexical_path::GatPath::parse_canonical("vendor/assets/a.bin").unwrap(),
             source: Box::new(std::io::Error::other(SENTINEL)),
         };
@@ -637,8 +594,10 @@ mod tests {
         let err = gat_engine::UploadError::WriterWrite {
             kind: gat_engine::UploadWriteFailureKind::OperationFailed,
             remote_name: "origin".into(),
-            route_name: Some(gat_core::name::RouteName::from_string("assets".to_string())),
-            route: Some(gat_core::lexical_path::GatPath::parse_canonical("vendor/assets").unwrap()),
+            route: Some(gat_engine::TransferRoute {
+                name: gat_core::name::RouteName::from_string("assets".to_string()),
+                path: gat_core::lexical_path::GatPath::parse_canonical("vendor/assets").unwrap(),
+            }),
             path: gat_core::lexical_path::GatPath::parse_canonical("vendor/assets/a.bin").unwrap(),
             source: std::io::Error::other(SENTINEL),
         };
@@ -663,7 +622,6 @@ mod tests {
             primary: Box::new(gat_engine::UploadError::Cancelled),
             cleanup: Box::new(gat_io::FileWriteError {
                 phase: gat_io::FileWritePhase::Cleanup,
-                publication: gat_io::FilePublication::NotPublished,
                 source: std::io::Error::other("CLEANUP-SECRET"),
                 cleanup: None,
             }),
@@ -677,25 +635,51 @@ mod tests {
     }
 
     #[test]
+    fn file_cancellation_without_cleanup_failure_remains_interrupted() {
+        let failure = Failure::from(gat_engine::UploadError::FileWrite {
+            kind: gat_engine::UploadWriteFailureKind::OperationFailed,
+            state: gat_engine::FileUploadFailure::Cancelled,
+            remote_name: "origin".into(),
+            route: None,
+            path: gat_core::lexical_path::GatPath::parse_canonical("file.bin").unwrap(),
+            source: Box::new(gat_io::FileWriteError {
+                phase: gat_io::FileWritePhase::Cancelled,
+                source: std::io::Error::other("CANCELLATION-SECRET"),
+                cleanup: None,
+            }),
+        });
+        assert_eq!(failure.diagnostic().code(), ErrorCode::Interrupted);
+        assert!(!failure.diagnostic().summary().contains("SECRET"));
+    }
+
+    #[test]
     fn file_publication_diagnostic_is_honest_and_redacts_both_sources() {
-        for (published, cancelled) in [(false, false), (true, false), (false, true)] {
+        for (state, phase) in [
+            (
+                gat_engine::FileUploadFailure::NotPublished,
+                gat_io::FileWritePhase::Copy,
+            ),
+            (
+                gat_engine::FileUploadFailure::Published,
+                gat_io::FileWritePhase::DirectorySync,
+            ),
+            (
+                gat_engine::FileUploadFailure::Cancelled,
+                gat_io::FileWritePhase::Cancelled,
+            ),
+        ] {
+            let published = state == gat_engine::FileUploadFailure::Published;
+            let cancelled = state == gat_engine::FileUploadFailure::Cancelled;
             let failure: Failure = gat_engine::UploadError::FileWrite {
                 kind: gat_engine::UploadWriteFailureKind::OperationFailed,
-                published,
-                cancelled,
+                state,
                 remote_name: "origin".into(),
-                route_name: None,
                 route: None,
                 path: gat_core::lexical_path::GatPath::parse_canonical("file.bin").unwrap(),
                 source: Box::new(gat_io::FileWriteError {
-                    phase: gat_io::FileWritePhase::Cleanup,
-                    publication: if published {
-                        gat_io::FilePublication::Published
-                    } else {
-                        gat_io::FilePublication::NotPublished
-                    },
+                    phase,
                     source: std::io::Error::other("PRIMARY-SECRET"),
-                    cleanup: Some(std::io::Error::other("CLEANUP-SECRET")),
+                    cleanup: (!published).then(|| std::io::Error::other("CLEANUP-SECRET")),
                 }),
             }
             .into();
@@ -710,7 +694,7 @@ mod tests {
                 .downcast_ref::<gat_engine::UploadError>()
                 .unwrap();
             assert!(
-                matches!(retained, gat_engine::UploadError::FileWrite { source, .. } if source.cleanup.is_some())
+                matches!(retained, gat_engine::UploadError::FileWrite { source, .. } if source.cleanup.is_some() != published)
             );
         }
     }
@@ -720,7 +704,6 @@ mod tests {
         let failure: Failure = gat_engine::UploadError::WriterOpen {
             kind: gat_engine::UploadRemoteFailureKind::OperationFailed,
             remote_name: "origin".into(),
-            route_name: None,
             route: None,
             path: gat_core::lexical_path::GatPath::parse_canonical("file.bin").unwrap(),
             source: Box::new(gat_io::RemoteError::PayloadLimitExceeded {

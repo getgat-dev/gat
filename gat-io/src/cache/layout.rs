@@ -51,12 +51,23 @@ pub fn object_key_oid(oid: &Oid) -> String {
     ObjectKey::new(oid).as_str().to_owned()
 }
 
+/// Build a local or file-remote object path in one destination allocation.
+/// The shared stack encoding avoids allocating an intermediate key string.
+pub(crate) fn object_path(root: &std::path::Path, oid: &Oid) -> std::path::PathBuf {
+    let encoded = ObjectKey::new(oid);
+    let key = encoded.as_str();
+    let mut path = std::path::PathBuf::with_capacity(root.as_os_str().len() + 1 + key.len());
+    path.push(root);
+    path.push(key);
+    path
+}
+
 /// Stack-owned canonical encoding shared by remote strings and local paths.
 /// The bytes are private and the constructor only emits ASCII.
-pub(super) struct ObjectKey([u8; OBJECT_HASH_NAMESPACE.len() + 7 + 64]);
+struct ObjectKey([u8; OBJECT_HASH_NAMESPACE.len() + 7 + 64]);
 
 impl ObjectKey {
-    pub(super) fn new(oid: &Oid) -> Self {
+    fn new(oid: &Oid) -> Self {
         const HEX: &[u8; 16] = b"0123456789abcdef";
         let namespace = OBJECT_HASH_NAMESPACE.len();
         let start = namespace + 7;
@@ -71,7 +82,7 @@ impl ObjectKey {
         Self(bytes)
     }
 
-    pub(super) fn as_str(&self) -> &str {
+    fn as_str(&self) -> &str {
         std::str::from_utf8(&self.0).expect("object keys contain only ASCII")
     }
 }
@@ -159,10 +170,7 @@ mod tests {
             assert_eq!(parse_object_key(&expected), Some(oid));
             for root in ["", ".", "/", "relative", "relative/", "space name/é"] {
                 let root = std::path::Path::new(root);
-                assert_eq!(
-                    super::super::object::cache_path_oid(root, &oid),
-                    root.join(&expected)
-                );
+                assert_eq!(object_path(root, &oid), root.join(&expected));
             }
         }
     }
@@ -173,10 +181,7 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
         let root = std::path::PathBuf::from(std::ffi::OsString::from_vec(b"cache/\xff".to_vec()));
         let oid = Oid::from_bytes([0xab; 32]);
-        assert_eq!(
-            super::super::object::cache_path_oid(&root, &oid),
-            root.join(object_key_oid(&oid))
-        );
+        assert_eq!(object_path(&root, &oid), root.join(object_key_oid(&oid)));
     }
 
     #[test]

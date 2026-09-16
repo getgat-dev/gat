@@ -5,7 +5,6 @@ use crate::remote_catalog::{RemoteCatalog, RemoteId};
 use crate::remote_executor::RemoteJob;
 use crate::remote_session::RemoteSessionError;
 use gat_core::lexical_path::GatPath;
-use gat_core::name::RouteName;
 use gat_core::oid::Oid;
 use gat_io::RemoteError;
 use gat_io::{CacheError, CachePublication};
@@ -37,11 +36,6 @@ impl RepairObject {
             entries,
         }
     }
-
-    #[must_use]
-    pub const fn oid(&self) -> Oid {
-        self.oid
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,16 +59,14 @@ pub enum RepairError {
     Cancelled,
     RemoteOpen {
         remote_name: Arc<str>,
-        route_name: Option<RouteName>,
-        route: Option<GatPath>,
+        route: Option<super::TransferRoute>,
         path: GatPath,
         source: Arc<RemoteSessionError>,
     },
     RemoteRead {
         kind: RepairRemoteFailureKind,
         remote_name: Arc<str>,
-        route_name: Option<RouteName>,
-        route: Option<GatPath>,
+        route: Option<super::TransferRoute>,
         path: GatPath,
         source: Box<dyn Error + Send + Sync>,
     },
@@ -137,10 +129,11 @@ impl Error for RepairError {
     }
 }
 
-/// Results aligned with the input repair objects.
-#[derive(Debug, Default)]
-pub struct RepairOutcome {
-    pub results: Vec<Result<(), RepairError>>,
+/// A terminal repair result paired with its object identity.
+#[derive(Debug)]
+pub struct RepairResult {
+    pub oid: Oid,
+    pub result: Result<(), RepairError>,
 }
 
 use super::receive::{ReceiveError as WorkerError, receive};
@@ -181,12 +174,10 @@ fn worker_error(
         WorkerError::Cancelled => RepairError::Cancelled,
         WorkerError::Remote(source) => {
             let kind = remote_kind(&source);
-            let (remote_name, route_name, route) =
-                diagnostic_remote(catalog, policy, &object.remote);
+            let (remote_name, route) = diagnostic_remote(catalog, policy, &object.remote);
             RepairError::RemoteRead {
                 kind,
                 remote_name,
-                route_name,
                 route,
                 path: object.representative_path.clone(),
                 source: Box::new(source),
@@ -204,12 +195,10 @@ fn worker_error(
                 | std::io::ErrorKind::UnexpectedEof => RepairRemoteFailureKind::Unavailable,
                 _ => RepairRemoteFailureKind::OperationFailed,
             };
-            let (remote_name, route_name, route) =
-                diagnostic_remote(catalog, policy, &object.remote);
+            let (remote_name, route) = diagnostic_remote(catalog, policy, &object.remote);
             RepairError::RemoteRead {
                 kind,
                 remote_name,
-                route_name,
                 route,
                 path: object.representative_path.clone(),
                 source: Box::new(CacheError::SourceUnreadable { source }),
@@ -232,7 +221,8 @@ fn worker_error(
     }
 }
 
-/// Attempts every object in one bounded window and returns aligned results.
+/// Attempts every object in one bounded window and returns identified results.
+/// Borrows the request buffer so callers can reuse its allocation between windows.
 ///
 /// Failures are values rather than a fail-fast return so a bad object or
 /// remote never prevents later repair candidates from being attempted.
@@ -242,11 +232,11 @@ fn worker_error(
 )]
 pub fn repair_window(
     operation: &mut Operation<'_>,
-    objects: Vec<RepairObject>,
+    objects: &[RepairObject],
     progress: &mut crate::ProgressUpdates,
-) -> RepairOutcome {
+) -> Vec<RepairResult> {
     if objects.is_empty() {
-        return RepairOutcome::default();
+        return Vec::new();
     }
     debug_assert!(objects.len() <= operation.limits().transfer.window.get());
 
@@ -260,16 +250,17 @@ pub fn repair_window(
             .and_then(|()| operation.policy().validate_remote(&object.remote))
             .err()
     }) {
-        for object in &objects {
+        for object in objects {
             progress.inc(object.entries);
         }
         progress.flush();
-        return RepairOutcome {
-            results: objects
-                .iter()
-                .map(|_| Err(RepairError::Identity(error)))
-                .collect(),
-        };
+        return objects
+            .iter()
+            .map(|object| RepairResult {
+                oid: object.oid,
+                result: Err(RepairError::Identity(error)),
+            })
+            .collect();
     }
     let services = operation.window_services();
     let cache_writer = services.cache_root.writer();
@@ -297,12 +288,11 @@ pub fn repair_window(
     let mut jobs = Vec::new();
     for (index, object) in objects.iter().enumerate() {
         if let Some(source) = unavailable.get(&object.remote.id()) {
-            let (remote_name, route_name, route) =
+            let (remote_name, route) =
                 diagnostic_remote(services.remotes_catalog, services.policy, &object.remote);
             progress.inc(object.entries);
             results[index] = Some(Err(RepairError::RemoteOpen {
                 remote_name,
-                route_name,
                 route,
                 path: object.representative_path.clone(),
                 source: Arc::clone(source),
@@ -353,12 +343,14 @@ pub fn repair_window(
     }
 
     progress.flush();
-    RepairOutcome {
-        results: results
-            .into_iter()
-            .map(|result| result.expect("every repair object reaches a terminal result"))
-            .collect(),
-    }
+    objects
+        .iter()
+        .zip(results)
+        .map(|(object, result)| RepairResult {
+            oid: object.oid,
+            result: result.expect("every repair object reaches a terminal result"),
+        })
+        .collect()
 }
 
 #[cfg(any(test, feature = "test-support"))]

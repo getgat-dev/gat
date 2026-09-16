@@ -54,9 +54,8 @@ use std::collections::HashMap;
 /// This module's own `Result` alias.
 type Result<T> = std::result::Result<T, PathPolicyError>;
 
-/// Every way compiling an [`EffectivePathPolicy`] from a [`Config`] can
-/// fail: a route or the repository default names a remote absent from
-/// the already-compiled [`RemoteCatalog`].
+/// Failures validating ownership/routing and resolving configured remotes
+/// while compiling an [`EffectivePathPolicy`].
 #[derive(Debug, thiserror::Error)]
 pub enum PathPolicyError {
     #[error(transparent)]
@@ -101,7 +100,7 @@ pub struct UnknownRemoteOverrideError {
 /// `path.depth()` comparisons regardless of how many prefixes are configured.
 /// This is the key difference from a linear `find`/`filter` over every
 /// configured mount or route.
-pub struct PathPrefixMap<T> {
+struct PathPrefixMap<T> {
     entries: HashMap<gat_core::lexical_path::GatPath, T>,
 }
 
@@ -332,6 +331,7 @@ impl EffectivePathPolicy {
     pub fn from_config(config: &Config, catalog: &RemoteCatalog) -> Result<Self> {
         #[cfg(any(test, feature = "test-support"))]
         test_support::record_policy_compilation();
+        config.routes.validate_effective()?;
         let route_identities =
             super::remote_catalog::IdentityRange::allocate(config.routes.by_name.len())?;
         let mounts = MountOwnership::new(&config.mounts)?;
@@ -662,6 +662,57 @@ mod tests {
             .resolved_remote_for_path(&catalog, Some(&rn("removed")), &gp("other/a.bin"))
             .unwrap_err();
         assert!(err.to_string().contains("removed"));
+    }
+
+    #[test]
+    fn routing_compilation_rejects_duplicate_paths_instead_of_overwriting() {
+        for remotes in [["first", "second"], ["second", "first"]] {
+            let mut config = Config::default();
+            for (name, remote) in ["aaa", "zzz"].into_iter().zip(remotes) {
+                config.remotes.by_name.insert(
+                    rn(remote),
+                    gat_core::endpoint::RemoteUrlTemplate::from_string(format!(
+                        "file:///tmp/{remote}"
+                    ))
+                    .into(),
+                );
+                config.routes.by_name.insert(
+                    RouteName::from(name),
+                    RouteConfig {
+                        path: gp("data"),
+                        remote: rn(remote),
+                    },
+                );
+            }
+            let catalog = RemoteCatalog::from_config(&config.remotes).unwrap();
+            assert!(matches!(
+                EffectivePathPolicy::from_config(&config, &catalog),
+                Err(PathPolicyError::Config(gat_core::config::ConfigError::RouteConflict {
+                    first_name,
+                    second_name,
+                    path,
+                })) if first_name == "aaa" && second_name == "zzz" && path == "data"
+            ));
+        }
+    }
+
+    #[test]
+    fn routing_compilation_rejects_reserved_names_before_resolving_remotes() {
+        let mut config = Config::default();
+        config.routes.by_name.insert(
+            RouteName::from(gat_core::config::RESERVED_DEFAULT_ROUTE_NAME),
+            RouteConfig {
+                path: gp("data"),
+                remote: rn("missing"),
+            },
+        );
+        let catalog = RemoteCatalog::from_config(&config.remotes).unwrap();
+        assert!(matches!(
+            EffectivePathPolicy::from_config(&config, &catalog),
+            Err(PathPolicyError::Config(
+                gat_core::config::ConfigError::ReservedRouteName
+            ))
+        ));
     }
 
     #[test]

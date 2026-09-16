@@ -593,44 +593,53 @@ mod tests {
     fn mv_rolls_back_the_rename_when_the_lock_write_fails_after_a_successful_rename() {
         use std::os::unix::fs::PermissionsExt;
 
-        let tmp = test_repo();
-        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
-            .unwrap()
-            .repository_at(tmp.path().to_path_buf());
-        std::fs::create_dir_all(tmp.path().join("sub")).unwrap();
-        std::fs::write(tmp.path().join("sub/a.bin"), b"payload").unwrap();
-        add(&repo, &[PathBuf::from("sub/a.bin")], &NoopProgress).unwrap();
+        for force in [false, true] {
+            let tmp = test_repo();
+            let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+                .unwrap()
+                .repository_at(tmp.path().to_path_buf());
+            std::fs::create_dir_all(tmp.path().join("sub")).unwrap();
+            std::fs::write(tmp.path().join("sub/a.bin"), b"payload").unwrap();
+            add(&repo, &[PathBuf::from("sub/a.bin")], &NoopProgress).unwrap();
 
-        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
-        let result = mv(&repo, Path::new("sub/a.bin"), Path::new("sub/b.bin"), false);
-        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+            if force {
+                std::fs::write(tmp.path().join("sub/b.bin"), b"original destination").unwrap();
+            }
+            std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+            let result = mv(&repo, Path::new("sub/a.bin"), Path::new("sub/b.bin"), force);
+            std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, MoveError::RolledBack { .. }),
-            "expected MoveError::RolledBack, got: {err:?}"
-        );
-        assert!(
-            tmp.path().join("sub/a.bin").exists(),
-            "the rename must be rolled back so the file is back at its original path"
-        );
-        assert!(
-            !tmp.path().join("sub/b.bin").exists(),
-            "the destination must not keep the file after rollback"
-        );
-        assert_eq!(
-            std::fs::read(tmp.path().join("sub/a.bin")).unwrap(),
-            b"payload"
-        );
-        let entries = gat_io::LockStore::load_repository(&layout(tmp.path()))
-            .unwrap()
-            .entries;
-        assert_eq!(
-            entries.len(),
-            1,
-            "gat.lock must remain unchanged since its write failed"
-        );
-        assert_eq!(entries[0].path, "sub/a.bin");
+            let err = result.unwrap_err();
+            assert!(
+                matches!(err, MoveError::RolledBack { .. }),
+                "expected MoveError::RolledBack, got: {err:?}"
+            );
+            assert!(
+                tmp.path().join("sub/a.bin").exists(),
+                "the rename must be rolled back so the file is back at its original path"
+            );
+            if force {
+                assert_eq!(
+                    std::fs::read(tmp.path().join("sub/b.bin")).unwrap(),
+                    b"original destination"
+                );
+            } else {
+                assert!(!tmp.path().join("sub/b.bin").exists());
+            }
+            assert_eq!(
+                std::fs::read(tmp.path().join("sub/a.bin")).unwrap(),
+                b"payload"
+            );
+            let entries = gat_io::LockStore::load_repository(&layout(tmp.path()))
+                .unwrap()
+                .entries;
+            assert_eq!(
+                entries.len(),
+                1,
+                "gat.lock must remain unchanged since its write failed"
+            );
+            assert_eq!(entries[0].path, "sub/a.bin");
+        }
     }
 
     /// Variant-level coverage for the authoritative worktree rename error: a plain

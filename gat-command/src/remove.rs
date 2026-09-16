@@ -1,16 +1,14 @@
 use crate::ownership::{OwnershipError, assert_no_first_owned_match, assert_root_owned};
 use gat_core::globs::{GatGlobPattern, GlobBound, GlobError};
 use gat_core::lexical_path::{GatPath, LexicalPathError};
-use gat_core::lock::path_matches_scope;
 use gat_core::path_scope::{self, PathScope};
 use gat_core::progress::{
     NoopProgress, ProgressActivity, ProgressOperation, ProgressReporter, ProgressSpec,
     with_progress_typed,
 };
 use gat_engine::{
-    DesiredScope, EffectivePathPolicy, PathPolicyError, RemoteCatalog, RemoteCatalogError,
-    Repository, RepositoryMutationError, WorktreePathError, WorktreeRemoveError, remove_and_prune,
-    validate_mutation_path,
+    DesiredScope, MountOwnership, PathPolicyError, Repository, RepositoryMutationError,
+    WorktreePathError, WorktreeRemoveError, remove_and_prune, validate_mutation_path,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,8 +36,6 @@ pub enum RemoveError {
     Acquisition(Box<gat_engine::RepoSnapshotError>),
     #[error(transparent)]
     PathPolicy(#[from] PathPolicyError),
-    #[error(transparent)]
-    RemoteCatalog(#[from] RemoteCatalogError),
     #[error(transparent)]
     RepositoryMutation(#[from] Box<RepositoryMutationError>),
     #[error("working-tree cleanup failed after publishing removals")]
@@ -78,8 +74,7 @@ pub fn remove_with_progress(
     progress: &dyn ProgressReporter,
 ) -> Result<RemoveOutcome> {
     repo.with_desired_mutation(progress, |cfg, mut desired| {
-        let catalog = RemoteCatalog::from_config(&cfg.remotes)?;
-        let policy = EffectivePathPolicy::from_config(cfg, &catalog)?;
+        let policy = MountOwnership::new(&cfg.mounts)?;
         let plan = with_progress_typed(
             progress,
             ProgressSpec::indeterminate(ProgressOperation::ResolvingSelection),
@@ -203,7 +198,7 @@ impl RemoveSelector {
     fn matches(&self, path: &GatPath) -> bool {
         match self {
             Self::Root => true,
-            Self::Prefix(prefix) => path_matches_scope(path, prefix),
+            Self::Prefix(prefix) => path.is_or_under(prefix),
             Self::Glob(pattern) => pattern.matches(path.as_str()),
         }
     }

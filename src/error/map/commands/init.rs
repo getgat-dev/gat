@@ -14,24 +14,20 @@ impl From<InitError> for Failure {
             unreachable!()
         };
         match source.kind() {
-            InitializationErrorKind::OpenRepository => Self::infrastructure(
+            InitializationErrorKind::OpenRepository { path } => Self::infrastructure(
                 Diagnostic::new(
                     filesystem_or(source, ErrorCode::RepositoryUnavailable),
                     "Could not open the git repository",
                 )
-                .with_subject(UserLine::path(
-                    source.path().expect("git integration errors carry a path"),
-                )),
+                .with_subject(UserLine::path(path)),
                 err,
             ),
-            InitializationErrorKind::NonUtf8Hook => Self::expected(
+            InitializationErrorKind::NonUtf8Hook { path } => Self::expected(
                 Diagnostic::new(
                     ErrorCode::GitOperationFailed,
                     "An existing git hook is not valid UTF-8",
                 )
-                .with_subject(UserLine::path(
-                    source.path().expect("git integration errors carry a path"),
-                ))
+                .with_subject(UserLine::path(path))
                 .with_hint(
                     "gat only supports text-based managed-block editing; convert or remove it \
                      manually.",
@@ -68,7 +64,7 @@ impl From<InitError> for Failure {
     }
 }
 
-const fn filesystem_or(error: &gat_engine::InitializationError, fallback: ErrorCode) -> ErrorCode {
+fn filesystem_or(error: &gat_engine::InitializationError, fallback: ErrorCode) -> ErrorCode {
     match error.filesystem_failure() {
         Some(gat_engine::FilesystemFailureKind::PermissionDenied) => ErrorCode::PermissionDenied,
         Some(gat_engine::FilesystemFailureKind::StorageExhausted) => ErrorCode::StorageExhausted,
@@ -150,8 +146,8 @@ mod tests {
         let tmp = test_support::git_repo_with_initial_commit();
         let layout = gat_io::RepositoryLayout::at(tmp.path().to_path_buf());
         let integration = gat_io::GitIntegration::open(&layout).unwrap();
-        let name = "post-checkout";
-        let path = tmp.path().join(".git/hooks").join(name);
+        let name = gat_core::git::ManagedHook::PostCheckout;
+        let path = tmp.path().join(".git/hooks").join(name.as_str());
         std::fs::create_dir_all(&path).unwrap();
         let source = integration.write_hook(name, "payload").unwrap_err();
         assert_eq!(source.kind(), gat_io::GitIntegrationErrorKind::Write);

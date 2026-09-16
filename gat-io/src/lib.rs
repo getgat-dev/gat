@@ -478,7 +478,7 @@ pub use cache::{
     CachePublication, CacheSweepDecision, CacheSweepStats, CacheVerificationFailure, CacheWriter,
     CompletedCacheVerification, DEFAULT_INGEST_STRATEGY, ExpectedIngest, IngestStrategy, Ingested,
     OBJECT_HASH_NAMESPACE, ObjectVerification, PreparedCacheVerification, VERIFY_WINDOW,
-    object_key_oid, parse_object_key,
+    VerifiedCacheEntry, VerifiedCacheObject, object_key_oid, parse_object_key,
 };
 pub use config::{
     CONFIG_VERSION, ConfigError, ConfigStore, ConfigWriteError, ScopedConfigError,
@@ -502,7 +502,7 @@ pub use git::{
 };
 pub use journal::mount::{
     MOUNT_TXN_VERSION, MountJournal, MountJournalError, MountJournalValidationError,
-    MountTxnChange, MountTxnPhase, MountTxnRecord, StagedRow, StagedWindows,
+    MountTxnChange, MountTxnPhase, MountTxnRecord,
 };
 pub use lock::{
     CandidateInvalidReason, CompletedLockReshape, InvalidOidReason, LiveLockInvalidReason,
@@ -513,11 +513,11 @@ pub use lock::{
 };
 pub use remote::{
     AsyncRemoteWriter, DOWNLOAD_BUFFER_BYTES, FileDeleteBatch, FileDeleteOutcome, FileGc,
-    FileObjectScan, FileObjectWriter, FilePublication, FileReceiveError, FileUploadError,
-    FileWriteError, FileWritePhase, InterpolateError, OpenRemoteError, PreparedFilePresence,
-    PreparedFileRead, PreparedFileWrite, PreparedRemoteWrite, RemoteBackendError, RemoteClient,
-    RemoteError, RemoteObject, RemoteObjectLister, RemoteRead, RemoteRequestBudget,
-    STREAM_BUFFER_SIZE, TRANSFER_CHUNK_SIZE, initialize_backends, with_stream_buffer,
+    FileObjectScan, FileObjectWriter, FileReceiveError, FileUploadError, FileWriteError,
+    FileWritePhase, InterpolateError, OpenRemoteError, PreparedFilePresence, PreparedFileRead,
+    PreparedFileWrite, PreparedRemoteWrite, RemoteBackendError, RemoteClient, RemoteError,
+    RemoteObject, RemoteObjectLister, RemoteRead, RemoteRequestBudget, STREAM_BUFFER_SIZE,
+    TRANSFER_CHUNK_SIZE, initialize_backends, with_stream_buffer,
 };
 pub use repository_layout::{LayoutError, RepositoryLayout};
 
@@ -538,9 +538,10 @@ pub use state::{
     rebuild_atomically, remove_stale_sidecars,
 };
 pub use worktree::{
-    DestinationKind as WorktreeDestinationKind, EntryKind as WorktreeEntryKind, MaterializeKind,
-    MovePathError, PruneError, RemovalReceipt, RemovePathError, RollbackMoveError, WorktreeClient,
-    WorktreeFileStatus, WorktreeMutationError, WorktreePathError, WorktreeStatusKind,
+    DestinationKind as WorktreeDestinationKind, EntryKind as WorktreeEntryKind, MovePathError,
+    PendingMove, PruneError, RemovalReceipt, RemovePathError, RestoreMoveDestinationError,
+    RollbackMoveError, WorktreeClient, WorktreeFileStatus, WorktreeMutationError,
+    WorktreePathError, WorktreeStatusKind,
 };
 
 #[cfg(any(test, feature = "test-support"))]

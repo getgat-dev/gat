@@ -39,19 +39,6 @@ impl CanonicalIdBuf {
     }
 }
 
-impl std::fmt::Write for CanonicalIdBuf {
-    fn write_str(&mut self, s: &str) -> std::fmt::Result {
-        let bytes = s.as_bytes();
-        let end = self.len + bytes.len();
-        if end > self.buf.len() {
-            return Err(std::fmt::Error);
-        }
-        self.buf[self.len..end].copy_from_slice(bytes);
-        self.len = end;
-        Ok(())
-    }
-}
-
 /// A validated `gat.lock` shard fan-out depth, guaranteed to fit
 /// [`LockShardId`]'s four-byte `prefix`: `0` (the flat, single-file
 /// sentinel) or one through [`Self::MAX`]. Every shard-placement, publication,
@@ -148,8 +135,8 @@ impl<'de> serde::Deserialize<'de> for LockShardLevels {
 /// boundary, never implied by equality/ordering/hashing here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LockShardId {
-    pub(super) depth: u8,
-    pub(super) prefix: [u8; 4],
+    depth: LockShardLevels,
+    prefix: [u8; 4],
 }
 
 /// Ordering matches the canonical persisted spelling
@@ -163,7 +150,7 @@ pub struct LockShardId {
 /// derived-from-strings comparison would.
 impl Ord for LockShardId {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        let shared = self.depth.min(other.depth) as usize;
+        let shared = usize::from(self.depth.min(other.depth).get());
         self.prefix[..shared]
             .cmp(&other.prefix[..shared])
             .then_with(|| self.depth.cmp(&other.depth))
@@ -194,7 +181,7 @@ impl LockShardId {
     #[must_use]
     pub const fn flat() -> Self {
         Self {
-            depth: 0,
+            depth: LockShardLevels::FLAT,
             prefix: [0; 4],
         }
     }
@@ -202,7 +189,7 @@ impl LockShardId {
     /// Whether this is the flat sentinel (see [`Self::flat`]).
     #[must_use]
     pub const fn is_flat(&self) -> bool {
-        self.depth == 0
+        self.depth.is_flat()
     }
 
     /// The fan-out depth this shard lives at: `0` for the flat sentinel,
@@ -213,7 +200,7 @@ impl LockShardId {
     /// [`Self::parse_canonical`] (which rejects anything outside range).
     #[must_use]
     pub const fn levels(&self) -> LockShardLevels {
-        LockShardLevels(self.depth)
+        self.depth
     }
 
     /// This shard's hash-derived prefix bytes, one per fan-out level
@@ -223,7 +210,7 @@ impl LockShardId {
     /// into this type's private representation.
     #[must_use]
     pub fn prefix_bytes(&self) -> &[u8] {
-        &self.prefix[..self.depth as usize]
+        &self.prefix[..usize::from(self.depth.get())]
     }
 
     /// The shard identity that owns `path`'s row at `shard_levels` fan-out
@@ -247,7 +234,7 @@ impl LockShardId {
         let levels = shard_levels.get() as usize;
         prefix[..levels].copy_from_slice(&hash.as_bytes()[..levels]);
         Self {
-            depth: shard_levels.get(),
+            depth: shard_levels,
             prefix,
         }
     }
@@ -302,7 +289,8 @@ impl LockShardId {
             return Err(corrupt(raw));
         }
         Ok(Self {
-            depth: u8::try_from(depth).map_err(|_| corrupt(raw))?,
+            depth: LockShardLevels::new(u8::try_from(depth).map_err(|_| corrupt(raw))?)
+                .map_err(|_| corrupt(raw))?,
             prefix,
         })
     }
@@ -311,14 +299,27 @@ impl LockShardId {
     /// `"gat.lock/xx/.../yy.tsv"`) into `out` directly, with no
     /// intermediate `String` allocation.
     pub fn write_canonical(&self, out: &mut impl std::fmt::Write) -> std::fmt::Result {
-        if self.is_flat() {
-            return out.write_str("gat.lock");
+        out.write_str(self.canonical_buffer().as_str())
+    }
+
+    fn canonical_buffer(&self) -> CanonicalIdBuf {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = CanonicalIdBuf::new();
+        out.buf[..8].copy_from_slice(b"gat.lock");
+        out.len = 8;
+        for &byte in self.prefix_bytes() {
+            out.buf[out.len..out.len + 3].copy_from_slice(&[
+                b'/',
+                HEX[usize::from(byte >> 4)],
+                HEX[usize::from(byte & 15)],
+            ]);
+            out.len += 3;
         }
-        out.write_str("gat.lock/")?;
-        for byte in &self.prefix[..self.depth as usize - 1] {
-            write!(out, "{byte:02x}/")?;
+        if !self.is_flat() {
+            out.buf[out.len..out.len + 4].copy_from_slice(b".tsv");
+            out.len += 4;
         }
-        write!(out, "{:02x}.tsv", self.prefix[self.depth as usize - 1])
+        out
     }
 
     /// The canonical spelling as an owned `String`, for callers that
@@ -327,28 +328,16 @@ impl LockShardId {
     /// any path that doesn't otherwise need an owned `String`.
     #[allow(clippy::wrong_self_convention)]
     #[must_use]
-    #[allow(
-        clippy::missing_panics_doc,
-        reason = "The fixed buffer fits every valid shard ID"
-    )]
     pub fn to_canonical_string(&self) -> String {
-        let mut buf = CanonicalIdBuf::new();
-        self.write_canonical(&mut buf)
-            .expect("canonical shard id always fits in the fixed buffer");
+        let buf = self.canonical_buffer();
         buf.as_str().to_string()
     }
 
     /// Feed the length-prefixed canonical spelling into `hasher` without
     /// allocating an intermediate string. This encoding is part of the
     /// [`super::CanonicalDesiredIdentity`] contract.
-    #[allow(
-        clippy::missing_panics_doc,
-        reason = "The fixed buffer fits every valid shard ID"
-    )]
     pub fn hash_into(&self, hasher: &mut blake3::Hasher) {
-        let mut buf = CanonicalIdBuf::new();
-        self.write_canonical(&mut buf)
-            .expect("canonical shard id always fits in the fixed buffer");
+        let buf = self.canonical_buffer();
         hasher.update(&(buf.len as u64).to_le_bytes());
         hasher.update(buf.as_bytes());
     }
@@ -362,9 +351,7 @@ impl std::fmt::Display for LockShardId {
 
 impl PartialEq<str> for LockShardId {
     fn eq(&self, other: &str) -> bool {
-        let mut buf = CanonicalIdBuf::new();
-        self.write_canonical(&mut buf)
-            .expect("canonical shard id always fits in the fixed buffer");
+        let buf = self.canonical_buffer();
         buf.as_str() == other
     }
 }
@@ -433,6 +420,33 @@ mod tests {
             id.write_canonical(&mut out).unwrap();
             assert_eq!(out, raw);
             assert_eq!(out, id.to_canonical_string());
+        }
+    }
+
+    #[test]
+    fn canonical_encoding_preserves_all_prefix_bytes_depths_and_hash_framing() {
+        for depth in 0..=LockShardLevels::MAX {
+            for byte in 0..=255u8 {
+                let raw = if depth == 0 {
+                    "gat.lock".to_owned()
+                } else {
+                    format!(
+                        "gat.lock{}.tsv",
+                        format!("/{byte:02x}").repeat(usize::from(depth))
+                    )
+                };
+                let id = LockShardId::parse_canonical(&raw).unwrap();
+                assert_eq!(id.levels(), levels(depth));
+                assert_eq!(id.to_string(), raw);
+                assert_eq!(id.to_canonical_string(), raw);
+                assert_eq!(id, raw.as_str());
+                let mut actual = blake3::Hasher::new();
+                id.hash_into(&mut actual);
+                let mut expected = blake3::Hasher::new();
+                expected.update(&(raw.len() as u64).to_le_bytes());
+                expected.update(raw.as_bytes());
+                assert_eq!(actual.finalize(), expected.finalize());
+            }
         }
     }
 

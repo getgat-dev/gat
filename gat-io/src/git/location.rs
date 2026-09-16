@@ -38,13 +38,12 @@ pub enum GitLocationError {
 #[derive(Clone)]
 pub struct GitLocation {
     parsed: gix::Url,
-    kind: GitLocationKind,
 }
 
 impl std::fmt::Debug for GitLocation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GitLocation")
-            .field("kind", &self.kind)
+            .field("kind", &self.kind())
             .finish_non_exhaustive()
     }
 }
@@ -53,7 +52,13 @@ impl GitLocation {
     /// Returns whether this location is opened directly or cloned.
     #[must_use]
     pub const fn kind(&self) -> GitLocationKind {
-        self.kind
+        if matches!(self.parsed.scheme, gix::url::Scheme::File)
+            && self.parsed.serialize_alternative_form
+        {
+            GitLocationKind::LocalPath
+        } else {
+            GitLocationKind::Clone
+        }
     }
 
     /// Infers Gat's default mount-target basename.
@@ -71,12 +76,7 @@ impl GitLocation {
 /// error because either may contain credentials.
 pub fn parse_location(spec: &GitLocationSpec) -> Result<GitLocation, GitLocationError> {
     let parsed = gix::url::parse(spec.as_location_str()).map_err(|_| GitLocationError::Invalid)?;
-    let kind = if parsed.scheme == gix::url::Scheme::File && parsed.serialize_alternative_form {
-        GitLocationKind::LocalPath
-    } else {
-        GitLocationKind::Clone
-    };
-    Ok(GitLocation { parsed, kind })
+    Ok(GitLocation { parsed })
 }
 
 /// Semantic stage at which repository cloning failed.
@@ -272,26 +272,30 @@ pub enum PrepareGitWorktreeError {
 }
 
 /// Prepares a repository location for semantic engine access.
+/// The parsed location owns the source path; callers cannot substitute a
+/// different raw specification after validation.
 pub fn prepare_worktree(
     location: &GitLocation,
-    spec: &GitLocationSpec,
     interrupt: &AtomicBool,
 ) -> Result<PreparedGitWorktree, PrepareGitWorktreeError> {
-    check_interrupt(interrupt, Path::new(spec.as_location_str()))?;
+    let source_path = gix::path::from_bstr(&location.parsed.path);
+    check_interrupt(interrupt, &source_path)?;
     if location.kind() == GitLocationKind::LocalPath {
-        let local = Path::new(spec.as_location_str());
-        if !local.exists() {
-            return Err(PrepareGitWorktreeError::LocalSourceMissing {
-                path: local.to_path_buf(),
-            });
-        }
-        return Ok(PreparedGitWorktree {
-            root: std::fs::canonicalize(local).map_err(|source| {
+        let local = source_path.as_ref();
+        let root = std::fs::canonicalize(local).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::NotFound {
+                PrepareGitWorktreeError::LocalSourceMissing {
+                    path: local.to_path_buf(),
+                }
+            } else {
                 PrepareGitWorktreeError::ResolveLocal {
                     path: local.to_path_buf(),
                     source,
                 }
-            })?,
+            }
+        })?;
+        return Ok(PreparedGitWorktree {
+            root,
             _temporary: None,
         });
     }
@@ -520,6 +524,46 @@ mod tests {
     }
 
     #[test]
+    fn local_worktree_resolution_distinguishes_absence_from_io_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let prepare = |path: &Path| {
+            let spec = GitLocationSpec::from_string(path.to_str().unwrap().to_owned());
+            let location = parse_location(&spec).unwrap();
+            prepare_worktree(&location, &AtomicBool::new(false))
+        };
+        let missing = root.path().join("missing");
+        assert!(matches!(
+            prepare(&missing),
+            Err(PrepareGitWorktreeError::LocalSourceMissing { path }) if path == missing
+        ));
+        #[cfg(unix)]
+        {
+            let obstruction = root.path().join("file");
+            std::fs::write(&obstruction, b"preserve").unwrap();
+            let invalid = obstruction.join("child");
+            assert!(matches!(
+                prepare(&invalid),
+                Err(PrepareGitWorktreeError::ResolveLocal { path, source })
+                    if path == invalid && source.kind() == std::io::ErrorKind::NotADirectory
+            ));
+            assert_eq!(std::fs::read(obstruction).unwrap(), b"preserve");
+        }
+    }
+
+    #[test]
+    fn prepared_location_owns_literal_local_path_after_input_is_dropped() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("space é %20");
+        std::fs::create_dir(&source).unwrap();
+        let location = {
+            let spec = GitLocationSpec::from_string(source.to_str().unwrap().to_owned());
+            parse_location(&spec).unwrap()
+        };
+        let prepared = prepare_worktree(&location, &AtomicBool::new(false)).unwrap();
+        assert_eq!(prepared.root(), std::fs::canonicalize(source).unwrap());
+    }
+
+    #[test]
     fn prepared_local_worktree_exposes_semantic_revision_and_config() {
         let source = test_support_git::empty_git_repo();
         std::fs::write(source.path().join("tracked"), b"content").unwrap();
@@ -533,7 +577,7 @@ mod tests {
 
         let spec = GitLocationSpec::from_string(source.path().display().to_string());
         let location = parse_location(&spec).unwrap();
-        let prepared = prepare_worktree(&location, &spec, &AtomicBool::new(false)).unwrap();
+        let prepared = prepare_worktree(&location, &AtomicBool::new(false)).unwrap();
 
         assert!(
             prepared
@@ -552,7 +596,7 @@ mod tests {
 
         let spec = GitLocationSpec::from_string(file_url(source.path()));
         let location = parse_location(&spec).unwrap();
-        let prepared = prepare_worktree(&location, &spec, &AtomicBool::new(false)).unwrap();
+        let prepared = prepare_worktree(&location, &AtomicBool::new(false)).unwrap();
         let cloned_root = prepared.root().to_path_buf();
 
         assert!(cloned_root.join("tracked").is_file());

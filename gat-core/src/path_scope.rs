@@ -50,14 +50,7 @@ pub fn normalize_path_scope<P: AsRef<Path>>(path: P) -> Result<PathScope, Lexica
 pub fn matches_scope(candidate: &GatPath, scope: &PathScope) -> bool {
     match scope {
         PathScope::Root => true,
-        PathScope::Path(s) => {
-            let candidate = candidate.as_str();
-            let s = s.as_str();
-            candidate == s
-                || candidate
-                    .strip_prefix(s)
-                    .is_some_and(|rest| rest.starts_with('/'))
-        }
+        PathScope::Path(scope) => candidate.is_or_under(scope),
     }
 }
 

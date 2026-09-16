@@ -7,10 +7,9 @@ use gat_core::progress::{
     ProgressActivity, ProgressOperation, ProgressReporter, ProgressSpec, ProgressTask, ProgressUnit,
 };
 use gat_engine::{
-    AddCandidate, AddExclusion, DesiredState, EffectivePathPolicy, EntryKind,
-    MaterializationSession, MaterializedEntry, PathPolicyError, RemoteCatalog, RemoteCatalogError,
-    Repository, RepositoryError, RepositoryMutationError, RepositoryStateError, WorktreePathError,
-    inspect_read_path, reject_infrastructure_path,
+    AddCandidate, AddExclusion, DesiredState, EntryKind, MaterializationSession, MaterializedEntry,
+    MountOwnership, PathPolicyError, Repository, RepositoryError, RepositoryMutationError,
+    RepositoryStateError, WorktreePathError, inspect_read_path, reject_infrastructure_path,
 };
 use std::collections::HashSet;
 
@@ -84,8 +83,6 @@ pub enum AddError {
     #[error(transparent)]
     PathPolicy(#[from] PathPolicyError),
     #[error(transparent)]
-    RemoteCatalog(#[from] RemoteCatalogError),
-    #[error(transparent)]
     RepositoryState(#[from] Box<RepositoryStateError>),
     #[error(transparent)]
     RepositoryMutation(#[from] Box<RepositoryMutationError>),
@@ -143,8 +140,7 @@ fn add_with_limits(
     limits: &AddLimits,
 ) -> Result<AddOutcome> {
     repo.with_add_state(progress, |cfg, desired| {
-        let catalog = RemoteCatalog::from_config(&cfg.remotes)?;
-        let policy = EffectivePathPolicy::from_config(cfg, &catalog)?;
+        let policy = MountOwnership::new(&cfg.mounts)?;
 
         let mut exclusions = Vec::new();
         let (added, rows, added_count) = {
@@ -374,7 +370,7 @@ fn flush_pending_files(
 
 fn assert_addable(
     context: &AddContext<'_, '_, '_, '_>,
-    policy: &EffectivePathPolicy,
+    policy: &MountOwnership,
     path: &GatPath,
     force: bool,
 ) -> Result<()> {
@@ -420,7 +416,7 @@ fn ingest_files(
 
 fn add_dir(
     context: &mut AddContext<'_, '_, '_, '_>,
-    policy: &EffectivePathPolicy,
+    policy: &MountOwnership,
     path: Option<&GatPath>,
     added: &mut AddedEntries,
     force: bool,
@@ -430,13 +426,7 @@ fn add_dir(
     }
     if context.directories.iter().any(|prior| match (prior, path) {
         (None, _) => true,
-        (Some(prior), Some(path)) => {
-            path == prior
-                || path
-                    .as_str()
-                    .strip_prefix(prior.as_str())
-                    .is_some_and(|suffix| suffix.starts_with('/'))
-        }
+        (Some(prior), Some(path)) => path.is_or_under(prior),
         _ => false,
     }) {
         return Ok(0);
@@ -453,7 +443,7 @@ fn add_dir(
 
 fn add_glob(
     context: &mut AddContext<'_, '_, '_, '_>,
-    policy: &EffectivePathPolicy,
+    policy: &MountOwnership,
     pattern: &GatPath,
     added: &mut AddedEntries,
     force: bool,
@@ -492,7 +482,7 @@ fn add_glob(
 
 fn process_candidates(
     context: &mut AddContext<'_, '_, '_, '_>,
-    policy: &EffectivePathPolicy,
+    policy: &MountOwnership,
     candidates: Vec<AddCandidate>,
     added: &mut AddedEntries,
     retain_paths: bool,
