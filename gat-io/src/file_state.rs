@@ -395,13 +395,22 @@ mod tests {
         use std::time::Duration;
         for (mtime, seconds, nanos) in [
             (UNIX_EPOCH, 0, 0),
-            (UNIX_EPOCH + Duration::new(12, 123), 12, 123),
+            // Windows SystemTime has 100 ns resolution.
+            (UNIX_EPOCH + Duration::new(12, 123_400), 12, 123_400),
             (UNIX_EPOCH - Duration::new(12, 0), -12, 0),
+            (UNIX_EPOCH - Duration::new(12, 123_400), -13, 999_876_600),
+            (UNIX_EPOCH - Duration::new(0, 100), -1, 999_999_900),
+            #[cfg(unix)]
+            (UNIX_EPOCH + Duration::new(12, 123), 12, 123),
+            #[cfg(unix)]
             (UNIX_EPOCH - Duration::new(12, 123), -13, 999_999_877),
+            #[cfg(unix)]
             (UNIX_EPOCH - Duration::new(0, 1), -1, 999_999_999),
         ] {
             let proof = proof_from_timestamp(7, mtime).unwrap();
-            assert_eq!(proof, StatProof::for_test(7, seconds, nanos));
+            assert_eq!(proof.size, 7);
+            assert_eq!(proof.mtime_secs, seconds);
+            assert_eq!(proof.mtime_nanos, nanos);
             assert_eq!(decode_stat_proof(&encode_stat_proof(&proof)), Some(proof));
         }
     }
