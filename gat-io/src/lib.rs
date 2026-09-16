@@ -513,11 +513,11 @@ pub use lock::{
 };
 pub use remote::{
     AsyncRemoteWriter, DOWNLOAD_BUFFER_BYTES, FileDeleteBatch, FileDeleteOutcome, FileGc,
-    FileObjectScan, FileObjectWriter, FilePublication, FileReceiveError, FileUploadError,
-    FileWriteError, FileWritePhase, InterpolateError, OpenRemoteError, PreparedFilePresence,
-    PreparedFileRead, PreparedFileWrite, PreparedRemoteWrite, RemoteBackendError, RemoteClient,
-    RemoteError, RemoteObject, RemoteObjectLister, RemoteRead, RemoteRequestBudget,
-    STREAM_BUFFER_SIZE, TRANSFER_CHUNK_SIZE, initialize_backends, with_stream_buffer,
+    FileObjectScan, FileObjectWriter, FileReceiveError, FileUploadError, FileWriteError,
+    FileWritePhase, InterpolateError, OpenRemoteError, PreparedFilePresence, PreparedFileRead,
+    PreparedFileWrite, PreparedRemoteWrite, RemoteBackendError, RemoteClient, RemoteError,
+    RemoteObject, RemoteObjectLister, RemoteRead, RemoteRequestBudget, STREAM_BUFFER_SIZE,
+    TRANSFER_CHUNK_SIZE, initialize_backends, with_stream_buffer,
 };
 pub use repository_layout::{LayoutError, RepositoryLayout};
 

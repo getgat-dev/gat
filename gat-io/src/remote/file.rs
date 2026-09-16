@@ -1,9 +1,9 @@
 //! Synchronous file publication capabilities. Call only from admitted local work.
 //!
-//! The private staging inode is linked into place without replacing any existing
-//! name. This is not a cache-to-remote hard link: staging owns a separate copy.
-//! Filesystems without hard-link support fail closed. Parent directories must be
-//! trusted; checking a leaf does not prevent concurrent parent substitution.
+//! Staging owns a separate copy, atomically renamed over a regular destination.
+//! Success includes syncing the published file's parent directory where supported.
+//! Parent directories must be trusted; checking a leaf does not prevent concurrent
+//! parent substitution.
 
 use super::RemoteClient;
 use gat_core::oid::Oid;
@@ -45,12 +45,6 @@ fn ensure_directory(path: &Path) -> io::Result<()> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FilePublication {
-    NotPublished,
-    Published,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileWritePhase {
     Cancelled,
     Stage,
@@ -67,10 +61,25 @@ pub enum FileWritePhase {
 #[error("file object write failed")]
 pub struct FileWriteError {
     pub phase: FileWritePhase,
-    pub publication: FilePublication,
     #[source]
     pub source: io::Error,
     pub cleanup: Option<io::Error>,
+}
+
+impl FileWriteError {
+    /// Only parent-directory durability work happens after atomic publication.
+    #[must_use]
+    pub const fn is_published(&self) -> bool {
+        match self.phase {
+            FileWritePhase::DirectorySync => true,
+            FileWritePhase::Cancelled
+            | FileWritePhase::Stage
+            | FileWritePhase::Copy
+            | FileWritePhase::Sync
+            | FileWritePhase::Publish
+            | FileWritePhase::Cleanup => false,
+        }
+    }
 }
 
 /// No I/O or payload allocation occurs during preparation.
@@ -301,7 +310,7 @@ impl PreparedFileWrite {
         self,
         source: crate::CacheObject,
         cancelled: impl Fn() -> bool + Sync,
-    ) -> Result<FilePublication, FileUploadError> {
+    ) -> Result<(), FileUploadError> {
         if cancelled() {
             return Err(FileUploadError::Cancelled);
         }
@@ -380,7 +389,6 @@ impl PreparedFileWrite {
         };
         let temporary = stage().map_err(|source| FileWriteError {
             phase: FileWritePhase::Stage,
-            publication: FilePublication::NotPublished,
             source,
             cleanup: None,
         })?;
@@ -393,7 +401,7 @@ impl PreparedFileWrite {
     }
 }
 
-/// Owns a single stable destination handle. Explicit abort reports cleanup
+/// Owns a private staging file. Explicit abort reports cleanup
 /// errors; Drop is a best-effort fallback, not the normal cancellation path.
 pub struct FileObjectWriter {
     temporary: tempfile::NamedTempFile,
@@ -419,10 +427,9 @@ impl FileObjectWriter {
 
     /// Preserve a primary failure while explicitly disposing of staging.
     #[must_use]
-    pub fn fail(self, phase: FileWritePhase, source: io::Error) -> FileWriteError {
+    fn fail(self, phase: FileWritePhase, source: io::Error) -> FileWriteError {
         FileWriteError {
             phase,
-            publication: FilePublication::NotPublished,
             source,
             cleanup: self.temporary.close().err(),
         }
@@ -431,7 +438,6 @@ impl FileObjectWriter {
     pub fn abort(self) -> Result<(), FileWriteError> {
         self.temporary.close().map_err(|source| FileWriteError {
             phase: FileWritePhase::Cleanup,
-            publication: FilePublication::NotPublished,
             source,
             cleanup: None,
         })
@@ -440,14 +446,11 @@ impl FileObjectWriter {
     /// Check cancellation immediately before calling this method. Once started,
     /// publication and cleanup must drain. Publication atomically replaces existing
     /// regular files; source verification remains the caller's responsibility.
-    pub fn finish(self) -> Result<FilePublication, FileWriteError> {
+    pub fn finish(self) -> Result<(), FileWriteError> {
         self.finish_checked(|| false)
     }
 
-    fn finish_checked(
-        self,
-        cancelled: impl Fn() -> bool,
-    ) -> Result<FilePublication, FileWriteError> {
+    fn finish_checked(self, cancelled: impl Fn() -> bool) -> Result<(), FileWriteError> {
         self.finish_with(cancelled, std::fs::File::sync_all, sync_directory)
     }
 
@@ -457,7 +460,7 @@ impl FileObjectWriter {
         cancelled: impl Fn() -> bool,
         sync_file: impl FnOnce(&std::fs::File) -> io::Result<()>,
         sync_parent: impl FnOnce(&Path) -> io::Result<()>,
-    ) -> Result<FilePublication, FileWriteError> {
+    ) -> Result<(), FileWriteError> {
         if cancelled() {
             return Err(self.fail(
                 FileWritePhase::Cancelled,
@@ -507,7 +510,6 @@ impl FileObjectWriter {
                 let cleanup = error.file.close().err();
                 Err(FileWriteError {
                     phase: FileWritePhase::Publish,
-                    publication: FilePublication::NotPublished,
                     source: error.error,
                     cleanup,
                 })
@@ -519,14 +521,13 @@ impl FileObjectWriter {
 fn sync_parent_after_publish(
     destination: &Path,
     sync_parent: impl FnOnce(&Path) -> io::Result<()>,
-) -> Result<FilePublication, FileWriteError> {
+) -> Result<(), FileWriteError> {
     sync_parent(destination.parent().expect("object parent")).map_err(|source| FileWriteError {
         phase: FileWritePhase::DirectorySync,
-        publication: FilePublication::Published,
         source,
         cleanup: None,
     })?;
-    Ok(FilePublication::Published)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -629,7 +630,7 @@ mod tests {
             let source = cached(source_cache.path(), &bytes);
             let (result, counts) =
                 count_work(|| prepare(remote.path(), size as u64).upload(source, || false));
-            assert_eq!(result.unwrap(), FilePublication::Published);
+            result.unwrap();
             assert_eq!(
                 counts,
                 WorkCounts {
@@ -885,12 +886,9 @@ mod tests {
             let remote = tempfile::tempdir().unwrap();
             let bytes = vec![42; size];
             let source = cached(cache.path(), &bytes);
-            assert_eq!(
-                prepare(remote.path(), size as u64)
-                    .upload(source, || false)
-                    .unwrap(),
-                FilePublication::Published
-            );
+            prepare(remote.path(), size as u64)
+                .upload(source, || false)
+                .unwrap();
             assert_eq!(std::fs::read(remote.path().join("object")).unwrap(), bytes);
             assert_eq!(std::fs::read_dir(remote.path()).unwrap().count(), 1);
         }
@@ -918,7 +916,6 @@ mod tests {
             error,
             FileUploadError::Write(FileWriteError {
                 phase: FileWritePhase::Cancelled,
-                publication: FilePublication::NotPublished,
                 cleanup: None,
                 ..
             })
@@ -936,7 +933,7 @@ mod tests {
             .finish_checked(|| calls.fetch_add(1, Ordering::Relaxed) == 1)
             .unwrap_err();
         assert_eq!(error.phase, FileWritePhase::Cancelled);
-        assert_eq!(error.publication, FilePublication::NotPublished);
+        assert!(!error.is_published());
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
 
@@ -1053,8 +1050,8 @@ mod tests {
         let mut second = prepare(root.path(), 3).begin().unwrap();
         first.append(b"one").unwrap();
         second.append(b"two").unwrap();
-        assert_eq!(first.finish().unwrap(), FilePublication::Published);
-        assert_eq!(second.finish().unwrap(), FilePublication::Published);
+        first.finish().unwrap();
+        second.finish().unwrap();
         assert_eq!(std::fs::read(root.path().join("object")).unwrap(), b"two");
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
     }
@@ -1065,7 +1062,7 @@ mod tests {
         let mut writer = prepare(root.path(), 3).begin().unwrap();
         std::fs::write(root.path().join("object"), b"old").unwrap();
         writer.append(b"new").unwrap();
-        assert_eq!(writer.finish().unwrap(), FilePublication::Published);
+        writer.finish().unwrap();
         assert_eq!(std::fs::read(root.path().join("object")).unwrap(), b"new");
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
     }
@@ -1078,24 +1075,18 @@ mod tests {
         first.append(b"one").unwrap();
         second.append(b"two").unwrap();
         let gate = std::sync::Barrier::new(2);
-        let outcomes = std::thread::scope(|scope| {
+        std::thread::scope(|scope| {
             let one = scope.spawn(|| {
                 gate.wait();
-                first.finish().unwrap()
+                first.finish().unwrap();
             });
             let two = scope.spawn(|| {
                 gate.wait();
-                second.finish().unwrap()
+                second.finish().unwrap();
             });
-            [one.join().unwrap(), two.join().unwrap()]
+            one.join().unwrap();
+            two.join().unwrap();
         });
-        assert_eq!(
-            outcomes
-                .iter()
-                .filter(|&&outcome| outcome == FilePublication::Published)
-                .count(),
-            2
-        );
         let winner = std::fs::read(root.path().join("object")).unwrap();
         assert!(winner == b"one" || winner == b"two");
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
@@ -1112,8 +1103,11 @@ mod tests {
             io::Error::from(io::ErrorKind::PermissionDenied),
         );
         assert_eq!(error.source.kind(), io::ErrorKind::PermissionDenied);
-        assert_eq!(error.cleanup.unwrap().kind(), io::ErrorKind::NotFound);
-        assert_eq!(error.publication, FilePublication::NotPublished);
+        assert_eq!(
+            error.cleanup.as_ref().unwrap().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert!(!error.is_published());
     }
 
     #[test]
@@ -1124,7 +1118,7 @@ mod tests {
         assert!(writer.append(b"abc").is_err());
         let error = writer.finish().unwrap_err();
         assert_eq!(error.phase, FileWritePhase::Copy);
-        assert_eq!(error.publication, FilePublication::NotPublished);
+        assert!(!error.is_published());
         assert!(error.cleanup.is_none());
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
@@ -1142,7 +1136,7 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error.phase, FileWritePhase::Sync);
-        assert_eq!(error.publication, FilePublication::NotPublished);
+        assert!(!error.is_published());
         assert_eq!(error.source.kind(), io::ErrorKind::PermissionDenied);
         assert!(error.cleanup.is_none());
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
@@ -1166,7 +1160,7 @@ mod tests {
                 )
                 .unwrap_err();
             assert_eq!(error.phase, FileWritePhase::DirectorySync);
-            assert_eq!(error.publication, FilePublication::Published);
+            assert!(error.is_published());
             assert!(error.cleanup.is_none());
             assert_eq!(std::fs::read(&destination).unwrap(), b"new");
             assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
@@ -1183,7 +1177,7 @@ mod tests {
             .finish()
             .unwrap_err();
         assert_eq!(error.phase, FileWritePhase::Publish);
-        assert_eq!(error.publication, FilePublication::NotPublished);
+        assert!(!error.is_published());
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
     }
 
@@ -1209,7 +1203,7 @@ mod tests {
             .unwrap()
             .finish()
             .unwrap_err();
-        assert_eq!(error.publication, FilePublication::NotPublished);
+        assert!(!error.is_published());
         assert_eq!(std::fs::read(target).unwrap(), b"original");
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
     }

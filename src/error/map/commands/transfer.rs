@@ -210,16 +210,14 @@ impl From<gat_engine::UploadError> for Failure {
             }
             UploadError::FileWrite {
                 kind,
-                published,
-                cancelled,
+                state,
                 remote_name,
                 route,
                 path,
                 source,
             } => {
                 let code = match kind {
-                    _ if *cancelled
-                        && !*published
+                    _ if *state == gat_engine::FileUploadFailure::Cancelled
                         && !cleanup_failed
                         && source.cleanup.is_none() =>
                     {
@@ -229,12 +227,14 @@ impl From<gat_engine::UploadError> for Failure {
                     UploadWriteFailureKind::OperationFailed => ErrorCode::RemoteOperationFailed,
                 };
                 let description = remote_resolution_context_for(remote_name, route.as_ref());
-                let message = if *published {
-                    "The object is published, but upload cleanup or durability failed on "
-                } else if *cancelled {
-                    "File upload cancelled on "
-                } else {
-                    "Could not publish the file upload to "
+                let message = match state {
+                    gat_engine::FileUploadFailure::Published => {
+                        "The object is published, but upload cleanup or durability failed on "
+                    }
+                    gat_engine::FileUploadFailure::Cancelled => "File upload cancelled on ",
+                    gat_engine::FileUploadFailure::NotPublished => {
+                        "Could not publish the file upload to "
+                    }
                 };
                 Self::infrastructure(
                     Diagnostic::new(
@@ -622,7 +622,6 @@ mod tests {
             primary: Box::new(gat_engine::UploadError::Cancelled),
             cleanup: Box::new(gat_io::FileWriteError {
                 phase: gat_io::FileWritePhase::Cleanup,
-                publication: gat_io::FilePublication::NotPublished,
                 source: std::io::Error::other("CLEANUP-SECRET"),
                 cleanup: None,
             }),
@@ -636,24 +635,51 @@ mod tests {
     }
 
     #[test]
+    fn file_cancellation_without_cleanup_failure_remains_interrupted() {
+        let failure = Failure::from(gat_engine::UploadError::FileWrite {
+            kind: gat_engine::UploadWriteFailureKind::OperationFailed,
+            state: gat_engine::FileUploadFailure::Cancelled,
+            remote_name: "origin".into(),
+            route: None,
+            path: gat_core::lexical_path::GatPath::parse_canonical("file.bin").unwrap(),
+            source: Box::new(gat_io::FileWriteError {
+                phase: gat_io::FileWritePhase::Cancelled,
+                source: std::io::Error::other("CANCELLATION-SECRET"),
+                cleanup: None,
+            }),
+        });
+        assert_eq!(failure.diagnostic().code(), ErrorCode::Interrupted);
+        assert!(!failure.diagnostic().summary().contains("SECRET"));
+    }
+
+    #[test]
     fn file_publication_diagnostic_is_honest_and_redacts_both_sources() {
-        for (published, cancelled) in [(false, false), (true, false), (false, true)] {
+        for (state, phase) in [
+            (
+                gat_engine::FileUploadFailure::NotPublished,
+                gat_io::FileWritePhase::Copy,
+            ),
+            (
+                gat_engine::FileUploadFailure::Published,
+                gat_io::FileWritePhase::DirectorySync,
+            ),
+            (
+                gat_engine::FileUploadFailure::Cancelled,
+                gat_io::FileWritePhase::Cancelled,
+            ),
+        ] {
+            let published = state == gat_engine::FileUploadFailure::Published;
+            let cancelled = state == gat_engine::FileUploadFailure::Cancelled;
             let failure: Failure = gat_engine::UploadError::FileWrite {
                 kind: gat_engine::UploadWriteFailureKind::OperationFailed,
-                published,
-                cancelled,
+                state,
                 remote_name: "origin".into(),
                 route: None,
                 path: gat_core::lexical_path::GatPath::parse_canonical("file.bin").unwrap(),
                 source: Box::new(gat_io::FileWriteError {
-                    phase: gat_io::FileWritePhase::Cleanup,
-                    publication: if published {
-                        gat_io::FilePublication::Published
-                    } else {
-                        gat_io::FilePublication::NotPublished
-                    },
+                    phase,
                     source: std::io::Error::other("PRIMARY-SECRET"),
-                    cleanup: Some(std::io::Error::other("CLEANUP-SECRET")),
+                    cleanup: (!published).then(|| std::io::Error::other("CLEANUP-SECRET")),
                 }),
             }
             .into();
@@ -668,7 +694,7 @@ mod tests {
                 .downcast_ref::<gat_engine::UploadError>()
                 .unwrap();
             assert!(
-                matches!(retained, gat_engine::UploadError::FileWrite { source, .. } if source.cleanup.is_some())
+                matches!(retained, gat_engine::UploadError::FileWrite { source, .. } if source.cleanup.is_some() != published)
             );
         }
     }

@@ -56,6 +56,14 @@ pub enum UploadWriteFailureKind {
     OperationFailed,
 }
 
+/// Publication status of a failed file upload. Cancellation is pre-publication.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileUploadFailure {
+    Cancelled,
+    NotPublished,
+    Published,
+}
+
 /// Everything one bounded upload window can fail with.
 #[derive(Debug)]
 pub enum UploadError {
@@ -63,8 +71,7 @@ pub enum UploadError {
     Cancelled,
     FileWrite {
         kind: UploadWriteFailureKind,
-        published: bool,
-        cancelled: bool,
+        state: FileUploadFailure,
         remote_name: Arc<str>,
         route: Option<super::TransferRoute>,
         path: GatPath,
@@ -254,8 +261,13 @@ pub(crate) fn worker_error(
                 } else {
                     UploadWriteFailureKind::OperationFailed
                 },
-                published: source.publication != gat_io::FilePublication::NotPublished,
-                cancelled: source.phase == gat_io::FileWritePhase::Cancelled,
+                state: if source.is_published() {
+                    FileUploadFailure::Published
+                } else if source.phase == gat_io::FileWritePhase::Cancelled {
+                    FileUploadFailure::Cancelled
+                } else {
+                    FileUploadFailure::NotPublished
+                },
                 remote_name,
                 route,
                 path: object.representative_path.clone(),
@@ -497,7 +509,6 @@ async fn upload_bytes(
                 .local_transfer(move || {
                     write
                         .upload(source, || cancellation.is_cancelled())
-                        .map(|_| ())
                         .map_err(WorkerError::from)
                 })
                 .await

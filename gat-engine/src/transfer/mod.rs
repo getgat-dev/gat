@@ -27,7 +27,8 @@ pub use repair::{
 #[doc(hidden)]
 pub use selection::{SelectedObject, visit_current_state_objects, visit_history_objects};
 pub use upload::{
-    UploadCacheFailureKind, UploadError, UploadRemoteFailureKind, UploadWriteFailureKind,
+    FileUploadFailure, UploadCacheFailureKind, UploadError, UploadRemoteFailureKind,
+    UploadWriteFailureKind,
 };
 
 fn cache_io_kind(source: &gat_io::CacheError) -> Option<std::io::ErrorKind> {

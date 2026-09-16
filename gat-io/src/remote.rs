@@ -28,8 +28,8 @@ pub use transfer::{
 };
 
 pub use file::{
-    FileObjectWriter, FilePublication, FileReceiveError, FileUploadError, FileWriteError,
-    FileWritePhase, PreparedFilePresence, PreparedFileRead, PreparedFileWrite,
+    FileObjectWriter, FileReceiveError, FileUploadError, FileWriteError, FileWritePhase,
+    PreparedFilePresence, PreparedFileRead, PreparedFileWrite,
 };
 pub use interpolate::InterpolateError;
 pub(crate) use tuning::upload_buffer_bytes;
