@@ -539,7 +539,7 @@ async fn upload_bytes(
         let mut sent = 0u64;
         let (returned, first) = executor
             .local_transfer(move || {
-                let bytes = reader.read_chunk(gat_io::TRANSFER_CHUNK_SIZE);
+                let bytes = reader.read_chunk();
                 (reader, bytes)
             })
             .await
@@ -567,9 +567,7 @@ async fn upload_bytes(
                 async {
                     executor
                         .local_transfer(move || {
-                            let bytes = reader
-                                .read_chunk(gat_io::TRANSFER_CHUNK_SIZE)
-                                .map_err(WorkerError::CacheRead)?;
+                            let bytes = reader.read_chunk().map_err(WorkerError::CacheRead)?;
                             Ok::<_, WorkerError>((reader, bytes))
                         })
                         .await

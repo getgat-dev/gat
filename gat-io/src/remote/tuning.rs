@@ -24,6 +24,13 @@
 /// governs how opendal chunks a *remote* multipart/range transfer.
 pub const STREAM_BUFFER_SIZE: usize = 1024 * 1024;
 
+/// Bound upload buffers while retaining a byte to detect growth of tiny sources.
+pub(crate) fn upload_buffer_bytes(size: u64) -> usize {
+    usize::try_from(size.saturating_add(1))
+        .unwrap_or(usize::MAX)
+        .min(super::TRANSFER_CHUNK_SIZE)
+}
+
 thread_local! {
     // Worker-local, not shared: each blocking worker thread gets its own
     // scratch buffer, so sequential streaming jobs executed on the same

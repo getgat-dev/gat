@@ -509,18 +509,14 @@ impl CacheWriter {
 }
 
 impl CacheObjectReader {
-    pub(crate) fn read_into(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-        self.file.read(bytes)
-    }
-
     pub fn read_small(&mut self, limit: usize) -> std::io::Result<Vec<u8>> {
         let size = usize::try_from(self.size)
             .ok()
             .filter(|size| *size <= limit)
             .ok_or_else(|| std::io::Error::other("cache source exceeds small-object limit"))?;
         let mut bytes = vec![0; size];
-        self.file.read_exact(&mut bytes)?;
-        if self.file.read(&mut [0])? != 0 {
+        self.read_exact(&mut bytes)?;
+        if self.read(&mut [0])? != 0 {
             return Err(std::io::Error::other(
                 "cache source changed after verification",
             ));
@@ -534,9 +530,10 @@ impl CacheObjectReader {
     }
 
     /// Reads at most one local transfer chunk; never waits for remote I/O.
-    pub fn read_chunk(&mut self, capacity: usize) -> std::io::Result<Vec<u8>> {
+    pub fn read_chunk(&mut self) -> std::io::Result<Vec<u8>> {
+        let capacity = crate::remote::upload_buffer_bytes(self.size);
         let mut bytes = vec![0; capacity];
-        let count = self.file.read(&mut bytes)?;
+        let count = self.read(&mut bytes)?;
         bytes.truncate(count);
         Ok(bytes)
     }
@@ -604,7 +601,16 @@ impl CacheIngest {
 
 impl Read for CacheObjectReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.file.read(buf)
+        read_uninterrupted(&mut self.file, buf)
+    }
+}
+
+fn read_uninterrupted(reader: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
+    loop {
+        match reader.read(buf) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            result => return result,
+        }
     }
 }
 
@@ -1246,8 +1252,7 @@ fn ingest_to_tmp<R: std::io::Read>(
     let mut size = 0u64;
     crate::remote::with_stream_buffer(size_hint, |buf| -> Result<()> {
         loop {
-            let n = reader
-                .read(buf)
+            let n = read_uninterrupted(&mut reader, buf)
                 .map_err(|source| CacheError::SourceUnreadable { source })?;
             if n == 0 {
                 break;
@@ -1946,6 +1951,96 @@ pub fn symlink(obj: &Path, dest: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::io::{Cursor, Read};
+
+    #[test]
+    fn ingest_retries_interruptions_between_short_reads_and_before_eof() {
+        struct InterruptedReader {
+            bytes: Cursor<&'static [u8]>,
+            interrupt: bool,
+        }
+
+        impl Read for InterruptedReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.interrupt = !self.interrupt;
+                if self.interrupt {
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                let limit = buf.len().min(3);
+                self.bytes.read(&mut buf[..limit])
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let objects = tmp.path().join("objects");
+        let payload = b"interrupted source";
+        let ingested = ingest(
+            &objects,
+            InterruptedReader {
+                bytes: Cursor::new(payload),
+                interrupt: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            ingested.oid,
+            Oid::from_bytes(*blake3::hash(payload).as_bytes())
+        );
+        assert_eq!(ingested.size, payload.len() as u64);
+        assert_eq!(
+            std::fs::read(cache_path_oid(&objects, &ingested.oid)).unwrap(),
+            payload
+        );
+    }
+
+    #[test]
+    fn interrupted_read_preserves_terminal_errors() {
+        let mut attempts = 0;
+        struct Reader<'a>(&'a mut usize);
+        impl Read for Reader<'_> {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                *self.0 += 1;
+                Err(if *self.0 < 3 {
+                    std::io::ErrorKind::Interrupted
+                } else {
+                    std::io::ErrorKind::PermissionDenied
+                }
+                .into())
+            }
+        }
+        let error = read_uninterrupted(&mut Reader(&mut attempts), &mut [0]).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn upload_chunks_bound_allocations_and_observe_growth_from_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("source");
+        for size in [0, 7, crate::TRANSFER_CHUNK_SIZE + 3] {
+            let payload = vec![42; size];
+            std::fs::write(&path, &payload).unwrap();
+            let mut reader = CacheObjectReader {
+                file: File::open(&path).unwrap(),
+                size: size as u64,
+            };
+            let mut actual = Vec::new();
+            loop {
+                let chunk = reader.read_chunk().unwrap();
+                assert!(chunk.capacity() <= (size + 1).min(crate::TRANSFER_CHUNK_SIZE));
+                if chunk.is_empty() {
+                    break;
+                }
+                actual.extend(chunk);
+            }
+            assert_eq!(actual, payload);
+        }
+        std::fs::write(&path, b"grown").unwrap();
+        let mut reader = CacheObjectReader {
+            file: File::open(&path).unwrap(),
+            size: 0,
+        };
+        assert_eq!(reader.read_chunk().unwrap(), b"g");
+    }
 
     #[test]
     fn verification_window_override_restores_nested_and_unwound_scopes() {

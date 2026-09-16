@@ -292,9 +292,7 @@ impl PreparedFileWrite {
     /// One reusable buffer, including a byte for detecting growth of tiny files.
     #[must_use]
     pub fn buffer_bytes(&self) -> usize {
-        usize::try_from(self.size.saturating_add(1))
-            .unwrap_or(usize::MAX)
-            .min(super::TRANSFER_CHUNK_SIZE)
+        super::upload_buffer_bytes(self.size)
     }
 
     /// One admitted worker owns the source, staging, copy buffer and cleanup.
@@ -328,7 +326,7 @@ impl PreparedFileWrite {
                     io::Error::from(io::ErrorKind::Interrupted),
                 )));
             }
-            let count = match source.read_into(&mut buffer) {
+            let count = match source.read(&mut buffer) {
                 Ok(count) => count,
                 Err(source) => {
                     return Err(FileUploadError::CacheRead {
