@@ -116,7 +116,6 @@ pub enum StatusOutcome {
     WorkingTree {
         scope: super::SelectionScope,
         rows: Vec<StatusRow>,
-        changes: usize,
     },
 }
 
@@ -143,16 +142,11 @@ pub fn status(
         selection::resolve(request.selection.as_ref(), config)?;
     // Snapshot validation, comparison, and result preparation all scale with
     // tracked entries even when the desired-state mirror was already current.
-    let (rows_by_path, changes) = with_progress_typed(
+    let rows_by_path = with_progress_typed(
         progress,
         ProgressSpec::indeterminate(ProgressOperation::ComparingState),
         |_| -> Result<_, StatusError> {
-            let rows = current.staged_with_current(&selection, Unchanged::Keep)?;
-            let changes = rows
-                .iter()
-                .filter(|row| !matches!(row.change, RowChange::Unchanged { .. }))
-                .count();
-            Ok((rows, changes))
+            Ok(current.staged_with_current(&selection, Unchanged::Keep)?)
         },
     )?;
 
@@ -217,11 +211,7 @@ pub fn status(
         },
     )?;
 
-    Ok(StatusOutcome::WorkingTree {
-        scope,
-        rows,
-        changes,
-    })
+    Ok(StatusOutcome::WorkingTree { scope, rows })
 }
 
 #[derive(Clone, Debug)]

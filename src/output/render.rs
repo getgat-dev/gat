@@ -1343,13 +1343,19 @@ pub fn render(output: &mut Output<'_>, outcome: Outcome) -> Result<(), WriteFail
                 &UserLine::authored("Gat lock"),
                 &UserLine::authored("no gat-tracked files"),
             )?,
-            gat_command::StatusOutcome::WorkingTree { rows, changes, .. } => {
-                if *changes > 0 {
+            gat_command::StatusOutcome::WorkingTree { rows, .. } => {
+                let changes = rows
+                    .iter()
+                    .filter(|row| {
+                        !matches!(row.change, gat_command::StatusChange::Unchanged { .. })
+                    })
+                    .count();
+                if changes > 0 {
                     ui::action_heading(
                         output,
                         Stream::Stdout,
                         &UserLine::authored("Gat lock"),
-                        &count_line(*changes as i64, " change(s)"),
+                        &count_line(changes as i64, " change(s)"),
                     )
                 } else {
                     ui::success_heading(
@@ -1379,7 +1385,7 @@ pub fn render(output: &mut Output<'_>, outcome: Outcome) -> Result<(), WriteFail
                     output,
                     Stream::Stdout,
                     &UserLine::compose([
-                        UserLine::number(*changes as i64),
+                        UserLine::number(changes as i64),
                         UserLine::authored(" change(s) across "),
                         UserLine::number(rows.len() as i64),
                         UserLine::authored(" file(s)"),
@@ -1461,13 +1467,8 @@ pub fn render(output: &mut Output<'_>, outcome: Outcome) -> Result<(), WriteFail
                 ]),
                 &no_changes_summary(scope),
             )?,
-            DiffOutcome::Changes {
-                from,
-                to,
-                rows,
-                changes,
-                ..
-            } => {
+            DiffOutcome::Changes { from, to, rows, .. } => {
+                let changes = rows.len();
                 ui::action_heading(
                     output,
                     Stream::Stdout,
@@ -1477,7 +1478,7 @@ pub fn render(output: &mut Output<'_>, outcome: Outcome) -> Result<(), WriteFail
                         UserLine::authored(".."),
                         UserLine::identifier(diff_target_label(to)),
                     ]),
-                    &count_line(*changes as i64, " change(s)"),
+                    &count_line(changes as i64, " change(s)"),
                 )?;
                 ui::section(output, Stream::Stdout)?;
                 render_projected_rows(output, rows.iter(), Stream::Stdout, |row| {
@@ -1501,7 +1502,7 @@ pub fn render(output: &mut Output<'_>, outcome: Outcome) -> Result<(), WriteFail
                     output,
                     Stream::Stdout,
                     &UserLine::compose([
-                        UserLine::number(*changes as i64),
+                        UserLine::number(changes as i64),
                         UserLine::authored(" change(s) across "),
                         UserLine::number(rows.len() as i64),
                         UserLine::authored(" file(s)"),
@@ -2921,12 +2922,19 @@ mod outcome_tests {
         let rows = (0..25)
             .map(|index| gat_command::StatusRow {
                 path: GatPath::parse_canonical(&format!("file-{index:02}.bin")).unwrap(),
-                change: gat_command::StatusChange::Unchanged {
-                    oid,
-                    cache: if index == 24 {
-                        gat_command::CachePresence::Missing
-                    } else {
-                        gat_command::CachePresence::Present
+                change: match index {
+                    22 => gat_command::StatusChange::Removed,
+                    23 => gat_command::StatusChange::Modified {
+                        oid,
+                        cache: gat_command::CachePresence::Present,
+                    },
+                    24 => gat_command::StatusChange::Added {
+                        oid,
+                        cache: gat_command::CachePresence::Missing,
+                    },
+                    _ => gat_command::StatusChange::Unchanged {
+                        oid,
+                        cache: gat_command::CachePresence::Present,
                     },
                 },
                 mount: None,
@@ -2938,7 +2946,6 @@ mod outcome_tests {
             Outcome::Status(gat_command::StatusOutcome::WorkingTree {
                 scope: gat_command::SelectionScope::Unrestricted,
                 rows,
-                changes: 0,
             }),
         )
         .unwrap();
@@ -2946,7 +2953,7 @@ mod outcome_tests {
         assert!(text.contains("(... 6 more rows)"));
         assert!(!text.contains("file-24.bin"));
         assert_eq!(text.matches("Run `gat fetch`").count(), 1);
-        assert!(text.ends_with("0 change(s) across 25 file(s)\n"));
+        assert!(text.ends_with("3 change(s) across 25 file(s)\n"));
     }
 
     #[test]
@@ -2986,7 +2993,6 @@ mod outcome_tests {
                 },
                 mount: None,
             }],
-            changes: 0,
         });
         let mut stdout = Vec::new();
         render(&mut Output::new(&mut stdout, &mut Vec::new()), outcome).unwrap();
@@ -3020,7 +3026,6 @@ mod outcome_tests {
                         change,
                         mount: None,
                     }],
-                    changes: 1,
                 }),
             )
             .unwrap();
@@ -3044,7 +3049,6 @@ mod outcome_tests {
                     Outcome::Status(gat_command::StatusOutcome::WorkingTree {
                         scope,
                         rows: Vec::new(),
-                        changes: 0,
                     }),
                     Stream::Stdout,
                 ),
@@ -3066,7 +3070,6 @@ mod outcome_tests {
                             change: gat_command::DiffChange::Removed,
                             mount: None,
                         }],
-                        changes: 1,
                     }),
                     Stream::Stdout,
                 ),

@@ -352,13 +352,16 @@ fn add_then_status_round_trips_through_dispatch() {
     let status_result = app::run(parse(&["status"]), &context, &NoopProgress);
     let status_outcome = status_result.unwrap();
     match status_outcome {
-        app::Outcome::Status(StatusOutcome::WorkingTree { rows, changes, .. }) => {
+        app::Outcome::Status(StatusOutcome::WorkingTree { rows, .. }) => {
             assert_eq!(rows.len(), 1);
             // Not yet `git add`ed/committed, so the staged `gat.lock`
             // doesn't have this entry yet -- it shows as one pending
             // change, same as `git status` would show an uncommitted
             // file.
-            assert_eq!(changes, 1);
+            assert!(matches!(
+                rows[0].change,
+                gat_command::StatusChange::Added { .. }
+            ));
         }
         _ => panic!("expected Outcome::Status(WorkingTree)"),
     }

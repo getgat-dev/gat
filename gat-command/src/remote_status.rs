@@ -110,6 +110,7 @@ pub fn remote_status_with_desired_operation(
 
     let mut window: StreamingWindow<(RemoteId, Oid), StatusObligation> =
         StreamingWindow::new(operation.limits().transfer.window);
+    let mut present = Vec::new();
     let mut checked = 0usize;
     let mut missing = Vec::new();
     task.set_activity(ProgressActivity::selection_or_state(
@@ -136,6 +137,7 @@ pub fn remote_status_with_desired_operation(
                 run_status_window(
                     &mut operation,
                     batch,
+                    &mut present,
                     &mut checked,
                     &mut missing,
                     &mut reporting,
@@ -155,6 +157,7 @@ pub fn remote_status_with_desired_operation(
         run_status_window(
             &mut operation,
             batch,
+            &mut present,
             &mut checked,
             &mut missing,
             &mut reporting,
@@ -193,6 +196,7 @@ impl RemotePresenceObligation for StatusObligation {
 fn run_status_window(
     operation: &mut gat_engine::SelectionOperation<'_, '_>,
     batch: gat_engine::WindowBatch<'_, StatusObligation>,
+    present: &mut Vec<bool>,
     checked: &mut usize,
     missing: &mut Vec<MissingRemoteObject>,
     reporting: &mut gat_engine::ProgressUpdates,
@@ -203,7 +207,8 @@ fn run_status_window(
     // original order afterwards, so the reported output never depends on
     // completion order.
     let obligations = batch.as_slice();
-    let mut present = vec![false; obligations.len()];
+    present.clear();
+    present.resize(obligations.len(), false);
     operation.check_remote_presence_streaming(
         obligations,
         |result| {
@@ -215,7 +220,7 @@ fn run_status_window(
 
     let catalog = operation.remotes_catalog();
     let policy = operation.policy();
-    for (obligation, present) in batch.drain().zip(present) {
+    for (obligation, present) in batch.drain().zip(present.drain(..)) {
         if !present {
             let remote = obligation.remote;
             let object = obligation.object;

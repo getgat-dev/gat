@@ -60,7 +60,6 @@ pub enum DiffOutcome {
         from: GitRevisionSpec,
         to: DiffTarget,
         rows: Vec<DiffRow>,
-        changes: usize,
     },
 }
 
@@ -123,8 +122,7 @@ pub fn diff(
         }
     };
 
-    let changes = rows.len();
-    if changes == 0 {
+    if rows.is_empty() {
         Ok(DiffOutcome::NoChanges { from, to, scope })
     } else {
         Ok(DiffOutcome::Changes {
@@ -132,7 +130,6 @@ pub fn diff(
             from,
             to,
             rows,
-            changes,
         })
     }
 }
