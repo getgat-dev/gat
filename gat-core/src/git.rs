@@ -247,7 +247,7 @@ impl GitCommitId {
             buf: [0; 64],
             len: 2 * bytes.len(),
         };
-        for (byte, pair) in bytes.iter().zip(out.buf.chunks_exact_mut(2)) {
+        for (byte, pair) in bytes.iter().zip(out.buf.as_chunks_mut::<2>().0) {
             pair[0] = HEX[usize::from(byte >> 4)];
             pair[1] = HEX[usize::from(byte & 15)];
         }
