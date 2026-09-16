@@ -92,18 +92,19 @@ pub const LARGE_OBJECT_THRESHOLD: u64 = 64 * 1024 * 1024;
 /// operation-scoped remote request budget.
 pub const PART_CONCURRENCY: usize = 4;
 
-/// Clamps a requested chunk size to a backend's effective
-/// `write_multi_min_size`/`write_multi_max_size`, so gat never asks a
-/// backend for a multipart chunk size its capability doesn't accept.
-fn clamp_chunk(requested: usize, min: Option<usize>, max: Option<usize>) -> usize {
-    let mut chunk = requested;
-    if let Some(min) = min {
-        chunk = chunk.max(min);
+/// Select a positive chunk size within the backend's effective bounds.
+fn multipart_chunk(cap: opendal::Capability) -> Result<std::num::NonZeroUsize, super::RemoteError> {
+    let min = cap.write_multi_min_size.unwrap_or(1).max(1);
+    let max = cap.write_multi_max_size.unwrap_or(usize::MAX);
+    if min > max {
+        return Err(super::RemoteError::UnsupportedCapability {
+            missing: "consistent positive multipart chunk bounds".to_owned(),
+        });
     }
-    if let Some(max) = max {
-        chunk = chunk.min(max);
-    }
-    chunk
+    Ok(
+        std::num::NonZeroUsize::new(NETWORK_CHUNK_SIZE.clamp(min, max))
+            .expect("validated bounds require a positive chunk"),
+    )
 }
 
 /// Decides the [`opendal::options::WriteOptions`] gat's push path should
@@ -119,21 +120,26 @@ fn clamp_chunk(requested: usize, min: Option<usize>, max: Option<usize>) -> usiz
 /// `write_multi_min_size`/`write_multi_max_size`) with
 /// [`PART_CONCURRENCY`] parts -- falling back to sequential if the
 /// operator doesn't support multipart writes at all, rather than
-/// attempting unsupported behavior.
-pub fn upload_write_options(size: u64, cap: opendal::Capability) -> opendal::options::WriteOptions {
-    let mut opts = opendal::options::WriteOptions::default();
-    if size < LARGE_OBJECT_THRESHOLD || !cap.write_can_multi {
-        opts.concurrent = 1;
-        return opts;
-    }
-    let chunk = clamp_chunk(
-        NETWORK_CHUNK_SIZE,
-        cap.write_multi_min_size,
-        cap.write_multi_max_size,
-    );
-    opts.chunk = Some(chunk);
-    opts.concurrent = PART_CONCURRENCY;
-    opts
+/// attempting unsupported behavior. Every streaming upload receives a positive,
+/// bounded chunk size; whole-object writes leave chunking unset.
+/// Inconsistent backend chunk bounds return a capability error.
+pub fn upload_write_options(
+    size: u64,
+    cap: opendal::Capability,
+) -> Result<opendal::options::WriteOptions, super::RemoteError> {
+    Ok(opendal::options::WriteOptions {
+        concurrent: if size >= LARGE_OBJECT_THRESHOLD && cap.write_can_multi {
+            PART_CONCURRENCY
+        } else {
+            1
+        },
+        chunk: if size > super::TRANSFER_CHUNK_SIZE as u64 {
+            Some(multipart_chunk(cap)?.get())
+        } else {
+            None
+        },
+        ..Default::default()
+    })
 }
 
 #[cfg(test)]
@@ -252,15 +258,15 @@ mod tests {
     #[test]
     fn upload_options_use_concurrency_one_below_the_large_object_threshold() {
         let cap = cap_with_multi(None, None);
-        let opts = upload_write_options(LARGE_OBJECT_THRESHOLD - 1, cap);
+        let opts = upload_write_options(LARGE_OBJECT_THRESHOLD - 1, cap).unwrap();
         assert_eq!(opts.concurrent, 1);
-        assert_eq!(opts.chunk, None);
+        assert_eq!(opts.chunk, Some(NETWORK_CHUNK_SIZE));
     }
 
     #[test]
     fn upload_options_use_multipart_at_the_large_object_threshold() {
         let cap = cap_with_multi(None, None);
-        let opts = upload_write_options(LARGE_OBJECT_THRESHOLD, cap);
+        let opts = upload_write_options(LARGE_OBJECT_THRESHOLD, cap).unwrap();
         assert_eq!(opts.chunk, Some(NETWORK_CHUNK_SIZE));
         assert_eq!(opts.concurrent, PART_CONCURRENCY);
     }
@@ -272,10 +278,36 @@ mod tests {
             write_can_multi: false,
             ..Default::default()
         };
-        let opts = upload_write_options(LARGE_OBJECT_THRESHOLD * 2, cap);
+        let opts = upload_write_options(LARGE_OBJECT_THRESHOLD * 2, cap).unwrap();
         assert_eq!(
             opts.concurrent, 1,
             "must not attempt multipart writes the operator doesn't support"
+        );
+    }
+
+    #[test]
+    fn streaming_uploads_reject_impossible_chunk_bounds_before_reservation() {
+        for cap in [
+            cap_with_multi(None, Some(0)),
+            cap_with_multi(Some(8), Some(4)),
+        ] {
+            for size in [
+                super::super::TRANSFER_CHUNK_SIZE as u64 + 1,
+                LARGE_OBJECT_THRESHOLD,
+            ] {
+                assert!(matches!(
+                    upload_write_options(size, cap),
+                    Err(super::super::RemoteError::UnsupportedCapability { .. })
+                ));
+            }
+            // Whole-object writes never use multipart chunk bounds.
+            assert_eq!(upload_write_options(1, cap).unwrap().chunk, None);
+        }
+        assert_eq!(
+            upload_write_options(LARGE_OBJECT_THRESHOLD, cap_with_multi(Some(0), Some(1)))
+                .unwrap()
+                .chunk,
+            Some(1)
         );
     }
 
@@ -285,14 +317,14 @@ mod tests {
         // requested NETWORK_CHUNK_SIZE.
         let small_max = NETWORK_CHUNK_SIZE / 2;
         let cap = cap_with_multi(None, Some(small_max));
-        let opts = upload_write_options(LARGE_OBJECT_THRESHOLD, cap);
+        let opts = upload_write_options(LARGE_OBJECT_THRESHOLD, cap).unwrap();
         assert_eq!(opts.chunk, Some(small_max));
 
         // Operator requires a minimum multipart chunk larger than gat's
         // requested NETWORK_CHUNK_SIZE.
         let large_min = NETWORK_CHUNK_SIZE * 2;
         let cap = cap_with_multi(Some(large_min), None);
-        let opts = upload_write_options(LARGE_OBJECT_THRESHOLD, cap);
+        let opts = upload_write_options(LARGE_OBJECT_THRESHOLD, cap).unwrap();
         assert_eq!(opts.chunk, Some(large_min));
     }
 }
