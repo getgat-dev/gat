@@ -1536,10 +1536,7 @@ mod ownership_tests {
         let selection = HistorySelection {
             roots: vec![HistoryRoot::Head],
             traversal: HistoryTraversal::Ancestors { per_root: None },
-            time: TimeWindow {
-                since: Some(GitTimestamp::from(mid_time)),
-                until: None,
-            },
+            time: TimeWindow::new(Some(GitTimestamp::from(mid_time)), None).unwrap(),
             ..Default::default()
         };
         let resolved = resolve_selection(&repo, &selection).unwrap();
@@ -1580,10 +1577,7 @@ mod ownership_tests {
             traversal: HistoryTraversal::Ancestors {
                 per_root: NonZeroUsize::new(2),
             },
-            time: TimeWindow {
-                since: Some(GitTimestamp::from(900)),
-                until: None,
-            },
+            time: TimeWindow::new(Some(GitTimestamp::from(900)), None).unwrap(),
             ..Default::default()
         };
         let resolved = resolve_selection(&repo, &selection).unwrap();
@@ -1617,10 +1611,7 @@ mod ownership_tests {
             traversal: HistoryTraversal::Ancestors {
                 per_root: NonZeroUsize::new(2),
             },
-            time: TimeWindow {
-                since: None,
-                until: Some(GitTimestamp::from(900)),
-            },
+            time: TimeWindow::new(None, Some(GitTimestamp::from(900))).unwrap(),
             ..Default::default()
         };
         let resolved = resolve_selection(&repo, &selection).unwrap();
@@ -1646,10 +1637,7 @@ mod ownership_tests {
             traversal: HistoryTraversal::Ancestors {
                 per_root: NonZeroUsize::new(2),
             },
-            time: TimeWindow {
-                since: Some(GitTimestamp::from(10_000)),
-                until: None,
-            },
+            time: TimeWindow::new(Some(GitTimestamp::from(10_000)), None).unwrap(),
             ..Default::default()
         };
         let resolved = resolve_selection(&repo, &selection).unwrap();
@@ -1692,10 +1680,7 @@ mod ownership_tests {
             traversal: HistoryTraversal::Ancestors {
                 per_root: NonZeroUsize::new(2),
             },
-            time: TimeWindow {
-                since: Some(GitTimestamp::from(900)),
-                until: None,
-            },
+            time: TimeWindow::new(Some(GitTimestamp::from(900)), None).unwrap(),
             ..Default::default()
         };
         let resolved = resolve_selection(&repo, &selection).unwrap();
@@ -1737,10 +1722,7 @@ mod ownership_tests {
             traversal: HistoryTraversal::Ancestors {
                 per_root: NonZeroUsize::new(2),
             },
-            time: TimeWindow {
-                since: Some(GitTimestamp::from(900)),
-                until: None,
-            },
+            time: TimeWindow::new(Some(GitTimestamp::from(900)), None).unwrap(),
             parents: ParentMode::First,
             ..Default::default()
         };
@@ -1795,10 +1777,7 @@ mod ownership_tests {
             traversal: HistoryTraversal::Ancestors {
                 per_root: NonZeroUsize::new(2),
             },
-            time: TimeWindow {
-                since: Some(GitTimestamp::from(900)),
-                until: None,
-            },
+            time: TimeWindow::new(Some(GitTimestamp::from(900)), None).unwrap(),
             excluded: vec![topic_tip.to_string().into()],
             ..Default::default()
         };

@@ -435,16 +435,8 @@ const fn history_traversal(args: &HistoryArgs) -> HistoryTraversal {
 /// `HistoryArgs` fields), so this function can assume both are already
 /// validated by the time it runs.
 pub(crate) fn resolve_history_selection(args: HistoryArgs) -> Result<Option<HistorySelection>> {
-    let untouched = args.rev.is_empty()
-        && !args.branches
-        && !args.tags
-        && !args.all_history
-        && !args.ancestors
-        && args.depth.is_none()
-        && args.since.is_none()
-        && args.until.is_none()
-        && !args.first_parent
-        && args.exclude_rev.is_empty();
+    let untouched =
+        args.rev.is_empty() && !args.branches && !args.tags && !history_requires_ancestry(&args);
     if untouched {
         return Ok(None);
     }
@@ -472,10 +464,10 @@ pub(crate) fn resolve_history_selection(args: HistoryArgs) -> Result<Option<Hist
         roots.push(HistoryRoot::Head);
     }
 
-    let time = TimeWindow {
-        since: args.since.as_deref().map(parse_cli_date).transpose()?,
-        until: args.until.as_deref().map(parse_cli_date).transpose()?,
-    };
+    let time = TimeWindow::new(
+        args.since.as_deref().map(parse_cli_date).transpose()?,
+        args.until.as_deref().map(parse_cli_date).transpose()?,
+    )?;
 
     Ok(Some(HistorySelection {
         roots,
@@ -1295,6 +1287,36 @@ mod tests {
         }
 
         #[test]
+        fn history_dates_reject_reversed_bounds_and_accept_equal_instants() {
+            let error = resolve_history_selection(HistoryArgs {
+                since: Some("2025-01-01T00:00:00Z".to_string()),
+                until: Some("2024-01-01T00:00:00Z".to_string()),
+                ..args()
+            })
+            .unwrap_err();
+            assert_eq!(
+                error.diagnostic().code(),
+                crate::error::ErrorCode::InvalidArgumentValue
+            );
+            assert!(
+                error
+                    .technical_source()
+                    .unwrap()
+                    .is::<gat_core::history::ReversedTimeWindow>()
+            );
+
+            let selection = resolve_history_selection(HistoryArgs {
+                since: Some("2025-01-01T00:00:00Z".to_string()),
+                until: Some("2025-01-01T01:00:00+01:00".to_string()),
+                ..args()
+            })
+            .unwrap()
+            .unwrap();
+            assert_eq!(selection.time.since(), selection.time.until());
+            assert!(selection.time.contains(selection.time.since().unwrap()));
+        }
+
+        #[test]
         fn since_alone_defaults_to_head_and_walks_ancestors() {
             let selection = resolve_history_selection(HistoryArgs {
                 since: Some("2020-01-01".to_string()),
@@ -1307,7 +1329,7 @@ mod tests {
                 selection.traversal,
                 HistoryTraversal::Ancestors { per_root: None }
             );
-            assert!(selection.time.since.is_some());
+            assert!(selection.time.since().is_some());
         }
 
         #[test]
@@ -1323,7 +1345,7 @@ mod tests {
                 selection.traversal,
                 HistoryTraversal::Ancestors { per_root: None }
             );
-            assert!(selection.time.until.is_some());
+            assert!(selection.time.until().is_some());
         }
 
         /// `--depth` alone (no scope selector) must default its root to
@@ -1377,7 +1399,7 @@ mod tests {
                 selection.traversal,
                 HistoryTraversal::Ancestors { per_root: None }
             );
-            assert!(selection.time.since.is_some());
+            assert!(selection.time.since().is_some());
         }
 
         #[test]

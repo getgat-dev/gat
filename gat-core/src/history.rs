@@ -88,13 +88,43 @@ impl Default for HistoryTraversal {
 
 /// Inclusive commit-time (committer time, matching `git log --since/--until`)
 /// filter. `None` on either bound means unbounded on that side.
+/// Bounded windows always satisfy `since <= until`.
+///
+/// ```compile_fail
+/// use gat_core::history::TimeWindow;
+/// let window = TimeWindow { since: None, until: None };
+/// ```
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TimeWindow {
-    pub since: Option<GitTimestamp>,
-    pub until: Option<GitTimestamp>,
+    since: Option<GitTimestamp>,
+    until: Option<GitTimestamp>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("history time window starts after it ends")]
+pub struct ReversedTimeWindow;
+
 impl TimeWindow {
+    pub fn new(
+        since: Option<GitTimestamp>,
+        until: Option<GitTimestamp>,
+    ) -> Result<Self, ReversedTimeWindow> {
+        if matches!((since, until), (Some(start), Some(end)) if start > end) {
+            return Err(ReversedTimeWindow);
+        }
+        Ok(Self { since, until })
+    }
+
+    #[must_use]
+    pub const fn since(&self) -> Option<GitTimestamp> {
+        self.since
+    }
+
+    #[must_use]
+    pub const fn until(&self) -> Option<GitTimestamp> {
+        self.until
+    }
+
     #[must_use]
     pub const fn is_unbounded(&self) -> bool {
         self.since.is_none() && self.until.is_none()
@@ -161,4 +191,38 @@ pub enum HistoryRequest {
     Disabled,
     /// Consult the explicitly selected Git history.
     Selected(HistorySelection),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn time_windows_validate_order_and_keep_inclusive_bounds() {
+        let timestamps = [i64::MIN, -1, 0, 1, i64::MAX].map(GitTimestamp::from);
+        let bounds: Vec<_> = std::iter::once(None)
+            .chain(timestamps.into_iter().map(Some))
+            .collect();
+        for &since in &bounds {
+            for &until in &bounds {
+                let result = TimeWindow::new(since, until);
+                if let (Some(start), Some(end)) = (since, until)
+                    && start > end
+                {
+                    assert_eq!(result, Err(ReversedTimeWindow));
+                    continue;
+                }
+                let window = result.unwrap();
+                assert_eq!(window.since(), since);
+                assert_eq!(window.until(), until);
+                assert_eq!(window.is_unbounded(), since.is_none() && until.is_none());
+                for timestamp in timestamps {
+                    let outside = since.is_some_and(|start| timestamp < start)
+                        || until.is_some_and(|end| timestamp > end);
+                    assert_eq!(window.contains(timestamp), !outside);
+                }
+            }
+        }
+        assert_eq!(TimeWindow::default(), TimeWindow::new(None, None).unwrap());
+    }
 }
