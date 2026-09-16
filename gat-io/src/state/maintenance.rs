@@ -150,38 +150,46 @@ pub fn rebuild_atomically(repository: &RepositoryLayout) -> Result<(), StateMain
         store.set_validation_required(true)?;
         store.checkpoint_and_truncate_wal()?;
     }
-    remove_file_if_exists(&sidecar_path(&tmp_path, "-wal"))?;
-    remove_file_if_exists(&sidecar_path(&tmp_path, "-shm"))?;
+    for path in sidecar_paths(&tmp_path) {
+        remove_file_if_exists(&path)?;
+    }
     crate::atomic::persist_with_retry(tmp, &db_path).map_err(|source| {
         StateMaintenanceError::PersistFailed {
             path: db_path.clone(),
             source,
         }
     })?;
-    remove_file_if_exists(&sidecar_path(&db_path, "-wal"))?;
-    remove_file_if_exists(&sidecar_path(&db_path, "-shm"))?;
+    for path in sidecar_paths(&db_path) {
+        remove_file_if_exists(&path)?;
+    }
     Ok(())
 }
 
 fn stale_sidecars(db_path: &Path) -> Result<Vec<PathBuf>, StateMaintenanceError> {
-    if path_exists(db_path)? {
+    if entry_exists(db_path)? {
         return Ok(Vec::new());
     }
     let mut found = Vec::new();
-    for path in [sidecar_path(db_path, "-wal"), sidecar_path(db_path, "-shm")] {
-        if path_exists(&path)? {
+    for path in sidecar_paths(db_path) {
+        if entry_exists(&path)? {
             found.push(path);
         }
     }
     Ok(found)
 }
 
-fn path_exists(path: &Path) -> Result<bool, StateMaintenanceError> {
-    match std::fs::metadata(path) {
+// Cleanup requires the database entry itself to be absent. A dangling link
+// is an existing obstruction, and orphaned sidecar links must still be found.
+fn entry_exists(path: &Path) -> Result<bool, StateMaintenanceError> {
+    match std::fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(source) => Err(StateMaintenanceError::io(path, source)),
     }
+}
+
+fn sidecar_paths(db_path: &Path) -> [PathBuf; 2] {
+    ["-wal", "-shm"].map(|suffix| sidecar_path(db_path, suffix))
 }
 
 fn sidecar_path(db_path: &Path, suffix: &str) -> PathBuf {
@@ -226,11 +234,7 @@ pub fn reset_database_for_test(layout: &RepositoryLayout) -> Result<(), StateMai
         std::fs::create_dir_all(parent)
             .map_err(|source| StateMaintenanceError::io(parent, source))?;
     }
-    for path in [
-        db_path.clone(),
-        sidecar_path(&db_path, "-wal"),
-        sidecar_path(&db_path, "-shm"),
-    ] {
+    for path in std::iter::once(db_path.clone()).chain(sidecar_paths(&db_path)) {
         remove_file_if_exists(&path)?;
     }
     Ok(())
