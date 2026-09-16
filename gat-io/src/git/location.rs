@@ -280,18 +280,20 @@ pub fn prepare_worktree(
     check_interrupt(interrupt, Path::new(spec.as_location_str()))?;
     if location.kind() == GitLocationKind::LocalPath {
         let local = Path::new(spec.as_location_str());
-        if !local.exists() {
-            return Err(PrepareGitWorktreeError::LocalSourceMissing {
-                path: local.to_path_buf(),
-            });
-        }
-        return Ok(PreparedGitWorktree {
-            root: std::fs::canonicalize(local).map_err(|source| {
+        let root = std::fs::canonicalize(local).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::NotFound {
+                PrepareGitWorktreeError::LocalSourceMissing {
+                    path: local.to_path_buf(),
+                }
+            } else {
                 PrepareGitWorktreeError::ResolveLocal {
                     path: local.to_path_buf(),
                     source,
                 }
-            })?,
+            }
+        })?;
+        return Ok(PreparedGitWorktree {
+            root,
             _temporary: None,
         });
     }
@@ -517,6 +519,33 @@ mod tests {
             Err(PrepareBareGitRepositoryError::Clone(error)) if error.kind() == GitCloneErrorKind::Cancelled)
         );
         assert!(!staged.exists());
+    }
+
+    #[test]
+    fn local_worktree_resolution_distinguishes_absence_from_io_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let prepare = |path: &Path| {
+            let spec = GitLocationSpec::from_string(path.to_str().unwrap().to_owned());
+            let location = parse_location(&spec).unwrap();
+            prepare_worktree(&location, &spec, &AtomicBool::new(false))
+        };
+        let missing = root.path().join("missing");
+        assert!(matches!(
+            prepare(&missing),
+            Err(PrepareGitWorktreeError::LocalSourceMissing { path }) if path == missing
+        ));
+        #[cfg(unix)]
+        {
+            let obstruction = root.path().join("file");
+            std::fs::write(&obstruction, b"preserve").unwrap();
+            let invalid = obstruction.join("child");
+            assert!(matches!(
+                prepare(&invalid),
+                Err(PrepareGitWorktreeError::ResolveLocal { path, source })
+                    if path == invalid && source.kind() == std::io::ErrorKind::NotADirectory
+            ));
+            assert_eq!(std::fs::read(obstruction).unwrap(), b"preserve");
+        }
     }
 
     #[test]
