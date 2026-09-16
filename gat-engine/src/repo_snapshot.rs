@@ -204,7 +204,6 @@ const fn classify_sync(source: &SyncError) -> RepoSnapshotErrorKind {
 
     match source.kind() {
         SyncErrorKind::InvalidObjectId => RepoSnapshotErrorKind::Internal,
-        SyncErrorKind::InvalidTrackedPath(_) => RepoSnapshotErrorKind::InvalidPath,
         SyncErrorKind::Filesystem(kind)
         | SyncErrorKind::WorktreeMutation { kind, .. }
         | SyncErrorKind::Prune(kind) => RepoSnapshotErrorKind::Filesystem(*kind),

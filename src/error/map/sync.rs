@@ -26,8 +26,7 @@ impl From<SyncError> for Failure {
             ]));
         }
         match err.kind() {
-            SyncErrorKind::InvalidTrackedPath(_)
-            | SyncErrorKind::WorktreePath {
+            SyncErrorKind::WorktreePath {
                 kind:
                     WorktreePathFailureKind::OutsideRepository
                     | WorktreePathFailureKind::InfrastructurePath
@@ -77,10 +76,6 @@ pub(super) fn classify(err: &SyncError) -> Diagnostic {
 
 pub(super) fn classify_kind(kind: &SyncErrorKind) -> Diagnostic {
     match kind {
-        SyncErrorKind::InvalidTrackedPath(path) => {
-            Diagnostic::new(ErrorCode::InvalidPath, "gat.lock tracks an invalid path")
-                .with_subject(UserLine::path_text(path))
-        }
         SyncErrorKind::Filesystem(kind) => Diagnostic::new(
             filesystem_code(*kind),
             "Could not synchronize the working tree",

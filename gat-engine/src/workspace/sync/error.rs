@@ -72,7 +72,6 @@ pub enum MutationAuthorityFailureKind {
 /// Application-facing category for a reconciliation failure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SyncErrorKind {
-    InvalidTrackedPath(String),
     Filesystem(FilesystemFailureKind),
     Lock(LockFailureKind),
     State(StateFailureKind),
@@ -140,9 +139,7 @@ impl SyncError {
 impl std::fmt::Display for SyncError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let stage = match self.kind {
-            SyncErrorKind::InvalidTrackedPath(_) | SyncErrorKind::WorktreePath { .. } => {
-                "validate a working-tree path"
-            }
+            SyncErrorKind::WorktreePath { .. } => "validate a working-tree path",
             SyncErrorKind::Filesystem(_)
             | SyncErrorKind::FileState(_)
             | SyncErrorKind::WorktreeMutation { .. }
@@ -279,9 +276,6 @@ fn classify_worktree_mutation(source: &WorktreeMutationError) -> SyncErrorKind {
         WorktreeMutationError::Cache(source) => SyncErrorKind::Cache(classify_cache(source)),
         WorktreeMutationError::FileState(source) => {
             SyncErrorKind::FileState(classify_file_state(source))
-        }
-        WorktreeMutationError::NoFileName { path } => {
-            SyncErrorKind::InvalidTrackedPath(path.clone())
         }
         WorktreeMutationError::Io { path, source, .. } => SyncErrorKind::WorktreeMutation {
             kind: classify_io(source),

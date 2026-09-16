@@ -538,10 +538,10 @@ pub use state::{
     rebuild_atomically, remove_stale_sidecars,
 };
 pub use worktree::{
-    DestinationKind as WorktreeDestinationKind, EntryKind as WorktreeEntryKind, MaterializeKind,
-    MovePathError, PendingMove, PruneError, RemovalReceipt, RemovePathError,
-    RestoreMoveDestinationError, RollbackMoveError, WorktreeClient, WorktreeFileStatus,
-    WorktreeMutationError, WorktreePathError, WorktreeStatusKind,
+    DestinationKind as WorktreeDestinationKind, EntryKind as WorktreeEntryKind, MovePathError,
+    PendingMove, PruneError, RemovalReceipt, RemovePathError, RestoreMoveDestinationError,
+    RollbackMoveError, WorktreeClient, WorktreeFileStatus, WorktreeMutationError,
+    WorktreePathError, WorktreeStatusKind,
 };
 
 #[cfg(any(test, feature = "test-support"))]

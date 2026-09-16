@@ -11,7 +11,6 @@
 use super::{PlanSink, Result, SyncAction, SyncError, SyncOutcome, SyncPlan};
 use crate::repository::Repository as Repo;
 use gat_core::lexical_path::GatPath;
-use gat_core::lock::Entry;
 #[cfg(test)]
 mod storage {
     pub use gat_io::{
@@ -19,9 +18,7 @@ mod storage {
         cache_with_exclusive_hash_file_call_count as with_exclusive_hash_file_call_count,
     };
 }
-use gat_io::{
-    CacheClient, MaterializeKind, RemovalReceipt, StateMutation, StateStore, WorktreeClient,
-};
+use gat_io::{CacheClient, RemovalReceipt, StateMutation, StateStore, WorktreeClient};
 
 /// How many already-successful filesystem mutations accumulate before
 /// their materialized-state changes are flushed in one durable
@@ -121,55 +118,6 @@ fn flush_after_failure(primary: SyncError, flush_result: Result<()>) -> SyncErro
         Ok(()) => primary,
         Err(flush_err) => SyncError::flush_after_failure(primary, flush_err),
     }
-}
-
-fn do_materialize(
-    worktree: WorktreeClient<'_>,
-    cache: &CacheClient,
-    mode: &gat_core::config::MaterializationStrategy,
-    entry: &Entry,
-) -> Result<StateMutation> {
-    Ok(worktree.materialize(cache, entry, mode, MaterializeKind::Create)?)
-}
-
-fn do_replace(
-    worktree: WorktreeClient<'_>,
-    cache: &CacheClient,
-    mode: &gat_core::config::MaterializationStrategy,
-    entry: &Entry,
-) -> Result<StateMutation> {
-    Ok(worktree.materialize(cache, entry, mode, MaterializeKind::Replace)?)
-}
-
-/// Recreates an already-correct working-tree file using the current
-/// [`gat_core::config::MaterializationStrategy`] (`gat sync
-/// --rematerialize`). Unlike [`do_replace`], the destination here starts
-/// out *valid* -- its content already matches the desired OID -- so this
-/// must never remove or truncate it before the new representation is
-/// known to exist: the new representation is built inside a freshly,
-/// atomically created, unique temp *directory* alongside `dest` (via the
-/// ordinary [`storage::materialize`] fallback chain, so `--rematerialize`
-/// gets exactly the same reflink/hardlink/symlink/copy fallback behavior
-/// an ordinary materialize does -- a fresh directory always has room for
-/// a not-yet-existing file, which hardlink/symlink require), and only
-/// that already-built file is swapped into place, with one atomic
-/// same-filesystem rename. The temp directory is owned by a `TempDir`
-/// guard for its entire lifetime, so it (and, on any early return, its
-/// still-unconsumed contents) is automatically removed even on failure --
-/// this function itself never calls `remove_file`/`remove_dir` on a path
-/// it did not itself just create. If materialization fails for every
-/// configured mode, the guard's drop cleans up the temp directory and
-/// `dest` is never touched, so a failure here can only ever leave the
-/// prior, already-correct file exactly as it was.
-fn do_rematerialize(
-    worktree: WorktreeClient<'_>,
-    cache: &CacheClient,
-    mode: &gat_core::config::MaterializationStrategy,
-    entry: &Entry,
-) -> Result<StateMutation> {
-    #[cfg(any(test, feature = "test-support"))]
-    test_support::record_do_rematerialize_call();
-    Ok(worktree.materialize(cache, entry, mode, MaterializeKind::Rematerialize)?)
 }
 
 /// Removes the working-tree file at `path`. A successful unlink returns an
@@ -303,16 +251,23 @@ impl ExecutePlanSink<'_> {
     fn apply_action(&mut self, action: SyncAction) -> Result<()> {
         let action = resolve_action(action, self.force);
         match &action {
-            SyncAction::Materialize(entry) => {
-                let mutation = do_materialize(self.worktree, self.cache, self.mode, entry)?;
-                self.pending.push_mutation(mutation);
-            }
-            SyncAction::Replace(entry) => {
-                let mutation = do_replace(self.worktree, self.cache, self.mode, entry)?;
-                self.pending.push_mutation(mutation);
-            }
-            SyncAction::Rematerialize(entry) => {
-                let mutation = do_rematerialize(self.worktree, self.cache, self.mode, entry)?;
+            SyncAction::Materialize(entry)
+            | SyncAction::Replace(entry)
+            | SyncAction::Rematerialize(entry) => {
+                // A preceding unlink may have left the destination directory
+                // awaiting pruning. Commit those removals before publishing a
+                // file there; materialization itself never removes directories.
+                if !self.pending.removals.is_empty()
+                    && self.worktree.inspect_destination(&entry.path)?
+                        == gat_io::WorktreeDestinationKind::Directory
+                {
+                    self.flush_pending()?;
+                }
+                #[cfg(any(test, feature = "test-support"))]
+                if matches!(&action, SyncAction::Rematerialize(_)) {
+                    test_support::record_do_rematerialize_call();
+                }
+                let mutation = self.worktree.materialize(self.cache, entry, self.mode)?;
                 self.pending.push_mutation(mutation);
             }
             SyncAction::Remove(path) => {
@@ -327,11 +282,15 @@ impl ExecutePlanSink<'_> {
         Ok(())
     }
 
+    fn flush_pending(&mut self) -> Result<()> {
+        let result = self.pending.flush(self.store, self.worktree);
+        self.flush_failed = result.is_err();
+        result
+    }
+
     fn flush_if_full(&mut self) -> Result<()> {
         if self.pending.is_full() {
-            let result = self.pending.flush(self.store, self.worktree);
-            self.flush_failed = result.is_err();
-            return result;
+            return self.flush_pending();
         }
         Ok(())
     }
@@ -371,7 +330,7 @@ pub(crate) fn apply_actions(
     })
 }
 
-/// Test-only instrumentation: counts actual [`do_rematerialize`]
+/// Test-only instrumentation: counts actual rematerialization
 /// executions, independent of [`SyncOutcome::rematerialized`] (which only
 /// ever reflects the single sync pass that produced it). A
 /// `--repair --rematerialize` run performs
@@ -404,6 +363,7 @@ mod tests {
     use crate::workspace::sync::{
         StateFailureKind, SyncErrorKind, SyncOptions, Validation, WorktreePathFailureKind, sync,
     };
+    use gat_core::lock::Entry;
     use gat_core::lock::Lock;
     use gat_io::StateStore;
 
@@ -1728,6 +1688,7 @@ mod tests {
         drop(store);
 
         assert_eq!(std::fs::read(tmp.path().join("a")).unwrap(), b"new");
+        assert!(!tmp.path().join("a.gat-tmp").exists());
         let materialized = crate::repository_mutation::load_materialized_for_test(&repo).unwrap();
         assert!(
             materialized.entries.iter().any(|e| e.path == "a"),
@@ -1866,10 +1827,8 @@ mod tests {
 
     #[test]
     fn pre_existing_destination_is_restored_if_materialization_fails() {
-        // Verify the backup/restore contract of do_materialize: when every
-        // configured link mode fails after a pre-existing file was renamed
-        // aside (because existence was unknown at planning time), the original
-        // file must be restored so no user data is silently destroyed.
+        // A destination that appeared after planning must survive when every
+        // configured materialization strategy fails.
         let tmp = git_repo();
         let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
             .unwrap()
@@ -2813,7 +2772,7 @@ mod tests {
 
     /// A stale (or maliciously placed) file at the *old*, pre-collision-safe
     /// deterministic `<dest>.gat-rematerialize-tmp` sibling path must never be
-    /// touched: `do_rematerialize` now builds its temp representation inside
+    /// touched: materialization builds its temp representation inside
     /// a freshly created, uniquely named temp *directory*, so that old fixed
     /// sibling name is just an ordinary, unrelated user path as far as
     /// `--rematerialize` is concerned.

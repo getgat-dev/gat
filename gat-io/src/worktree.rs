@@ -119,12 +119,12 @@ impl<'root> WorktreeClient<'root> {
         )
     }
 
+    /// Publish a privately prepared representation. Failures preserve the destination.
     pub fn materialize(
         &self,
         cache: &crate::CacheClient,
         entry: &Entry,
         strategy: &MaterializationStrategy,
-        kind: MaterializeKind,
     ) -> Result<crate::StateMutation, WorktreeMutationError> {
         let proof = materialize(
             self.root,
@@ -132,7 +132,6 @@ impl<'root> WorktreeClient<'root> {
             &entry.path,
             &entry.oid,
             strategy,
-            kind,
         )?;
         Ok(crate::StateMutation::upsert(
             crate::MaterializedRow::from_entry(entry.clone(), proof),
@@ -238,28 +237,6 @@ fn confine_read(root: &Path, path: &GatPath) -> PathResult<PathBuf> {
     let dest = resolve_worktree_path(root, path)?;
     ancestor_symlink_check(root, &dest, "read")?;
     Ok(dest)
-}
-
-fn remove_leaf_symlink_if_present(dest: &Path) -> PathResult<()> {
-    match std::fs::symlink_metadata(dest) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            std::fs::remove_file(dest).map_err(|source| WorktreePathError::Io {
-                operation: "removing",
-                path: dest.to_path_buf(),
-                source,
-            })?;
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(source) => {
-            return Err(WorktreePathError::Io {
-                operation: "reading",
-                path: dest.to_path_buf(),
-                source,
-            });
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn is_infrastructure_path(rel: &str) -> bool {
@@ -833,13 +810,6 @@ pub(crate) fn ingest_file(
     })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MaterializeKind {
-    Create,
-    Replace,
-    Rematerialize,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum WorktreeMutationError {
     #[error(transparent)]
@@ -848,8 +818,6 @@ pub enum WorktreeMutationError {
     Cache(#[from] CacheError),
     #[error(transparent)]
     FileState(#[from] crate::file_state::FileStateError),
-    #[error("cannot rematerialize `{path}`: no file name")]
-    NoFileName { path: String },
     #[error("could not {operation} `{path}`")]
     Io {
         operation: &'static str,
@@ -861,109 +829,39 @@ pub enum WorktreeMutationError {
     Prune(#[from] PruneError),
 }
 
+/// Build privately beside the destination, then publish with one rename.
+/// Failed strategies can clean up only staged files, never existing user data.
 fn materialize(
     root: &Path,
     objects_dir: &Path,
     path: &GatPath,
     oid: &Oid,
     strategy: &MaterializationStrategy,
-    kind: MaterializeKind,
 ) -> Result<Option<StatProof>, WorktreeMutationError> {
-    match kind {
-        MaterializeKind::Create => {
-            let dest = confine_mutation(root, path)?;
-            materialize_create(objects_dir, path, oid, strategy, &dest)?;
-        }
-        MaterializeKind::Replace => {
-            let dest = confine_mutation(root, path)?;
-            if std::fs::symlink_metadata(&dest).is_ok_and(|metadata| metadata.is_dir()) {
-                std::fs::remove_file(&dest).map_err(|source| WorktreeMutationError::Io {
-                    operation: "removing",
-                    path: path.to_string(),
-                    source,
-                })?;
-            }
-            materialize_create(objects_dir, path, oid, strategy, &dest)?;
-        }
-        MaterializeKind::Rematerialize => {
-            let object = cache::object::cache_path_oid(objects_dir, oid);
-            let dest = confine_mutation(root, path)?;
-            let parent = dest.parent().unwrap_or_else(|| Path::new("."));
-            let tmp_dir = tempfile::Builder::new()
-                .prefix(".gat-rematerialize-")
-                .tempdir_in(parent)
-                .map_err(|source| WorktreeMutationError::Io {
-                    operation: "creating a temp directory in",
-                    path: path.to_string(),
-                    source,
-                })?;
-            let file_name = dest
-                .file_name()
-                .ok_or_else(|| WorktreeMutationError::NoFileName {
-                    path: path.to_string(),
-                })?;
-            let tmp = tmp_dir.path().join(file_name);
-            cache::object::materialize(&object, &tmp, strategy)?;
-            std::fs::rename(tmp, &dest).map_err(|source| WorktreeMutationError::Io {
-                operation: "swapping in",
-                path: path.to_string(),
-                source,
-            })?;
-        }
-    }
-    Ok(resolve_worktree_path(root, path)
-        .ok()
-        .and_then(|full| observe_regular_file_no_follow(&full)))
-}
-
-fn materialize_create(
-    objects_dir: &Path,
-    path: &GatPath,
-    oid: &Oid,
-    strategy: &MaterializationStrategy,
-    dest: &Path,
-) -> Result<(), WorktreeMutationError> {
+    let dest = confine_mutation(root, path)?;
+    let parent = dest.parent().expect("repository-relative file path");
+    std::fs::create_dir_all(parent).map_err(|source| WorktreeMutationError::Io {
+        operation: "creating parent directory for",
+        path: path.to_string(),
+        source,
+    })?;
+    let staging = tempfile::Builder::new()
+        .prefix(".gat-materialize-")
+        .tempdir_in(parent)
+        .map_err(|source| WorktreeMutationError::Io {
+            operation: "preparing materialization for",
+            path: path.to_string(),
+            source,
+        })?;
+    let staged = staging.path().join("object");
     let object = cache::object::cache_path_oid(objects_dir, oid);
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| WorktreeMutationError::Io {
-            operation: "creating",
-            path: path.to_string(),
-            source,
-        })?;
-    }
-    remove_leaf_symlink_if_present(dest)?;
-    let backup = if dest.exists() {
-        let backup = dest.with_extension(dest.extension().map_or_else(
-            || std::ffi::OsString::from("gat-tmp"),
-            |extension| {
-                let mut extension = extension.to_os_string();
-                extension.push(".gat-tmp");
-                extension
-            },
-        ));
-        std::fs::rename(dest, &backup).map_err(|source| WorktreeMutationError::Io {
-            operation: "backing up",
-            path: path.to_string(),
-            source,
-        })?;
-        Some(backup)
-    } else {
-        None
-    };
-    match cache::object::materialize(&object, dest, strategy) {
-        Ok(()) => {
-            if let Some(backup) = backup {
-                let _ = std::fs::remove_file(backup);
-            }
-            Ok(())
-        }
-        Err(error) => {
-            if let Some(backup) = backup {
-                let _ = std::fs::rename(backup, dest);
-            }
-            Err(error.into())
-        }
-    }
+    cache::object::materialize(&object, &staged, strategy)?;
+    std::fs::rename(&staged, &dest).map_err(|source| WorktreeMutationError::Io {
+        operation: "publishing",
+        path: path.to_string(),
+        source,
+    })?;
+    Ok(observe_regular_file_no_follow(&dest))
 }
 
 fn remove(root: &Path, path: &GatPath) -> Result<Option<PathBuf>, WorktreeMutationError> {
@@ -1211,7 +1109,6 @@ mod tests {
             &path("nested/file.bin"),
             &oid,
             &"copy".parse().unwrap(),
-            MaterializeKind::Create,
         )
         .unwrap();
 
@@ -1223,77 +1120,122 @@ mod tests {
     }
 
     #[test]
-    fn failed_replace_restores_the_existing_file_and_cleans_its_backup() {
-        let root = tempfile::tempdir().unwrap();
-        let cache = tempfile::tempdir().unwrap();
-        let destination = root.path().join("file.bin");
-        std::fs::write(&destination, b"local edit").unwrap();
-        let missing_oid = Oid::from_bytes(*blake3::hash(b"missing").as_bytes());
-
-        let error = materialize(
-            root.path(),
-            cache.path(),
-            &path("file.bin"),
-            &missing_oid,
-            &"copy".parse().unwrap(),
-            MaterializeKind::Replace,
-        )
-        .unwrap_err();
-
-        assert!(matches!(error, WorktreeMutationError::Cache(_)));
-        assert_eq!(std::fs::read(destination).unwrap(), b"local edit");
-        assert!(!root.path().join("file.bin.gat-tmp").exists());
+    fn materialization_preserves_user_backup_names_on_success_and_failure() {
+        for strategy in ["copy", "hardlink"] {
+            for available in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let cache = tempfile::tempdir().unwrap();
+                let destination = root.path().join("file.bin");
+                let sentinel = root.path().join("file.bin.gat-tmp");
+                std::fs::write(&destination, b"local edit").unwrap();
+                std::fs::write(&sentinel, b"unrelated user file").unwrap();
+                let oid = if available {
+                    cached_object(cache.path(), b"new content")
+                } else {
+                    Oid::from_bytes(*blake3::hash(b"missing").as_bytes())
+                };
+                let result = materialize(
+                    root.path(),
+                    cache.path(),
+                    &path("file.bin"),
+                    &oid,
+                    &strategy.parse().unwrap(),
+                );
+                if available {
+                    assert!(result.unwrap().is_some());
+                    assert_eq!(std::fs::read(&destination).unwrap(), b"new content");
+                } else {
+                    assert!(matches!(result, Err(WorktreeMutationError::Cache(_))));
+                    assert_eq!(std::fs::read(&destination).unwrap(), b"local edit");
+                }
+                assert_eq!(std::fs::read(&sentinel).unwrap(), b"unrelated user file");
+                assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
+            }
+        }
     }
 
     #[test]
-    fn replace_publishes_new_content_and_cleans_the_previous_file() {
-        let root = tempfile::tempdir().unwrap();
-        let cache = tempfile::tempdir().unwrap();
-        let destination = root.path().join("file.bin");
-        std::fs::write(&destination, b"old").unwrap();
-        let oid = cached_object(cache.path(), b"new");
-
-        materialize(
-            root.path(),
-            cache.path(),
-            &path("file.bin"),
-            &oid,
-            &"copy".parse().unwrap(),
-            MaterializeKind::Replace,
-        )
-        .unwrap();
-
-        assert_eq!(std::fs::read(destination).unwrap(), b"new");
-        assert!(!root.path().join("file.bin.gat-tmp").exists());
+    #[cfg(unix)]
+    fn materialization_preserves_destination_symlinks_on_failure_and_never_follows_them() {
+        for dangling in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let cache = tempfile::tempdir().unwrap();
+            let target = root.path().join("target");
+            if !dangling {
+                std::fs::write(&target, b"outside content").unwrap();
+            }
+            let destination = root.path().join("file.bin");
+            std::os::unix::fs::symlink(&target, &destination).unwrap();
+            let missing = Oid::from_bytes([0; 32]);
+            assert!(
+                materialize(
+                    root.path(),
+                    cache.path(),
+                    &path("file.bin"),
+                    &missing,
+                    &"copy".parse().unwrap()
+                )
+                .is_err()
+            );
+            assert_eq!(std::fs::read_link(&destination).unwrap(), target);
+            let oid = cached_object(cache.path(), b"new content");
+            materialize(
+                root.path(),
+                cache.path(),
+                &path("file.bin"),
+                &oid,
+                &"copy".parse().unwrap(),
+            )
+            .unwrap();
+            assert!(
+                !std::fs::symlink_metadata(&destination)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(std::fs::read(&destination).unwrap(), b"new content");
+            if dangling {
+                assert!(!target.exists());
+            } else {
+                assert_eq!(std::fs::read(&target).unwrap(), b"outside content");
+            }
+            assert_eq!(
+                std::fs::read_dir(root.path()).unwrap().count(),
+                if dangling { 1 } else { 2 }
+            );
+        }
     }
 
     #[test]
-    fn failed_rematerialize_preserves_the_existing_file_and_cleans_temp_state() {
-        let root = tempfile::tempdir().unwrap();
-        let cache = tempfile::tempdir().unwrap();
-        let destination = root.path().join("file.bin");
-        std::fs::write(&destination, b"local edit").unwrap();
-        let missing_oid = Oid::from_bytes(*blake3::hash(b"missing").as_bytes());
-
-        let error = materialize(
-            root.path(),
-            cache.path(),
-            &path("file.bin"),
-            &missing_oid,
-            &"copy".parse().unwrap(),
-            MaterializeKind::Rematerialize,
-        )
-        .unwrap_err();
-
-        assert!(matches!(error, WorktreeMutationError::Cache(_)));
-        assert_eq!(std::fs::read(destination).unwrap(), b"local edit");
-        assert!(std::fs::read_dir(root.path()).unwrap().all(|entry| {
-            !entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".gat-rematerialize-")
-        }));
+    fn failed_publication_preserves_directories_and_cleans_staged_content() {
+        for populated in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let cache = tempfile::tempdir().unwrap();
+            let destination = root.path().join("file.bin");
+            std::fs::create_dir(&destination).unwrap();
+            if populated {
+                std::fs::write(destination.join("child"), b"user data").unwrap();
+            }
+            let oid = cached_object(cache.path(), b"new content");
+            assert!(matches!(
+                materialize(
+                    root.path(),
+                    cache.path(),
+                    &path("file.bin"),
+                    &oid,
+                    &"copy".parse().unwrap()
+                ),
+                Err(WorktreeMutationError::Io { .. })
+            ));
+            assert!(destination.is_dir());
+            if populated {
+                assert_eq!(
+                    std::fs::read(destination.join("child")).unwrap(),
+                    b"user data"
+                );
+            }
+            assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+        }
     }
 
     #[test]

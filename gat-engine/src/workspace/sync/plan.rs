@@ -328,11 +328,8 @@ fn desired_only_pending(
     if validation == Validation::TrustState {
         // Under Validation::TrustState the planner intentionally skips all
         // working-tree access, so we do not know whether the destination
-        // exists.  Emit Materialize: do_materialize handles the case where
-        // a regular file is already present by renaming it aside before
-        // calling storage::materialize and restoring it if every mode fails,
-        // so a pre-existing user-owned file is never silently destroyed on
-        // an error.
+        // exists. Materialization prepares the new representation privately
+        // before publishing it, so failed strategies leave existing data intact.
         return Ok(PendingCache::new(
             d.clone(),
             MaterializationIntent::Materialize,
@@ -729,7 +726,7 @@ fn merge_desired_with_prior<D: Borrow<Entry>>(
                                     // Recreate this already-correct path
                                     // using the current materialization
                                     // strategy. Skip persisting
-                                    // `proof_refresh` here: `do_rematerialize`
+                                    // `proof_refresh` here: materialization
                                     // records a fresh stat proof off the
                                     // representation it's about to write,
                                     // making any proof observed here
@@ -1766,10 +1763,8 @@ mod tests {
         // the desired path, sync must succeed and materialize the file rather
         // than producing a link-mode-dependent "delete then fail" error.
         // Under Validation::TrustState the planner emits Materialize without probing
-        // the filesystem; do_materialize handles a pre-existing regular file by
-        // renaming it aside before calling storage::materialize (which removes
-        // dest as cleanup between fallback modes), then restores it only if
-        // every mode fails so the pre-existing file is never silently destroyed.
+        // the filesystem. All strategies prepare their output privately before
+        // publication, leaving a pre-existing destination intact on failure.
         let tmp = git_repo();
         let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
             .unwrap()
