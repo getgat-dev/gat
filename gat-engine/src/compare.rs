@@ -275,47 +275,8 @@ fn entry_source(entries: impl IntoIterator<Item = Entry>) -> impl FnMut() -> Res
     move || Ok(iter.next())
 }
 
-/// The persisted rows a scoped selection matches, when the scope can be
-/// resolved by targeting exactly one shard.
-///
-/// A `--path` scope selects the path *and its descendants*, and hash
-/// sharding gives descendants no locality -- so this only applies to a
-/// **flat** snapshot, where the single shard *is* the entire persisted
-/// state: `Lock::parse` rejects any path that is also a directory prefix
-/// of another path in the same parse, so a row at `scope` in that one
-/// shard provably has no descendant anywhere else, because there is
-/// nowhere else. A sharded snapshot cannot make this proof cheaply --
-/// placement hashes the whole path string, giving a path and its
-/// descendants no shard locality to check without visiting every shard,
-/// which would defeat the shortcut -- so a sharded snapshot always
-/// returns `None` here and falls through to visiting shards.
-///
-/// `None` means "no such shortcut": the caller must visit shards.
-///
-/// This is one filtered parse of the single flat shard (`LockSnapshot::shard_rows_selected`,
-/// `keep = selection.matches`), not an existence check followed by a
-/// second, separately-filtered parse: `selection` already selects the
-/// scope path *and* its descendants, so checking `entry_for_path(scope)`
-/// first (and falling through to a second parse when it is absent but a
-/// descendant exists) would parse the same shard's bytes twice for the
-/// common "directory scope" case. Doing the filtered parse directly
-/// covers both the exact-file and directory-descendant cases in one pass.
-fn exact_scope_rows(snapshot: &LockSnapshot, selection: &Selection) -> Result<Option<Vec<Entry>>> {
-    if selection.scope_path().is_none() {
-        return Ok(None);
-    }
-    if !snapshot.shard_levels().is_flat() {
-        return Ok(None);
-    }
-    let Some(shard) = snapshot.shards().first() else {
-        return Ok(Some(Vec::new()));
-    };
-    Ok(Some(snapshot.shard_rows_selected(shard, selection)?))
-}
-
-/// Which logical shard each side's shard vector holds for one id, or
-/// `None` on the side missing it. Both inputs must already be sorted by
-/// id (as [`LockSnapshot::shards`] returns) -- this walks each vector
+/// Pair shards by logical ID, retaining which side supplies each shard.
+/// Both inputs must already be sorted by id (as [`LockSnapshot::shards`] returns) -- this walks each vector
 /// once with two cursors, yielding one pair at a time instead of
 /// collecting every pair into a `Vec` first, so pairing every id present
 /// on either side costs `O(Q)` total time and `O(1)` extra space, not
@@ -328,7 +289,7 @@ struct ShardIdMerge<'a> {
 }
 
 impl<'a> Iterator for ShardIdMerge<'a> {
-    type Item = (Option<&'a SnapshotShard>, Option<&'a SnapshotShard>);
+    type Item = OrderedPair<&'a SnapshotShard, &'a SnapshotShard>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match take_ordered(
@@ -338,16 +299,16 @@ impl<'a> Iterator for ShardIdMerge<'a> {
         )? {
             OrderedPair::Left(l) => {
                 self.li += 1;
-                Some((Some(l), None))
+                Some(OrderedPair::Left(l))
             }
             OrderedPair::Right(r) => {
                 self.ri += 1;
-                Some((None, Some(r)))
+                Some(OrderedPair::Right(r))
             }
             OrderedPair::Both(l, r) => {
                 self.li += 1;
                 self.ri += 1;
-                Some((Some(l), Some(r)))
+                Some(OrderedPair::Both(l, r))
             }
         }
     }
@@ -365,30 +326,34 @@ const fn merge_shards_by_id<'a>(
     }
 }
 
-/// Merge-walk one flat shard on each side directly, pulling one pending
-/// row from each with [`LockSnapshot::with_shard_rows_pull`] instead of
-/// collecting either into a `Vec<Entry>` first. Used when both
-/// sides' logical shard *is* their entire persisted state. A missing
-/// shard on either side (an empty snapshot) is treated as an empty
-/// source.
-fn stream_flat_shards(
+/// Merge a logical shard pair while streaming at least one side.
+fn stream_shards(
     from: &LockSnapshot,
-    left_shard: Option<&SnapshotShard>,
     to: &LockSnapshot,
-    right_shard: Option<&SnapshotShard>,
+    pair: OrderedPair<&SnapshotShard, &SnapshotShard>,
     selection: &Selection,
     unchanged: Unchanged,
     out: &mut Vec<ChangedRow>,
 ) -> Result<()> {
-    match (left_shard, right_shard) {
-        (None, None) => Ok(()),
-        (Some(l), None) => from.with_shard_rows_pull(l, selection, |left| {
-            merge_ordered(left, || Ok(None::<Entry>), unchanged, out)
+    match pair {
+        OrderedPair::Left(l) => from.with_shard_rows_pull(l, selection, |left| {
+            merge_ordered(left, || Ok(None), unchanged, out)
         }),
-        (None, Some(r)) => to.with_shard_rows_pull(r, selection, |right| {
+        OrderedPair::Right(r) => to.with_shard_rows_pull(r, selection, |right| {
             merge_ordered(|| Ok(None), right, unchanged, out)
         }),
-        (Some(l), Some(r)) => from.with_shard_rows_pull(l, selection, |left| {
+        OrderedPair::Both(l, r)
+            if selection.scope_path().is_some() || !from.shard_levels().is_flat() =>
+        {
+            // Release the left blob and validation index before opening the
+            // right. Scoped rows or one shard stay bounded without retaining
+            // two full backing blobs for a potentially tiny selection.
+            let left = from.shard_rows_selected(l, selection)?;
+            to.with_shard_rows_pull(r, selection, |right| {
+                merge_ordered(entry_source(left), right, unchanged, out)
+            })
+        }
+        OrderedPair::Both(l, r) => from.with_shard_rows_pull(l, selection, |left| {
             to.with_shard_rows_pull(r, selection, |right| {
                 merge_ordered(left, right, unchanged, out)
             })
@@ -405,73 +370,19 @@ fn compare_snapshots(
     unchanged: Unchanged,
 ) -> Result<Vec<ChangedRow>> {
     let mut out = Vec::new();
-    // Exact-path scope, both sides flat: each side can target its one
-    // shard directly. Only attempted when both shapes are already known
-    // to be `Flat` -- `exact_scope_rows` returns `None` for any sharded
-    // side, so calling it eagerly for a cross-shape pair (one flat, one
-    // sharded) would parse the flat side's shard here only to discard
-    // the result when the sharded side comes back `None`, then reparse
-    // that same flat shard again in the cross-shape fallback below.
-    if from.shard_levels().is_flat()
-        && to.shard_levels().is_flat()
-        && let (Some(left), Some(right)) = (
-            exact_scope_rows(from, selection)?,
-            exact_scope_rows(to, selection)?,
-        )
-    {
-        merge_ordered(entry_source(left), entry_source(right), unchanged, &mut out)?;
-        return Ok(out);
-    }
     if from.shard_levels() == to.shard_levels() {
-        if from.shard_levels().is_flat() {
-            // Flat and (by construction, since a scoped flat pair already
-            // returned via the exact-path shortcut above) unscoped: the
-            // one logical shard on each side *is* the entire persisted
-            // state, so merge-walk both directly instead of collecting
-            // either whole shard into a `Vec<Entry>` first.
-            let left_shard = from.shards().first();
-            let right_shard = to.shards().first();
-            let identical_unneeded = matches!(
-                (left_shard, right_shard),
-                (Some(l), Some(r)) if l.has_same_blob(r)
-            ) && !unchanged.keeps();
-            if !identical_unneeded {
-                stream_flat_shards(
-                    from,
-                    left_shard,
-                    to,
-                    right_shard,
-                    selection,
-                    unchanged,
-                    &mut out,
-                )?;
-            }
-            return Ok(out);
-        }
-        for (left, right) in merge_shards_by_id(from.shards(), to.shards()) {
-            // Git-to-Git: an identical blob id means byte-identical rows,
-            // so an unchanged-dropping comparison can skip the shard
-            // without reading or parsing either side.
-            if let (Some(left), Some(right)) = (left, right)
+        for pair in merge_shards_by_id(from.shards(), to.shards()) {
+            if let OrderedPair::Both(left, right) = &pair
                 && left.has_same_blob(right)
                 && !unchanged.keeps()
             {
                 continue;
             }
-            let left_rows = match left {
-                Some(shard) => from.shard_rows_selected(shard, selection)?,
-                None => Vec::new(),
-            };
-            let right_rows = match right {
-                Some(shard) => to.shard_rows_selected(shard, selection)?,
-                None => Vec::new(),
-            };
-            merge_ordered(
-                entry_source(left_rows),
-                entry_source(right_rows),
-                unchanged,
-                &mut out,
-            )?;
+            stream_shards(from, to, pair, selection, unchanged, &mut out)?;
+        }
+        // Rows are ordered within each shard; only sharded output needs sorting.
+        if !from.shard_levels().is_flat() {
+            out.sort_by(|a, b| a.path.cmp(&b.path));
         }
     } else {
         // Cross-shape fallback (flat vs sharded, or different depths):
@@ -485,7 +396,6 @@ fn compare_snapshots(
             &mut out,
         )?;
     }
-    out.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(out)
 }
 
@@ -550,20 +460,6 @@ fn merge_persisted_shards_with_current_groups(
     Ok(())
 }
 
-/// [`compare_snapshot_with_current`], with the physical on-disk shape
-/// resolved internally instead of being the caller's own responsibility.
-/// A repository with nothing published yet compares as flat, matching
-/// `compare_snapshot_with_current`'s long-standing behavior for that case.
-fn compare_snapshot_with_repo(
-    from: &LockSnapshot,
-    store: &StateStore,
-    current_levels: LockShardLevels,
-    selection: &Selection,
-    unchanged: Unchanged,
-) -> Result<Vec<ChangedRow>> {
-    compare_snapshot_with_current(from, store, current_levels, selection, unchanged)
-}
-
 /// Repository-bound semantic comparison service.
 pub struct ComparisonService<'repo> {
     repo: &'repo Repository,
@@ -595,7 +491,7 @@ impl CurrentComparison<'_> {
     ) -> Result<Vec<ChangedRow>> {
         let reader = GitReader::open(self.repo.layout())
             .map_err(|source| CompareError::new(CompareErrorKind::Repository, source))?;
-        compare_snapshot_with_repo(
+        compare_snapshot_with_current(
             &reader.staged_lock_snapshot()?,
             &self.store,
             self.levels,
@@ -612,7 +508,7 @@ impl CurrentComparison<'_> {
     ) -> Result<Vec<ChangedRow>> {
         let reader = GitReader::open(self.repo.layout())
             .map_err(|source| CompareError::new(CompareErrorKind::Repository, source))?;
-        compare_snapshot_with_repo(
+        compare_snapshot_with_current(
             &reader.lock_snapshot_at(from)?,
             &self.store,
             self.levels,
@@ -661,7 +557,7 @@ impl<'repo> ComparisonService<'repo> {
             .map_err(|source| CompareError::new(CompareErrorKind::Repository, source))?;
         let staged = reader.staged_lock_snapshot()?;
         let (store, current_levels) = self.current_state()?;
-        compare_snapshot_with_repo(&staged, &store, current_levels, selection, unchanged)
+        compare_snapshot_with_current(&staged, &store, current_levels, selection, unchanged)
     }
 
     /// Compares two persisted desired snapshots.
@@ -690,7 +586,7 @@ impl<'repo> ComparisonService<'repo> {
             .map_err(|source| CompareError::new(CompareErrorKind::Repository, source))?;
         let from = reader.lock_snapshot_at(from)?;
         let (store, current_levels) = self.current_state()?;
-        compare_snapshot_with_repo(&from, &store, current_levels, selection, unchanged)
+        compare_snapshot_with_current(&from, &store, current_levels, selection, unchanged)
     }
 }
 
@@ -702,46 +598,20 @@ fn compare_snapshot_with_current(
     unchanged: Unchanged,
 ) -> Result<Vec<ChangedRow>> {
     let mut out = Vec::new();
-    // Exact-path scope: the persisted side parses exactly the one shard
-    // that can hold it, and the current side is one indexed query.
-    if let Some(left_rows) = exact_scope_rows(from, selection)? {
+    if from.shard_levels().is_flat() {
         store.with_desired_rows(DesiredQuery::for_selection(selection), |mut rows| {
-            merge_ordered(
-                entry_source(left_rows),
-                || Ok(rows.next()?.map(DesiredRow::into_entry)),
-                unchanged,
-                &mut out,
-            )
+            let right = || Ok(rows.next()?.map(DesiredRow::into_entry));
+            match from.shards().first() {
+                Some(shard) => from.with_shard_rows_pull(shard, selection, |left| {
+                    merge_ordered(left, right, unchanged, &mut out)
+                }),
+                None => merge_ordered(|| Ok(None), right, unchanged, &mut out),
+            }
         })?;
         return Ok(out);
     }
     if from.shard_levels() == current_levels && !from.is_empty() {
-        if selection.scope_path().is_none() && from.shard_levels().is_flat() {
-            // Flat and unscoped: the one persisted shard *is* the whole
-            // repository, and the current side has no shard structure
-            // worth grouping by either (there is only ever one group).
-            // Stream both sides directly instead of buffering either as
-            // a whole-state `Vec<Entry>`: the persisted shard is pulled
-            // via `with_shard_rows_pull` (bounded-memory streaming for
-            // the certified `path`-ordered case), and the current
-            // side is one ordinary `path`-ordered SQLite cursor -- so a
-            // full flat comparison holds at most one pending row per side
-            // in the common case, not a repository-sized collection on
-            // either.
-            let shard = from
-                .shards()
-                .first()
-                .expect("Flat, non-empty snapshot has exactly one shard");
-            store.with_desired_rows(
-                DesiredQuery::for_selection(selection),
-                |mut rows| -> Result<()> {
-                    let mut next_current = || Ok(rows.next()?.map(DesiredRow::into_entry));
-                    from.with_shard_rows_pull(shard, selection, |next_left| {
-                        merge_ordered(next_left, &mut next_current, unchanged, &mut out)
-                    })
-                },
-            )?;
-        } else if selection.scope_path().is_none() {
+        if selection.scope_path().is_none() {
             // Unscoped, sharded: SQLite has no lexical range to narrow
             // with, so storage would scan every current row regardless.
             // Rather than collecting that whole scan into a `BTreeMap`,
@@ -958,11 +828,13 @@ mod tests {
             shard("gat.lock/dd.tsv"),
         ];
         let ids: Vec<(Option<String>, Option<String>)> = merge_shards_by_id(&left, &right)
-            .map(|(l, r)| {
-                (
-                    l.map(|s| s.id.to_canonical_string()),
-                    r.map(|s| s.id.to_canonical_string()),
-                )
+            .map(|pair| match pair {
+                OrderedPair::Left(l) => (Some(l.id.to_canonical_string()), None),
+                OrderedPair::Right(r) => (None, Some(r.id.to_canonical_string())),
+                OrderedPair::Both(l, r) => (
+                    Some(l.id.to_canonical_string()),
+                    Some(r.id.to_canonical_string()),
+                ),
             })
             .collect();
         assert_eq!(
@@ -1145,68 +1017,48 @@ mod tests {
         );
     }
 
-    /// `exact_scope_rows` must never take its shortcut for a sharded
-    /// snapshot, even when a row exists at the scope path -- hash
-    /// placement gives a path and its descendants no shard locality, so a
-    /// sharded snapshot can never cheaply prove no descendant exists
-    /// elsewhere. A flat snapshot's one shard *is* the whole state, so the
-    /// shortcut is safe (and taken) there.
     #[test]
-    fn exact_scope_rows_only_shortcuts_a_flat_snapshot() {
-        use crate::test_harness::{commit_all, git, test_repo};
-        use gat_core::lock::Lock;
-
-        let make_repo = |shard_levels: gat_core::lock::LockShardLevels| -> (crate::test_harness::TestRepo, std::path::PathBuf) {
-            let tmp = test_repo();
-            let root = tmp.path().to_path_buf();
-            let layout = gat_io::RepositoryLayout::at(root.clone());
-            let mut lock = Lock::default();
-            lock.upsert_many([
-                Entry {
-                    path: gp("foo"),
-                    oid: Oid::from_hex(&format!("{:064x}", 1)).unwrap(),
-                },
-                Entry {
-                    path: gp("foo-sibling.bin"),
-                    oid: Oid::from_hex(&format!("{:064x}", 2)).unwrap(),
-                },
-            ]);
-            gat_io::LockStore::publish_repository(&layout, &lock, shard_levels).unwrap();
-            git(&root, &["add", "-A"]);
-            commit_all(&root, "persist lock");
-            (tmp, root)
+    fn unchanged_scoped_snapshots_skip_blobs_and_keep_mode_streams_selected_rows() {
+        let tmp = crate::test_harness::test_repo();
+        let layout = layout(tmp.path());
+        let lock = gat_core::lock::Lock {
+            entries: vec![
+                entry("data/a", "a"),
+                entry("data/b", "b"),
+                entry("other", "c"),
+            ],
         };
-
-        let selection = scoped_selection(std::path::Path::new("foo"));
-
-        let (_tmp, gix_repo) = make_repo(gat_core::lock::LockShardLevels::FLAT);
-        let snapshot = LockSnapshot::at_rev(
-            &layout(&gix_repo),
-            &gat_core::git::GitRevisionSpec::from("HEAD"),
-        )
-        .unwrap();
-        assert!(snapshot.shard_levels().is_flat());
-        let rows = exact_scope_rows(&snapshot, &selection).unwrap();
-        assert!(
-            rows.is_some(),
-            "flat snapshots take the exact-scope shortcut"
-        );
-
-        let (_tmp, gix_repo) = make_repo(gat_core::lock::LockShardLevels::new(1).unwrap());
-        let snapshot = LockSnapshot::at_rev(
-            &layout(&gix_repo),
-            &gat_core::git::GitRevisionSpec::from("HEAD"),
-        )
-        .unwrap();
-        assert_eq!(
-            snapshot.shard_levels(),
-            gat_core::lock::LockShardLevels::new(1).unwrap()
-        );
-        let rows = exact_scope_rows(&snapshot, &selection).unwrap();
-        assert!(
-            rows.is_none(),
-            "sharded snapshots must fall through to visiting shards, never shortcut"
-        );
+        for levels in [LockShardLevels::FLAT, LockShardLevels::new(1).unwrap()] {
+            gat_io::LockStore::publish_repository(&layout, &lock, levels).unwrap();
+            crate::test_harness::git(tmp.path(), &["add", "-A"]);
+            let snapshot = LockSnapshot::staged(&layout).unwrap();
+            for scope in ["data", "data/a", "absent"] {
+                let selection = scoped_selection(std::path::Path::new(scope));
+                let before = gat_io::git_lock_snapshot_test_support::shard_blob_reads();
+                assert!(
+                    compare_snapshots(&snapshot, &snapshot, &selection, Unchanged::Drop)
+                        .unwrap()
+                        .is_empty()
+                );
+                assert_eq!(
+                    gat_io::git_lock_snapshot_test_support::shard_blob_reads(),
+                    before
+                );
+                let expected: Vec<_> = lock
+                    .entries
+                    .iter()
+                    .filter(|entry| selection.matches(&entry.path))
+                    .map(|entry| ChangedRow {
+                        path: entry.path.clone(),
+                        change: RowChange::Unchanged { oid: entry.oid },
+                    })
+                    .collect();
+                assert_eq!(
+                    compare_snapshots(&snapshot, &snapshot, &selection, Unchanged::Keep).unwrap(),
+                    expected
+                );
+            }
+        }
     }
 
     /// Structural coverage for current-vs-persisted access plans, not just
@@ -1367,7 +1219,7 @@ mod tests {
     /// The persisted-vs-persisted counterpart of the test above: a full
     /// (unscoped) comparison between two **flat** persisted snapshots
     /// must merge-walk both single shards directly
-    /// ([`stream_flat_shards`]) rather than collecting either whole
+    /// ([`stream_shards`]) rather than collecting either whole
     /// shard into a `Vec<Entry>` first. Assert exactly one
     /// shard blob is parsed per side (two total), not more.
     #[test]
@@ -1424,11 +1276,7 @@ mod tests {
 
     /// A `--path`-scoped comparison between a flat snapshot and a sharded
     /// one (cross-shape) must parse the flat side's single shard exactly
-    /// once. `exact_scope_rows` returns `Some` for the flat side alone
-    /// (never for the sharded side), so calling it eagerly for both sides
-    /// before checking that *both* returned `Some` would parse the flat
-    /// shard here only to discard the result and reparse it again in the
-    /// cross-shape fallback.
+    /// once, without an eager read that is discarded before the cross-shape plan.
     #[test]
     fn cross_shape_scoped_comparison_parses_the_flat_side_only_once() {
         use crate::test_harness::{git, test_repo};

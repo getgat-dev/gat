@@ -230,7 +230,7 @@ fn exact_exclude_pattern(path: &str) -> String {
 /// nothing changed. Shared tail of lock-backed and store-backed generation
 /// once each has produced its `exact` set. `exact` entries are Gat-managed
 /// paths and are rendered through [`exact_exclude_pattern`]; `git.ignore_patterns`
-/// are hand-authored and stay verbatim.
+/// are hand-authored; comments matching block markers gain a comment prefix.
 fn render(
     repo: &Repo,
     cfg: &gat_core::config::Config,
@@ -256,6 +256,10 @@ fn render_with_proof(
     let mut body = String::new();
     let mut count = 0;
     for pattern in cfg.git.effective_ignore_patterns() {
+        // Configured comments must not become managed-block delimiters.
+        if matches!(pattern.as_str(), BEGIN | END) {
+            body.push_str("# ");
+        }
         body.push_str(pattern.as_str());
         body.push('\n');
         count += 1;
@@ -707,6 +711,34 @@ mod tests {
         let text = std::fs::read_to_string(tmp.path().join(".git/info/exclude")).unwrap();
         assert!(text.contains("big.bin"));
         assert!(!text.contains(".gat/"));
+    }
+
+    #[test]
+    fn configured_marker_comments_cannot_split_the_managed_block() {
+        let tmp = git_repo();
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
+        let path = tmp.path().join(".git/info/exclude");
+        set_ignore_patterns(&repo, &[BEGIN, "*.model", END, "*.weights"]);
+        for eol in ["\n", "\r\n"] {
+            let user = format!("# user rules{eol}*.private{eol}");
+            std::fs::write(&path, &user).unwrap();
+            sync_from_lock(&repo, &Lock::default(), false).unwrap();
+            let installed = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(installed.lines().filter(|line| *line == BEGIN).count(), 1);
+            assert_eq!(installed.lines().filter(|line| *line == END).count(), 1);
+            assert!(is_ignored(&installed, "a.model"));
+            assert!(is_ignored(&installed, "a.weights"));
+            assert!(
+                !sync_from_lock(&repo, &Lock::default(), false)
+                    .unwrap()
+                    .changed
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), installed);
+            assert!(remove_managed_block(&repo).unwrap());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), user);
+        }
     }
 
     #[test]
