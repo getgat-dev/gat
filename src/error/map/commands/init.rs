@@ -146,8 +146,8 @@ mod tests {
         let tmp = test_support::git_repo_with_initial_commit();
         let layout = gat_io::RepositoryLayout::at(tmp.path().to_path_buf());
         let integration = gat_io::GitIntegration::open(&layout).unwrap();
-        let name = "post-checkout";
-        let path = tmp.path().join(".git/hooks").join(name);
+        let name = gat_core::git::ManagedHook::PostCheckout;
+        let path = tmp.path().join(".git/hooks").join(name.as_str());
         std::fs::create_dir_all(&path).unwrap();
         let source = integration.write_hook(name, "payload").unwrap_err();
         assert_eq!(source.kind(), gat_io::GitIntegrationErrorKind::Write);

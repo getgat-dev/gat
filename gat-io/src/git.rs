@@ -363,8 +363,18 @@ mod tests {
         let before = test_support::common_dir_resolutions();
 
         let integration = GitIntegration::open(&layout).unwrap();
-        assert_eq!(integration.read_hook("pre-commit").unwrap(), None);
-        assert_eq!(integration.read_hook("pre-push").unwrap(), None);
+        assert_eq!(
+            integration
+                .read_hook(gat_core::git::ManagedHook::PostCheckout)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            integration
+                .read_hook(gat_core::git::ManagedHook::PostMerge)
+                .unwrap(),
+            None
+        );
 
         assert_eq!(test_support::common_dir_resolutions() - before, 1);
     }

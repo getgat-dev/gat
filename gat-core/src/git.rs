@@ -13,6 +13,27 @@
 
 use std::fmt;
 
+/// A Git hook managed by Gat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ManagedHook {
+    PostCheckout,
+    PostMerge,
+    PostRewrite,
+}
+
+impl ManagedHook {
+    pub const ALL: [Self; 3] = [Self::PostCheckout, Self::PostMerge, Self::PostRewrite];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PostCheckout => "post-checkout",
+            Self::PostMerge => "post-merge",
+            Self::PostRewrite => "post-rewrite",
+        }
+    }
+}
+
 /// An unresolved, opaque Git revision expression -- a branch name, tag
 /// name, `HEAD~3`, a partial or full commit hash, or any other spelling
 /// `git rev-parse`/`gix::Repository::rev_parse_single` accepts.

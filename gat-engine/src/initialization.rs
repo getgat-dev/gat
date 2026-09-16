@@ -9,26 +9,7 @@ use crate::repository::Repository;
 const BEGIN: &str = "# >>> gat >>>";
 const END: &str = "# <<< gat <<<";
 
-/// A Git hook managed by Gat.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ManagedHook {
-    PostCheckout,
-    PostMerge,
-    PostRewrite,
-}
-
-impl ManagedHook {
-    pub const ALL: [Self; 3] = [Self::PostCheckout, Self::PostMerge, Self::PostRewrite];
-
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::PostCheckout => "post-checkout",
-            Self::PostMerge => "post-merge",
-            Self::PostRewrite => "post-rewrite",
-        }
-    }
-}
+pub use gat_core::git::ManagedHook;
 
 /// Whether an idempotent initialization step changed its target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,7 +188,7 @@ impl InitializationService<'_> {
         for hook in ManagedHook::ALL {
             let existing = self
                 .git
-                .read_hook(hook.as_str())
+                .read_hook(hook)
                 .map_err(InitializationError::from)?
                 .unwrap_or_default();
             let body = format!("gat hook {} \"$@\" || exit $?\n", hook.as_str());
@@ -221,7 +202,7 @@ impl InitializationService<'_> {
                 continue;
             }
             self.git
-                .write_hook(hook.as_str(), &updated)
+                .write_hook(hook, &updated)
                 .map_err(InitializationError::from)?;
             changed.push(hook);
         }
@@ -233,7 +214,7 @@ impl InitializationService<'_> {
         for hook in ManagedHook::ALL {
             let Some(existing) = self
                 .git
-                .read_hook(hook.as_str())
+                .read_hook(hook)
                 .map_err(InitializationError::from)?
             else {
                 continue;
@@ -246,11 +227,11 @@ impl InitializationService<'_> {
                 .all(|line| line.trim().is_empty() || line.trim() == "#!/bin/sh");
             if rest_is_empty {
                 self.git
-                    .remove_hook(hook.as_str())
+                    .remove_hook(hook)
                     .map_err(InitializationError::from)?;
             } else {
                 self.git
-                    .write_hook(hook.as_str(), &updated)
+                    .write_hook(hook, &updated)
                     .map_err(InitializationError::from)?;
             }
             changed.push(hook);

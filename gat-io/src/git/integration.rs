@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use super::BoxedSource;
 use crate::RepositoryLayout;
+use gat_core::git::ManagedHook;
 
 const ATTR_BEGIN: &str = "# >>> gat >>>";
 const ATTR_END: &str = "# <<< gat <<<";
@@ -139,16 +140,23 @@ impl GitIntegration {
         Ok(Self { common_dir })
     }
 
-    pub fn read_hook(&self, name: &str) -> Result<Option<String>, GitIntegrationError> {
-        read_optional_text(&self.common_dir.join("hooks").join(name), true)
+    /// Only managed hook names can address the hook storage capability.
+    ///
+    /// ```compile_fail
+    /// fn escape(integration: &gat_io::GitIntegration) {
+    ///     integration.read_hook("../config");
+    /// }
+    /// ```
+    pub fn read_hook(&self, name: ManagedHook) -> Result<Option<String>, GitIntegrationError> {
+        read_optional_text(&self.common_dir.join("hooks").join(name.as_str()), true)
     }
 
     #[allow(
         clippy::missing_panics_doc,
         reason = "Repository hook paths are constructed with a parent directory"
     )]
-    pub fn write_hook(&self, name: &str, contents: &str) -> Result<(), GitIntegrationError> {
-        let path = self.common_dir.join("hooks").join(name);
+    pub fn write_hook(&self, name: ManagedHook, contents: &str) -> Result<(), GitIntegrationError> {
+        let path = self.common_dir.join("hooks").join(name.as_str());
         let dir = path.parent().expect("hook path has a parent");
         std::fs::create_dir_all(dir).map_err(|source| {
             GitIntegrationError::io(
@@ -197,64 +205,63 @@ impl GitIntegration {
         Ok(())
     }
 
-    pub fn remove_hook(&self, name: &str) -> Result<(), GitIntegrationError> {
-        remove_file(&self.common_dir.join("hooks").join(name))
+    pub fn remove_hook(&self, name: ManagedHook) -> Result<(), GitIntegrationError> {
+        remove_file(&self.common_dir.join("hooks").join(name.as_str()))
     }
 
     pub fn install_merge_driver(&self) -> Result<GitIntegrationStatus, GitIntegrationError> {
         let path = self.common_dir.join("config");
-        let mut file = load_config(&path)?;
-        let mut section = file
-            .section_mut_or_create_new("merge", "gat-lock")
-            .map_err(|source| {
-                GitIntegrationError::new(
-                    GitIntegrationErrorKind::Config,
-                    &path,
-                    "editing merge.gat-lock section",
-                    source,
-                )
-            })?;
-        if value_is(&section, "name", MERGE_DRIVER_HUMAN_NAME)
-            && value_is(&section, "driver", MERGE_DRIVER_COMMAND)
-        {
-            return Ok(GitIntegrationStatus::Unchanged);
-        }
-        section
-            .set("name", MERGE_DRIVER_HUMAN_NAME)
-            .map_err(|source| {
-                GitIntegrationError::new(
-                    GitIntegrationErrorKind::Config,
-                    &path,
-                    "setting merge.gat-lock.name",
-                    source,
-                )
-            })?;
-        section
-            .set("driver", MERGE_DRIVER_COMMAND)
-            .map_err(|source| {
-                GitIntegrationError::new(
-                    GitIntegrationErrorKind::Config,
-                    &path,
-                    "setting merge.gat-lock.driver",
-                    source,
-                )
-            })?;
-        drop(section);
-        persist_config(&path, &file)?;
-        Ok(GitIntegrationStatus::Changed)
+        mutate_config(&path, |file| {
+            let mut section = file
+                .section_mut_or_create_new("merge", "gat-lock")
+                .map_err(|source| {
+                    GitIntegrationError::new(
+                        GitIntegrationErrorKind::Config,
+                        &path,
+                        "editing merge.gat-lock section",
+                        source,
+                    )
+                })?;
+            if value_is(&section, "name", MERGE_DRIVER_HUMAN_NAME)
+                && value_is(&section, "driver", MERGE_DRIVER_COMMAND)
+            {
+                return Ok(GitIntegrationStatus::Unchanged);
+            }
+            section
+                .set("name", MERGE_DRIVER_HUMAN_NAME)
+                .map_err(|source| {
+                    GitIntegrationError::new(
+                        GitIntegrationErrorKind::Config,
+                        &path,
+                        "setting merge.gat-lock.name",
+                        source,
+                    )
+                })?;
+            section
+                .set("driver", MERGE_DRIVER_COMMAND)
+                .map_err(|source| {
+                    GitIntegrationError::new(
+                        GitIntegrationErrorKind::Config,
+                        &path,
+                        "setting merge.gat-lock.driver",
+                        source,
+                    )
+                })?;
+            Ok(GitIntegrationStatus::Changed)
+        })
     }
 
     pub fn uninstall_merge_driver(&self) -> Result<GitIntegrationStatus, GitIntegrationError> {
         let path = self.common_dir.join("config");
-        let mut file = load_config(&path)?;
-        if file
-            .remove_section("merge", Some("gat-lock".into()))
-            .is_none()
-        {
-            return Ok(GitIntegrationStatus::Unchanged);
-        }
-        persist_config(&path, &file)?;
-        Ok(GitIntegrationStatus::Changed)
+        mutate_config(&path, |file| {
+            if file
+                .remove_section("merge", Some("gat-lock".into()))
+                .is_none()
+            {
+                return Ok(GitIntegrationStatus::Unchanged);
+            }
+            Ok(GitIntegrationStatus::Changed)
+        })
     }
 
     pub fn install_merge_attributes(&self) -> Result<GitIntegrationStatus, GitIntegrationError> {
@@ -340,9 +347,10 @@ fn remove_file(path: &Path) -> Result<(), GitIntegrationError> {
 }
 
 fn value_is(section: &gix_config::file::SectionMut<'_>, key: &str, expected: &str) -> bool {
-    section
-        .value(key)
-        .is_some_and(|value| value.to_vec() == expected.as_bytes())
+    section.value(key).is_some_and(|value| {
+        let bytes: &[u8] = value.as_ref();
+        bytes == expected.as_bytes()
+    })
 }
 
 fn load_config(path: &Path) -> Result<gix_config::File, GitIntegrationError> {
@@ -372,7 +380,11 @@ fn load_config(path: &Path) -> Result<gix_config::File, GitIntegrationError> {
     )
 }
 
-fn persist_config(path: &Path, file: &gix_config::File) -> Result<(), GitIntegrationError> {
+/// Hold Git's config lock across the complete read–modify–write operation.
+fn mutate_config(
+    path: &Path,
+    edit: impl FnOnce(&mut gix_config::File) -> Result<GitIntegrationStatus, GitIntegrationError>,
+) -> Result<GitIntegrationStatus, GitIntegrationError> {
     let mut lock = gix_lock::File::acquire_to_update_resource(
         path,
         gix_lock::acquire::Fail::Immediately,
@@ -392,6 +404,10 @@ fn persist_config(path: &Path, file: &gix_config::File) -> Result<(), GitIntegra
             source,
         ),
     })?;
+    let mut file = load_config(path)?;
+    if edit(&mut file)? == GitIntegrationStatus::Unchanged {
+        return Ok(GitIntegrationStatus::Unchanged);
+    }
     file.write_to(&mut lock).map_err(|source| {
         GitIntegrationError::io(
             GitIntegrationErrorKind::Config,
@@ -408,7 +424,7 @@ fn persist_config(path: &Path, file: &gix_config::File) -> Result<(), GitIntegra
             source.error,
         )
     })?;
-    Ok(())
+    Ok(GitIntegrationStatus::Changed)
 }
 
 #[cfg(unix)]
@@ -432,6 +448,90 @@ fn make_executable(_path: &Path) -> Result<(), GitIntegrationError> {
 #[cfg(test)]
 mod error_tests {
     use super::*;
+
+    #[test]
+    fn config_lock_precedes_reading_and_is_released_on_every_exit() {
+        let temp = test_support_git::empty_git_repo();
+        let integration = GitIntegration::open(&RepositoryLayout::at(temp.path().into())).unwrap();
+        let config = temp.path().join(".git/config");
+        let original = std::fs::read(&config).unwrap();
+        let lock_path = config.with_extension("lock");
+        std::fs::write(&config, b"[unterminated").unwrap();
+        let lock = gix_lock::File::acquire_to_update_resource(
+            &config,
+            gix_lock::acquire::Fail::Immediately,
+            None,
+        )
+        .unwrap();
+        for mutate in [
+            GitIntegration::install_merge_driver,
+            GitIntegration::uninstall_merge_driver,
+        ] {
+            // A held lock must be reported before malformed content is parsed.
+            assert_eq!(
+                mutate(&integration).unwrap_err().kind(),
+                GitIntegrationErrorKind::ConfigLocked
+            );
+        }
+        drop(lock);
+        assert_eq!(
+            integration.install_merge_driver().unwrap_err().kind(),
+            GitIntegrationErrorKind::Config
+        );
+        assert!(
+            !lock_path.exists(),
+            "parse failure must release the acquired lock"
+        );
+        std::fs::write(&config, &original).unwrap();
+        for (mutate, expected) in [
+            (
+                GitIntegration::install_merge_driver as fn(&GitIntegration) -> _,
+                GitIntegrationStatus::Changed,
+            ),
+            (
+                GitIntegration::install_merge_driver,
+                GitIntegrationStatus::Unchanged,
+            ),
+            (
+                GitIntegration::uninstall_merge_driver,
+                GitIntegrationStatus::Changed,
+            ),
+            (
+                GitIntegration::uninstall_merge_driver,
+                GitIntegrationStatus::Unchanged,
+            ),
+        ] {
+            assert_eq!(mutate(&integration).unwrap(), expected);
+            assert!(!lock_path.exists());
+        }
+    }
+
+    #[test]
+    fn config_mutation_holds_the_lock_while_editing_and_keeps_unrelated_values() {
+        let temp = test_support_git::empty_git_repo();
+        let config = temp.path().join(".git/config");
+        std::fs::write(&config, "[user]\n\tname = Keep Me\n").unwrap();
+        mutate_config(&config, |file| {
+            assert!(
+                gix_lock::File::acquire_to_update_resource(
+                    &config,
+                    gix_lock::acquire::Fail::Immediately,
+                    None,
+                )
+                .is_err()
+            );
+            file.section_mut_or_create_new("merge", "gat-lock")
+                .unwrap()
+                .set("driver", MERGE_DRIVER_COMMAND)
+                .unwrap();
+            Ok(GitIntegrationStatus::Changed)
+        })
+        .unwrap();
+        let contents = std::fs::read_to_string(&config).unwrap();
+        assert!(contents.contains("Keep Me"));
+        assert!(contents.contains(MERGE_DRIVER_COMMAND));
+        assert!(!config.with_extension("lock").exists());
+    }
 
     #[test]
     fn io_constructors_preserve_os_kinds_and_keep_messages_private() {
