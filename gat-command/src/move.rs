@@ -7,7 +7,7 @@ use gat_core::progress::{
 use gat_engine::{
     DestinationKind, MountOwnership, PathPolicyError, Repository, RepositoryMutationError,
     WorktreeMoveError, WorktreePathError, WorktreeRollbackError, inspect_move_destination,
-    move_worktree_path, rollback_worktree_move, validate_mutation_path,
+    move_worktree_path, validate_mutation_path,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,16 +65,16 @@ pub enum MoveError {
         src: GatPath,
         dst: GatPath,
         #[source]
-        source: Box<Self>,
+        source: Box<RepositoryMutationError>,
     },
     #[error(
-        "moved {src} to {dst} on disk but failed to update gat.lock, and the automatic rollback failed; the file is currently at {dst}"
+        "tracking-state publication failed for the move from {src} to {dst}, and automatic rollback was incomplete"
     )]
     RollbackFailed {
         src: GatPath,
         dst: GatPath,
         #[source]
-        save_source: Box<Self>,
+        save_source: Box<RepositoryMutationError>,
         rollback_source: Box<WorktreeRollbackError>,
     },
 }
@@ -140,15 +140,11 @@ pub fn move_with_progress(
                     .into_iter()
                     .map(|entry| entry.path)
                     .collect::<Vec<_>>();
-                move_on_disk(repo, &src, &dst)?;
+                let pending = move_on_disk(repo, &src, &dst)?;
                 if let Err(error) = desired.publish_move(&src, &dst, &dst_collision_paths) {
-                    return Err(rollback_or_report(
-                        MoveError::RepositoryMutation(Box::new(error)),
-                        repo,
-                        &src,
-                        &dst,
-                    ));
+                    return Err(rollback_or_report(error, pending, &src, &dst));
                 }
+                pending.commit();
                 let published = |source| MoveError::Published {
                     src: src.clone(),
                     dst: dst.clone(),
@@ -194,7 +190,11 @@ fn preflight_destination(
     }
 }
 
-fn move_on_disk(repo: &Repository, src: &GatPath, dst: &GatPath) -> Result<()> {
+fn move_on_disk(
+    repo: &Repository,
+    src: &GatPath,
+    dst: &GatPath,
+) -> Result<gat_engine::PendingMove> {
     move_worktree_path(repo, src, dst).map_err(|error| match error {
         WorktreeMoveError::Path(source) => MoveError::Path(source),
         error => MoveError::Worktree(Box::new(error)),
@@ -202,12 +202,12 @@ fn move_on_disk(repo: &Repository, src: &GatPath, dst: &GatPath) -> Result<()> {
 }
 
 fn rollback_or_report(
-    save_error: MoveError,
-    repo: &Repository,
+    save_error: RepositoryMutationError,
+    pending: gat_engine::PendingMove,
     src: &GatPath,
     dst: &GatPath,
 ) -> MoveError {
-    match rollback_worktree_move(repo, src, dst) {
+    match pending.rollback() {
         Ok(()) => MoveError::RolledBack {
             src: src.clone(),
             dst: dst.clone(),

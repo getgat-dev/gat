@@ -78,12 +78,8 @@ impl<'root> WorktreeClient<'root> {
         inspect_move_destination(self.root, path)
     }
 
-    pub fn move_path(&self, src: &GatPath, dst: &GatPath) -> Result<(), MovePathError> {
+    pub fn move_path(&self, src: &GatPath, dst: &GatPath) -> Result<PendingMove, MovePathError> {
         move_path(self.root, src, dst)
-    }
-
-    pub fn rollback_move(&self, src: &GatPath, dst: &GatPath) -> Result<(), RollbackMoveError> {
-        rollback_move(self.root, src, dst)
     }
 
     pub fn remove_and_prune(&self, paths: &[GatPath]) -> Result<(), RemovePathError> {
@@ -355,6 +351,8 @@ fn inspect_move_destination(root: &Path, path: &GatPath) -> PathResult<Destinati
 #[derive(Debug, thiserror::Error)]
 pub enum MovePathError {
     #[error(transparent)]
+    RestoreDestination(#[from] RestoreMoveDestinationError),
+    #[error(transparent)]
     Path(#[from] WorktreePathError),
     #[error("creating parent directory for {path}")]
     CreateParent {
@@ -371,26 +369,157 @@ pub enum MovePathError {
     },
 }
 
-fn move_path(root: &Path, src: &GatPath, dst: &GatPath) -> Result<(), MovePathError> {
-    let full_src = confine_mutation(root, src)?;
-    let full_dst = confine_mutation(root, dst)?;
-    if let Some(parent) = full_dst.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| MovePathError::CreateParent {
-            path: dst.to_string(),
+/// A completed rename whose replaced destination is retained until commit.
+/// Dropping an unresolved receipt preserves the backup for manual recovery.
+#[must_use = "commit the move after publication or roll it back"]
+pub struct PendingMove {
+    root: PathBuf,
+    src: GatPath,
+    dst: GatPath,
+    backup: Option<PathBuf>,
+}
+
+impl PendingMove {
+    /// Finalize publication. Backup cleanup is best effort; failure leaves an
+    /// extra recovery copy and never invalidates the published move.
+    pub fn commit(self) {
+        if let Some(backup) = self.backup {
+            let _ = std::fs::remove_file(&backup);
+            if let Some(parent) = backup.parent() {
+                let _ = std::fs::remove_dir(parent);
+            }
+        }
+    }
+
+    pub fn rollback(self) -> Result<(), RollbackMoveError> {
+        let full_src = confine_mutation(&self.root, &self.src)?;
+        let full_dst = confine_mutation(&self.root, &self.dst)?;
+        std::fs::rename(&full_dst, full_src).map_err(|source| RollbackMoveError::Rename {
+            src: self.src.to_string(),
+            dst: self.dst.to_string(),
             source,
         })?;
+        if let Some(backup) = self.backup {
+            restore_move_destination(backup, &full_dst)?;
+        }
+        Ok(())
     }
-    std::fs::rename(full_src, full_dst).map_err(|source| MovePathError::Rename {
-        src: src.to_string(),
-        dst: dst.to_string(),
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("restoring the move destination from {}", backup.display())]
+pub struct RestoreMoveDestinationError {
+    pub backup: PathBuf,
+    #[source]
+    pub source: std::io::Error,
+}
+
+fn restore_move_destination(
+    backup: PathBuf,
+    destination: &Path,
+) -> Result<(), RestoreMoveDestinationError> {
+    std::fs::rename(&backup, destination).map_err(|source| RestoreMoveDestinationError {
+        backup: backup.clone(),
         source,
-    })
+    })?;
+    let _ = std::fs::remove_dir(backup.parent().expect("backup directory"));
+    Ok(())
+}
+
+fn move_path(root: &Path, src: &GatPath, dst: &GatPath) -> Result<PendingMove, MovePathError> {
+    let full_src = confine_mutation(root, src)?;
+    let full_dst = confine_mutation(root, dst)?;
+    let parent = full_dst.parent().expect("repository-relative destination");
+    std::fs::create_dir_all(parent).map_err(|source| MovePathError::CreateParent {
+        path: dst.to_string(),
+        source,
+    })?;
+    let mut pending = PendingMove {
+        root: root.to_path_buf(),
+        src: src.clone(),
+        dst: dst.clone(),
+        backup: None,
+    };
+    if src == dst {
+        std::fs::symlink_metadata(&full_src).map_err(|source| MovePathError::Rename {
+            src: src.to_string(),
+            dst: dst.to_string(),
+            source,
+        })?;
+        return Ok(pending);
+    }
+    let backup = match std::fs::symlink_metadata(&full_dst) {
+        Ok(metadata) if metadata.is_dir() => {
+            return Err(MovePathError::Rename {
+                src: src.to_string(),
+                dst: dst.to_string(),
+                source: std::io::Error::from(std::io::ErrorKind::IsADirectory),
+            });
+        }
+        // Case-only renames on case-insensitive filesystems address the same
+        // directory entry. Moving that entry aside would also remove the source.
+        Ok(metadata)
+            if !metadata.file_type().is_symlink()
+                && std::fs::symlink_metadata(&full_src)
+                    .is_ok_and(|m| !m.file_type().is_symlink())
+                && std::fs::canonicalize(&full_src)
+                    .ok()
+                    .zip(std::fs::canonicalize(&full_dst).ok())
+                    .is_some_and(|(src, dst)| src == dst) =>
+        {
+            None
+        }
+        Ok(_) => Some(
+            tempfile::Builder::new()
+                .prefix(".gat-move-")
+                .tempdir_in(parent)
+                .map_err(|source| WorktreePathError::Io {
+                    operation: "preparing move backup",
+                    path: full_dst.clone(),
+                    source,
+                })?,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(source) => {
+            return Err(WorktreePathError::Io {
+                operation: "inspecting move destination",
+                path: full_dst,
+                source,
+            }
+            .into());
+        }
+    };
+    if let Some(directory) = backup {
+        let backup = directory.path().join("destination");
+        std::fs::rename(&full_dst, &backup).map_err(|source| WorktreePathError::Io {
+            operation: "backing up move destination",
+            path: full_dst.clone(),
+            source,
+        })?;
+        // Persist before any subsequent fallible step: unwinding or rollback
+        // failure must never delete the only remaining destination copy.
+        let _ = directory.keep();
+        pending.backup = Some(backup);
+    }
+    if let Err(source) = std::fs::rename(full_src, &full_dst) {
+        if let Some(backup) = pending.backup.take() {
+            restore_move_destination(backup, &full_dst)?;
+        }
+        return Err(MovePathError::Rename {
+            src: src.to_string(),
+            dst: dst.to_string(),
+            source,
+        });
+    }
+    Ok(pending)
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum RollbackMoveError {
     #[error(transparent)]
     Path(#[from] WorktreePathError),
+    #[error(transparent)]
+    RestoreDestination(#[from] RestoreMoveDestinationError),
     #[error("moving {dst} back to {src}")]
     Rename {
         src: String,
@@ -398,16 +527,6 @@ pub enum RollbackMoveError {
         #[source]
         source: std::io::Error,
     },
-}
-
-fn rollback_move(root: &Path, src: &GatPath, dst: &GatPath) -> Result<(), RollbackMoveError> {
-    let full_src = resolve_worktree_path(root, src)?;
-    let full_dst = resolve_worktree_path(root, dst)?;
-    std::fs::rename(full_dst, full_src).map_err(|source| RollbackMoveError::Rename {
-        src: src.to_string(),
-        dst: dst.to_string(),
-        source,
-    })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -874,6 +993,159 @@ mod tests {
         std::fs::create_dir_all(object.parent().unwrap()).unwrap();
         std::fs::write(object, bytes).unwrap();
         oid
+    }
+
+    fn move_fixture() -> (tempfile::TempDir, GatPath, GatPath) {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("source"), b"source bytes").unwrap();
+        std::fs::write(temp.path().join("destination"), b"destination bytes").unwrap();
+        (
+            temp,
+            GatPath::parse_canonical("source").unwrap(),
+            GatPath::parse_canonical("destination").unwrap(),
+        )
+    }
+
+    #[test]
+    fn move_receipt_restores_both_files_or_discards_backup_on_commit() {
+        for commit in [false, true] {
+            let (temp, src, dst) = move_fixture();
+            let pending = move_path(temp.path(), &src, &dst).unwrap();
+            let backup = pending.backup.clone().unwrap();
+            assert_eq!(std::fs::read(&backup).unwrap(), b"destination bytes");
+            assert_eq!(
+                std::fs::read(temp.path().join("destination")).unwrap(),
+                b"source bytes"
+            );
+            if commit {
+                pending.commit();
+                assert!(!temp.path().join("source").exists());
+                assert_eq!(
+                    std::fs::read(temp.path().join("destination")).unwrap(),
+                    b"source bytes"
+                );
+            } else {
+                pending.rollback().unwrap();
+                assert_eq!(
+                    std::fs::read(temp.path().join("source")).unwrap(),
+                    b"source bytes"
+                );
+                assert_eq!(
+                    std::fs::read(temp.path().join("destination")).unwrap(),
+                    b"destination bytes"
+                );
+            }
+            assert!(!backup.parent().unwrap().exists());
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn case_only_move_does_not_back_up_its_own_source() {
+        for commit in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::write(temp.path().join("Original"), b"payload").unwrap();
+            let src = GatPath::parse_canonical("Original").unwrap();
+            let dst = GatPath::parse_canonical("original").unwrap();
+            let pending = move_path(temp.path(), &src, &dst).unwrap();
+            assert!(pending.backup.is_none());
+            if commit {
+                pending.commit();
+            } else {
+                pending.rollback().unwrap();
+            }
+            let entries = std::fs::read_dir(temp.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                entries,
+                [std::ffi::OsString::from(if commit {
+                    "original"
+                } else {
+                    "Original"
+                })]
+            );
+            assert_eq!(
+                std::fs::read(
+                    temp.path()
+                        .join(if commit { "original" } else { "Original" })
+                )
+                .unwrap(),
+                b"payload"
+            );
+        }
+    }
+
+    #[test]
+    fn failed_move_restores_destination_before_returning() {
+        let (temp, src, dst) = move_fixture();
+        std::fs::remove_file(temp.path().join("source")).unwrap();
+        assert!(matches!(
+            move_path(temp.path(), &src, &dst),
+            Err(MovePathError::Rename { .. })
+        ));
+        assert_eq!(
+            std::fs::read(temp.path().join("destination")).unwrap(),
+            b"destination bytes"
+        );
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn failed_rollback_and_unresolved_receipt_preserve_backup() {
+        for rollback in [false, true] {
+            let (temp, src, dst) = move_fixture();
+            let pending = move_path(temp.path(), &src, &dst).unwrap();
+            let backup = pending.backup.clone().unwrap();
+            if rollback {
+                std::fs::create_dir(temp.path().join("source")).unwrap();
+                assert!(matches!(
+                    pending.rollback(),
+                    Err(RollbackMoveError::Rename { .. })
+                ));
+            } else {
+                drop(pending);
+            }
+            assert_eq!(std::fs::read(&backup).unwrap(), b"destination bytes");
+            assert_eq!(
+                std::fs::read(temp.path().join("destination")).unwrap(),
+                b"source bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn failed_destination_restore_reports_the_retained_backup() {
+        let temp = tempfile::tempdir().unwrap();
+        let backup = temp.path().join("backup");
+        let destination = temp.path().join("blocked");
+        std::fs::write(&backup, b"original destination").unwrap();
+        std::fs::create_dir(&destination).unwrap();
+        let error = restore_move_destination(backup.clone(), &destination).unwrap_err();
+        assert_eq!(error.backup, backup);
+        assert_eq!(std::fs::read(&backup).unwrap(), b"original destination");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn move_rollback_restores_dangling_destination_symlink_without_following_it() {
+        let (temp, src, dst) = move_fixture();
+        std::fs::remove_file(temp.path().join("destination")).unwrap();
+        std::os::unix::fs::symlink("missing-target", temp.path().join("destination")).unwrap();
+        move_path(temp.path(), &src, &dst)
+            .unwrap()
+            .rollback()
+            .unwrap();
+        assert_eq!(
+            std::fs::read_link(temp.path().join("destination")).unwrap(),
+            PathBuf::from("missing-target")
+        );
+        assert!(!temp.path().join("missing-target").exists());
+        assert_eq!(
+            std::fs::read(temp.path().join("source")).unwrap(),
+            b"source bytes"
+        );
     }
 
     #[test]

@@ -250,10 +250,11 @@ pub use workspace::sync::{
     plan as plan_sync, sync_from_snapshot,
 };
 pub use worktree::{
-    DestinationKind, EntryKind, MoveError as WorktreeMoveError, RemoveError as WorktreeRemoveError,
+    DestinationKind, EntryKind, MoveError as WorktreeMoveError, PendingMove,
+    RemoveError as WorktreeRemoveError, RestoreMoveDestinationError,
     RollbackError as WorktreeRollbackError, WorktreePathError, inspect_move_destination,
     inspect_read_path, move_path as move_worktree_path, reject_infrastructure_path,
-    remove_and_prune, rollback_move as rollback_worktree_move, validate_mutation_path,
+    remove_and_prune, validate_mutation_path,
 };
 
 /// Initializes the remote backends once during process bootstrap.

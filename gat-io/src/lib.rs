@@ -539,8 +539,9 @@ pub use state::{
 };
 pub use worktree::{
     DestinationKind as WorktreeDestinationKind, EntryKind as WorktreeEntryKind, MaterializeKind,
-    MovePathError, PruneError, RemovalReceipt, RemovePathError, RollbackMoveError, WorktreeClient,
-    WorktreeFileStatus, WorktreeMutationError, WorktreePathError, WorktreeStatusKind,
+    MovePathError, PendingMove, PruneError, RemovalReceipt, RemovePathError,
+    RestoreMoveDestinationError, RollbackMoveError, WorktreeClient, WorktreeFileStatus,
+    WorktreeMutationError, WorktreePathError, WorktreeStatusKind,
 };
 
 #[cfg(any(test, feature = "test-support"))]
