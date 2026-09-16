@@ -2387,36 +2387,10 @@ mod reshape {
     };
     use std::path::{Path, PathBuf};
 
-    /// Where every in-flight (or crashed-and-not-yet-recovered) reshape
-    /// transaction's scratch state lives, relative to the repo root --
-    /// never inside the live `gat.lock`/`gat.lock/` path itself, so a
-    /// reader that only ever looks at `gat.lock` can't stumble onto a
-    /// half-built transaction by accident.
-    fn reshape_root(root: &Path) -> PathBuf {
-        root.join(".gat").join("lock-reshape")
-    }
-
-    /// Small, self-contained transaction record persisted once, before any
-    /// live-path rename, at `<txn dir>/txn.json` -- durable proof that a
-    /// reshape got far enough to need recovering rather than just being
-    /// abandoned scratch work. `staging_path`/`backup_path` are absolute
-    /// (transaction-scoped, ephemeral paths under this same repo, so
-    /// portability across repos/machines is never a concern).
-    #[derive(serde::Serialize, serde::Deserialize)]
-    struct TxnRecord {
-        id: String,
-        source_shape: OnDiskShape,
-        target_shape: OnDiskShape,
-        staging_path: PathBuf,
-        backup_path: PathBuf,
-        /// Always `"prepared"` right now: the one and only state this
-        /// record is ever written in -- recorded
-        /// anyway, both for forward compatibility and so a malformed or
-        /// unrecognized value fails recovery closed instead of silently.
-        phase: String,
-    }
-
-    const PHASE_PREPARED: &str = "prepared";
+    use crate::lock::reshape_record::{
+        PREPARED_PHASE as PHASE_PREPARED, PreparedRecord, TxnRecord, read_record, reshape_root,
+        transaction_directories,
+    };
 
     /// Read every entry's `(path, oid)` pair to prove a staged
     /// reshape is semantically equivalent to the lock it was built from
@@ -2611,21 +2585,25 @@ mod reshape {
     /// acts on recovery state explicitly, rather than a helper any
     /// mutation path could reach for.
     pub fn cleanup_completed_reshape(root: &Path) -> Result<()> {
-        let root_dir = reshape_root(root);
-        let entries = match std::fs::read_dir(&root_dir) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(e).map_err(|source| LockError::io("reading", &root_dir, source)),
-        };
-        for entry in entries {
-            let entry = entry.map_err(|source| LockError::io("reading", &root_dir, source))?;
-            if entry
-                .file_type()
-                .map_err(|source| LockError::io("reading", entry.path(), source))?
-                .is_dir()
-            {
-                cleanup_completed_txn_dir(root, &entry.path())?;
+        let mut transactions = transaction_directories(root)?.peekable();
+        if transactions.peek().is_none() {
+            return Ok(());
+        }
+        let live_valid = match crate::lock::maintenance::inspect_live(root)? {
+            crate::lock::LiveLockState::Valid { .. } => true,
+            crate::lock::LiveLockState::Missing => false,
+            crate::lock::LiveLockState::Invalid {
+                reason: crate::lock::LiveLockInvalidReason::LoadFailed(error),
+            } => return Err(error),
+            crate::lock::LiveLockState::Invalid { .. } => {
+                return Err(LockError::UnsupportedOnDiskKind {
+                    path: root.join("gat.lock"),
+                    detail: "neither a valid flat lock nor a shard tree".into(),
+                });
             }
+        };
+        for txn_dir in transactions {
+            cleanup_completed_txn_dir(root, &txn_dir?, live_valid)?;
         }
         Ok(())
     }
@@ -2637,21 +2615,17 @@ mod reshape {
     /// exists. Interrupted or malformed transactions are preserved exactly as
     /// found for explicit inspection/recovery.
     pub fn clean_disposable_reshape_scratch(root: &Path) -> Result<usize> {
-        let root_dir = reshape_root(root);
-        let entries = match std::fs::read_dir(&root_dir) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(e) => return Err(e).map_err(|source| LockError::io("reading", &root_dir, source)),
-        };
+        let mut transactions = transaction_directories(root)?.peekable();
+        if transactions.peek().is_none() {
+            return Ok(0);
+        }
         let mut removed = 0usize;
-        for entry in entries {
-            let entry = entry.map_err(|source| LockError::io("reading", &root_dir, source))?;
-            if entry
-                .file_type()
-                .map_err(|source| LockError::io("reading", entry.path(), source))?
-                .is_dir()
-                && clean_txn_dir_if_disposable(root, &entry.path())?
-            {
+        let live_valid = matches!(
+            crate::lock::maintenance::inspect_live(root)?,
+            crate::lock::LiveLockState::Valid { .. }
+        );
+        for txn_dir in transactions {
+            if clean_txn_dir_if_disposable(&txn_dir?, live_valid)? {
                 removed += 1;
             }
         }
@@ -2661,30 +2635,30 @@ mod reshape {
     /// Explicit maintenance-only interrupted-reshape recovery: validate the
     /// chosen `choice` candidate independently, then promote it back to the
     /// live `gat.lock` path. Never guesses a choice for the caller, and
-    /// refuses to overwrite an already-present live path.
+    /// refuses to overwrite an already-valid live lock.
     pub fn recover_prepared_reshape(
         root: &Path,
         txn_dir: &Path,
         choice: ReshapeRecoveryChoice,
     ) -> Result<()> {
-        let record = read_prepared_record(root, txn_dir)?;
-        let expected_txn_dir = reshape_root(root).join(&record.id);
-        if txn_dir != expected_txn_dir {
-            return Err(LockError::Persistence(PersistenceError::TxnIdMismatch {
+        let namespace = reshape_root(root);
+        if txn_dir.parent() != Some(namespace.as_path()) {
+            return Err(PersistenceError::TxnIdMismatch {
                 txn_dir: txn_dir.to_path_buf(),
                 record_path: txn_dir.join("txn.json"),
-                record_id: record.id,
-            }));
+                record_id: txn_dir
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+            }
+            .into());
         }
-        let expected_backup = txn_dir.join("backup");
-        let expected_staging = txn_dir.join("new");
-        if record.backup_path != expected_backup || record.staging_path != expected_staging {
-            return Err(LockError::Persistence(
-                PersistenceError::CandidatePathsOutsideTxnDir {
-                    record_path: txn_dir.join("txn.json"),
-                },
-            ));
+        for directory in [&namespace, txn_dir] {
+            crate::local_directory::read_directory_if_present(directory)
+                .map_err(|source| LockError::io("reading", directory, source))?;
         }
+        let record = read_prepared_record(txn_dir)?;
 
         let live_path = root.join("gat.lock");
         if live_path.exists()
@@ -2697,8 +2671,12 @@ mod reshape {
         }
 
         let (candidate_path, expected_shape) = match choice {
-            ReshapeRecoveryChoice::RestoreBackup => (record.backup_path, record.source_shape),
-            ReshapeRecoveryChoice::PromoteStaged => (record.staging_path, record.target_shape),
+            ReshapeRecoveryChoice::RestoreBackup => {
+                (record.backup_path().to_path_buf(), record.source_shape())
+            }
+            ReshapeRecoveryChoice::PromoteStaged => {
+                (record.staging_path().to_path_buf(), record.target_shape())
+            }
         };
         let detected = on_disk_shape_at(&candidate_path)?;
         if detected != Some(expected_shape) {
@@ -2763,53 +2741,21 @@ mod reshape {
     /// that case the live path was never touched and being missing really
     /// does just mean nothing has ever been tracked.
     pub fn fail_if_pending_reshape(root: &Path) -> Result<()> {
-        let root_dir = reshape_root(root);
-        let entries = match std::fs::read_dir(&root_dir) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(e).map_err(|source| LockError::io("reading", &root_dir, source)),
-        };
-        for entry in entries {
-            let entry = entry.map_err(|source| LockError::io("reading", &root_dir, source))?;
-            if entry
-                .file_type()
-                .map_err(|source| LockError::io("reading", entry.path(), source))?
-                .is_dir()
-            {
-                fail_if_txn_dir_is_pending(root, &entry.path())?;
-            }
+        for txn_dir in transaction_directories(root)? {
+            fail_if_txn_dir_is_pending(root, &txn_dir?)?;
         }
         Ok(())
     }
 
     fn fail_if_txn_dir_is_pending(root: &Path, txn_dir: &Path) -> Result<()> {
-        let record_path = txn_dir.join("txn.json");
-        let record_text = match std::fs::read_to_string(&record_path) {
-            Ok(text) => text,
-            // No durable transaction record was ever published, so the
-            // live path was never touched -- this is leftover staging
-            // scratch work from a crash before step 3, harmless to an
-            // ordinary read.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => {
-                return Err(e).map_err(|source| LockError::io("reading", record_path, source));
-            }
+        let Some(record) = read_record(txn_dir)? else {
+            return Ok(());
         };
+        record
+            .validate(txn_dir)
+            .map_err(|error| error.into_lock_error(txn_dir))?;
+        let record_path = txn_dir.join("txn.json");
         let live_path = root.join("gat.lock");
-        let record: TxnRecord = serde_json::from_str(&record_text).map_err(|source| {
-            LockError::Persistence(PersistenceError::TxnRecordMalformed {
-                record_path: record_path.clone(),
-                source,
-            })
-        })?;
-        if record.phase != PHASE_PREPARED {
-            return Err(LockError::Persistence(
-                PersistenceError::TxnRecordUnrecognizedPhase {
-                    record_path,
-                    phase: record.phase,
-                },
-            ));
-        }
         // The caller has already confirmed the live path is missing, and a
         // valid `PREPARED` durable record proves a live representation
         // existed when this transaction was prepared (`reshape_transactional`
@@ -2826,122 +2772,71 @@ mod reshape {
         ))
     }
 
-    fn read_prepared_record(_root: &Path, txn_dir: &Path) -> Result<TxnRecord> {
-        let record_path = txn_dir.join("txn.json");
-        let record_text = std::fs::read_to_string(&record_path)
-            .map_err(|source| LockError::io("reading", &record_path, source))?;
-        let record: TxnRecord = serde_json::from_str(&record_text).map_err(|source| {
-            LockError::Persistence(PersistenceError::TxnRecordMalformed {
-                record_path: record_path.clone(),
-                source,
-            })
-        })?;
-        if record.phase != PHASE_PREPARED {
-            return Err(LockError::Persistence(
-                PersistenceError::TxnRecordUnrecognizedPhase {
-                    record_path,
-                    phase: record.phase,
-                },
-            ));
-        }
-        Ok(record)
+    fn read_prepared_record(txn_dir: &Path) -> Result<PreparedRecord> {
+        read_record(txn_dir)?
+            .ok_or_else(|| {
+                LockError::io(
+                    "reading",
+                    txn_dir.join("txn.json"),
+                    std::io::Error::from(std::io::ErrorKind::NotFound),
+                )
+            })?
+            .validate(txn_dir)
+            .map_err(|error| error.into_lock_error(txn_dir))
     }
 
-    fn clean_txn_dir_if_disposable(root: &Path, txn_dir: &Path) -> Result<bool> {
-        let record_path = txn_dir.join("txn.json");
-        let record_text = match std::fs::read_to_string(&record_path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                cleanup_txn_dir(txn_dir);
-                return Ok(true);
-            }
-            Err(e) => {
-                return Err(e).map_err(|source| LockError::io("reading", record_path, source));
-            }
-        };
-        let Ok(record) = serde_json::from_str::<TxnRecord>(&record_text) else {
-            return Ok(false);
-        };
-        if record.phase != PHASE_PREPARED {
-            return Ok(false);
-        }
-
-        let live_path = root.join("gat.lock");
-        if !record.backup_path.exists() {
-            if live_path.exists() {
-                cleanup_txn_dir(txn_dir);
-                return Ok(true);
-            }
-            return Ok(false);
-        }
-        if live_path.exists() {
-            cleanup_txn_dir(txn_dir);
-            return Ok(true);
-        }
-        Ok(false)
+    fn remove_txn_dir(txn_dir: &Path) -> Result<()> {
+        std::fs::remove_dir_all(txn_dir)
+            .map_err(|source| LockError::io("removing", txn_dir, source))
     }
 
-    fn cleanup_completed_txn_dir(root: &Path, txn_dir: &Path) -> Result<()> {
-        let record_path = txn_dir.join("txn.json");
-        let record_text = match std::fs::read_to_string(&record_path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // No durable transaction record was ever published, so the
-                // live path was never touched -- this is leftover staging
-                // scratch work from a crash before step 3, safe to discard.
-                cleanup_txn_dir(txn_dir);
-                return Ok(());
+    fn clean_txn_dir_if_disposable(txn_dir: &Path, live_valid: bool) -> Result<bool> {
+        match read_record(txn_dir) {
+            Ok(None) => {}
+            Ok(Some(record)) => {
+                if !live_valid || record.validate(txn_dir).is_err() {
+                    return Ok(false);
+                }
             }
-            Err(e) => {
-                return Err(e).map_err(|source| LockError::io("reading", record_path, source));
+            Err(LockError::Persistence(PersistenceError::TxnRecordMalformed { .. })) => {
+                return Ok(false);
             }
-        };
-        let record: TxnRecord = serde_json::from_str(&record_text).map_err(|source| {
-            LockError::Persistence(PersistenceError::TxnRecordMalformed {
-                record_path: record_path.clone(),
-                source,
-            })
-        })?;
-        if record.phase != PHASE_PREPARED {
-            return Err(LockError::Persistence(
-                PersistenceError::TxnRecordUnrecognizedPhase {
-                    record_path,
-                    phase: record.phase,
-                },
-            ));
+            Err(error) => return Err(error),
         }
+        remove_txn_dir(txn_dir)?;
+        Ok(true)
+    }
 
+    fn cleanup_completed_txn_dir(root: &Path, txn_dir: &Path, live_valid: bool) -> Result<()> {
+        let Some(record) = read_record(txn_dir)? else {
+            return remove_txn_dir(txn_dir);
+        };
+        let record = record
+            .validate(txn_dir)
+            .map_err(|error| error.into_lock_error(txn_dir))?;
+        if live_valid {
+            return remove_txn_dir(txn_dir);
+        }
+        let record_path = txn_dir.join("txn.json");
         let live_path = root.join("gat.lock");
-        if !record.backup_path.exists() {
-            // Crashed before (or exactly at) moving the old live
-            // representation aside: the live path is untouched and still
-            // the complete old representation. Nothing to clean up but
-            // the transaction's own scratch space.
-            cleanup_txn_dir(txn_dir);
-            return Ok(());
-        }
-        if live_path.exists() {
-            // The staged target was already promoted to the live path:
-            // the commit already finished, so the now-redundant backup
-            // and transaction scratch space are safe to discard.
-            cleanup_txn_dir(txn_dir);
-            return Ok(());
-        }
-        // The old live representation was moved aside, but the staged
-        // target was never promoted: the live path is genuinely missing.
-        // Restoring it is a policy decision this narrowly-scoped cleanup
-        // is deliberately incapable of making -- fail closed instead of
-        // guessing (see doc comment on `cleanup_completed_reshape`).
-        // `super::on_disk_shape`/`fail_if_pending_reshape` already catch
-        // this state before any caller reaches this function; this is
-        // only a second line of defense.
-        Err(LockError::Persistence(
-            PersistenceError::ReshapeInterruptedAfterBackup {
+        if record
+            .backup_path()
+            .try_exists()
+            .map_err(|source| LockError::io("reading", record.backup_path(), source))?
+        {
+            Err(PersistenceError::ReshapeInterruptedAfterBackup {
                 record_path,
                 live_path,
-                backup_path: record.backup_path,
-            },
-        ))
+                backup_path: record.backup_path().to_path_buf(),
+            }
+            .into())
+        } else {
+            Err(PersistenceError::ReshapeInterruptedLiveMissing {
+                record_path,
+                live_path,
+            }
+            .into())
+        }
     }
 
     #[cfg(test)]
@@ -3089,6 +2984,139 @@ mod reshape {
             )
             .unwrap();
             (txn_dir, staging_path, backup_path)
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn symlinked_transaction_namespace_never_exposes_external_scratch_to_cleanup() {
+            let root = tempfile::tempdir().unwrap();
+            let external = tempfile::tempdir().unwrap();
+            let payload = external.path().join("scratch/backup");
+            std::fs::create_dir_all(payload.parent().unwrap()).unwrap();
+            std::fs::write(&payload, b"preserve recovery data").unwrap();
+            let namespace = reshape_root(root.path());
+            std::fs::create_dir_all(namespace.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(external.path(), &namespace).unwrap();
+            assert!(clean_disposable_reshape_scratch(root.path()).is_err());
+            assert!(cleanup_completed_reshape(root.path()).is_err());
+            assert!(fail_if_pending_reshape(root.path()).is_err());
+            assert!(crate::lock::maintenance::inspect(root.path()).is_err());
+            assert_eq!(std::fs::read(&payload).unwrap(), b"preserve recovery data");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn symlinked_record_is_never_treated_as_disposable_scratch() {
+            for dangling in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let (txn, _, backup) =
+                    write_prepared_txn(root.path(), OnDiskShape::Flat, OnDiskShape::Flat);
+                save_file_atomic(&sample_lock(), &backup).unwrap();
+                let record = txn.join("txn.json");
+                let target = root.path().join("record-target");
+                std::fs::rename(&record, &target).unwrap();
+                if dangling {
+                    std::fs::remove_file(&target).unwrap();
+                }
+                std::os::unix::fs::symlink(&target, &record).unwrap();
+                assert!(clean_disposable_reshape_scratch(root.path()).is_err());
+                assert!(cleanup_completed_reshape(root.path()).is_err());
+                assert!(fail_if_pending_reshape(root.path()).is_err());
+                assert!(backup.is_file());
+                assert!(std::fs::symlink_metadata(&record).unwrap().is_symlink());
+            }
+        }
+
+        #[test]
+        fn explicit_recovery_rejects_absolute_and_parent_traversing_transaction_ids() {
+            for absolute in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let outside = root.path().join("outside");
+                let id = if absolute {
+                    outside.to_str().unwrap().to_owned()
+                } else {
+                    "../../outside".into()
+                };
+                let txn = reshape_root(root.path()).join(&id);
+                std::fs::create_dir_all(&txn).unwrap();
+                let record = TxnRecord {
+                    id,
+                    source_shape: OnDiskShape::Flat,
+                    target_shape: OnDiskShape::Flat,
+                    backup_path: txn.join("backup"),
+                    staging_path: txn.join("new"),
+                    phase: PHASE_PREPARED.into(),
+                };
+                save_file_atomic(&sample_lock(), &record.backup_path).unwrap();
+                std::fs::write(txn.join("txn.json"), serde_json::to_vec(&record).unwrap()).unwrap();
+                assert!(matches!(
+                    recover_prepared_reshape(
+                        root.path(),
+                        &txn,
+                        ReshapeRecoveryChoice::RestoreBackup
+                    ),
+                    Err(LockError::Persistence(
+                        PersistenceError::TxnIdMismatch { .. }
+                    ))
+                ));
+                assert!(record.backup_path.is_file());
+                assert!(!root.path().join("gat.lock").exists());
+            }
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn explicit_recovery_rejects_a_symlinked_transaction_directory() {
+            let root = tempfile::tempdir().unwrap();
+            let external = tempfile::tempdir().unwrap();
+            let namespace = reshape_root(root.path());
+            std::fs::create_dir_all(&namespace).unwrap();
+            let txn = namespace.join("linked");
+            std::os::unix::fs::symlink(external.path(), &txn).unwrap();
+            let record = TxnRecord {
+                id: "linked".into(),
+                source_shape: OnDiskShape::Flat,
+                target_shape: OnDiskShape::Flat,
+                backup_path: txn.join("backup"),
+                staging_path: txn.join("new"),
+                phase: PHASE_PREPARED.into(),
+            };
+            save_file_atomic(&sample_lock(), &record.backup_path).unwrap();
+            std::fs::write(txn.join("txn.json"), serde_json::to_vec(&record).unwrap()).unwrap();
+            assert!(
+                recover_prepared_reshape(root.path(), &txn, ReshapeRecoveryChoice::RestoreBackup)
+                    .is_err()
+            );
+            assert!(external.path().join("backup").is_file());
+            assert!(!root.path().join("gat.lock").exists());
+        }
+
+        #[test]
+        fn cleanup_preserves_records_with_invalid_identity_or_candidate_paths() {
+            for field in ["id", "backup_path", "staging_path"] {
+                let tmp = tempfile::tempdir().unwrap();
+                save(&sample_lock(), tmp.path(), LockShardLevels::FLAT).unwrap();
+                let (txn_dir, _, _) =
+                    write_prepared_txn(tmp.path(), OnDiskShape::Flat, OnDiskShape::Flat);
+                let record_path = txn_dir.join("txn.json");
+                let mut record: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+                record[field] = serde_json::Value::String("outside-transaction".into());
+                let malformed = serde_json::to_vec(&record).unwrap();
+                std::fs::write(&record_path, &malformed).unwrap();
+                let scratch = txn_dir.parent().unwrap().join("disposable");
+                std::fs::create_dir(&scratch).unwrap();
+
+                assert_eq!(
+                    clean_disposable_reshape_scratch(tmp.path()).unwrap(),
+                    1,
+                    "{field}"
+                );
+                assert!(!scratch.exists());
+                assert_eq!(std::fs::read(&record_path).unwrap(), malformed);
+                assert!(cleanup_completed_reshape(tmp.path()).is_err());
+                assert_eq!(std::fs::read(&record_path).unwrap(), malformed);
+            }
         }
 
         #[test]

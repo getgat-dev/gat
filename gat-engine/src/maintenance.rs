@@ -1040,6 +1040,24 @@ mod tests {
     }
 
     #[test]
+    fn cleaning_scratch_preserves_recovery_candidates_beside_an_invalid_live_lock() {
+        let (tmp, repo) = tracked_repo();
+        let transaction = simulated_txn(tmp.path(), &repo, LockShardLevels::new(2).unwrap());
+        let backup = fs::read(transaction.join("backup")).unwrap();
+        fs::write(tmp.path().join("gat.lock"), b"corrupt live lock").unwrap();
+        let scratch = transaction.parent().unwrap().join("disposable");
+        fs::create_dir(&scratch).unwrap();
+
+        let report = repo.maintenance().clean_lock().unwrap();
+
+        assert_eq!(report.removed, 1);
+        assert!(report.unresolved);
+        assert!(!scratch.exists());
+        assert_eq!(fs::read(transaction.join("backup")).unwrap(), backup);
+        assert!(transaction.join("new").is_dir());
+    }
+
+    #[test]
     fn clean_lock_removes_completed_transaction_scratch() {
         let (tmp, repo) = tracked_repo();
         let transaction = simulated_txn(tmp.path(), &repo, LockShardLevels::new(2).unwrap());

@@ -1,9 +1,9 @@
 use super::persistence::OnDiskShape;
-use super::{LockError, LockShardLevels, LockStore, ReshapeRecoveryChoice, Result};
-use serde::Deserialize;
-use std::path::{Path, PathBuf};
-
-const PREPARED_PHASE: &str = "prepared";
+use super::reshape_record::{
+    RecordValidationError, read_record, reshape_root, transaction_directories,
+};
+use super::{LockError, LockShardLevels, ReshapeRecoveryChoice, Result};
+use std::path::Path;
 
 #[derive(Debug)]
 pub struct LockMaintenanceState {
@@ -96,69 +96,47 @@ pub enum PreparedReshapeStatus {
     CorruptRecoveryState,
 }
 
-#[derive(Deserialize)]
-struct TxnRecord {
-    id: String,
-    source_shape: OnDiskShape,
-    target_shape: OnDiskShape,
-    staging_path: PathBuf,
-    backup_path: PathBuf,
-    phase: String,
-}
-
-pub(super) fn inspect(root: &Path) -> Result<LockMaintenanceState> {
+pub(super) fn inspect_live(root: &Path) -> Result<LiveLockState> {
     let live_path = root.join("gat.lock");
-    let live_present = match std::fs::metadata(&live_path) {
-        Ok(_) => true,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+    match std::fs::symlink_metadata(&live_path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(LiveLockState::Missing);
+        }
         Err(source) => return Err(LockError::io("reading", &live_path, source)),
-    };
-    let live = if live_present {
-        match (
-            super::persistence::on_disk_shape_at(&live_path),
-            LockStore::load_all(root),
-        ) {
-            (Ok(Some(shape)), Ok(lock)) => LiveLockState::Valid {
+    }
+    Ok(match super::persistence::on_disk_shape_at(&live_path) {
+        Ok(Some(shape)) => match super::persistence::load_shape_at(&live_path, shape) {
+            Ok(lock) => LiveLockState::Valid {
                 shard_levels: shape.shard_levels(),
                 entries: lock.entries.len(),
             },
-            (_, Err(err)) => LiveLockState::Invalid {
-                reason: LiveLockInvalidReason::LoadFailed(err),
+            Err(error) => LiveLockState::Invalid {
+                reason: LiveLockInvalidReason::LoadFailed(error),
             },
-            (Ok(None), Ok(_)) => LiveLockState::Invalid {
-                reason: LiveLockInvalidReason::NeitherFileNorShardTree,
-            },
-            (Err(err), Ok(_)) => LiveLockState::Invalid {
-                reason: LiveLockInvalidReason::LoadFailed(err),
-            },
-        }
-    } else {
-        LiveLockState::Missing
-    };
+        },
+        Ok(None) => LiveLockState::Invalid {
+            reason: LiveLockInvalidReason::NeitherFileNorShardTree,
+        },
+        Err(error) => LiveLockState::Invalid {
+            reason: LiveLockInvalidReason::LoadFailed(error),
+        },
+    })
+}
 
-    let reshape_root = reshape_root(root);
-    let entries = match std::fs::read_dir(&reshape_root) {
-        Ok(entries) => Some(entries),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-        Err(source) => return Err(LockError::io("reading", &reshape_root, source)),
-    };
+pub(super) fn inspect(root: &Path) -> Result<LockMaintenanceState> {
+    let live = inspect_live(root)?;
     let mut transactions = Vec::new();
-    if let Some(entries) = entries {
-        let live_intact = matches!(live, LiveLockState::Valid { .. });
-        for entry in entries {
-            let entry = entry.map_err(|source| LockError::io("reading", &reshape_root, source))?;
-            let file_type = entry
-                .file_type()
-                .map_err(|source| LockError::io("reading", entry.path(), source))?;
-            if !file_type.is_dir() {
-                continue;
-            }
-            let txn_dir = entry.path();
-            let id = entry.file_name().to_string_lossy().into_owned();
-            transactions.push(inspect_transaction(&txn_dir, &id, live_intact)?);
-        }
-        transactions.sort_by(|a, b| a.id.cmp(&b.id));
+    let live_intact = matches!(live, LiveLockState::Valid { .. });
+    for txn_dir in transaction_directories(root)? {
+        let txn_dir = txn_dir?;
+        let id = txn_dir
+            .file_name()
+            .expect("directory entry has a name")
+            .to_string_lossy();
+        transactions.push(inspect_transaction(&txn_dir, &id, live_intact)?);
     }
+    transactions.sort_by(|a, b| a.id.cmp(&b.id));
 
     Ok(LockMaintenanceState { live, transactions })
 }
@@ -179,70 +157,53 @@ pub(super) fn clean(root: &Path) -> Result<usize> {
     super::persistence::clean_disposable_reshape_scratch(root)
 }
 
-fn reshape_root(root: &Path) -> PathBuf {
-    root.join(".gat").join("lock-reshape")
-}
-
 fn inspect_transaction(
     txn_dir: &Path,
     id: &str,
     live_intact: bool,
 ) -> Result<ReshapeTransactionState> {
-    let record_path = txn_dir.join("txn.json");
-    let record_text = match std::fs::read_to_string(&record_path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+    let malformed = |reason| ReshapeTransactionState {
+        id: id.to_string(),
+        kind: ReshapeTransactionKind::Malformed { reason },
+    };
+    let record = match read_record(txn_dir) {
+        Ok(Some(record)) => record,
+        Ok(None) => {
             return Ok(ReshapeTransactionState {
                 id: id.to_string(),
                 kind: ReshapeTransactionKind::ScratchOnly,
             });
         }
-        Err(source) => return Err(LockError::io("reading", &record_path, source)),
+        Err(LockError::Persistence(super::PersistenceError::TxnRecordMalformed {
+            source, ..
+        })) => {
+            return Ok(malformed(TransactionMalformedReason::RecordDecodeFailed(
+                source,
+            )));
+        }
+        Err(error) => return Err(error),
     };
-    let record: TxnRecord = match serde_json::from_str(&record_text) {
+    let record = match record.validate(txn_dir) {
         Ok(record) => record,
-        Err(err) => {
-            return Ok(ReshapeTransactionState {
-                id: id.to_string(),
-                kind: ReshapeTransactionKind::Malformed {
-                    reason: TransactionMalformedReason::RecordDecodeFailed(err),
-                },
-            });
+        Err(error) => {
+            return Ok(malformed(match error {
+                RecordValidationError::Phase(_) => TransactionMalformedReason::UnrecognizedPhase,
+                RecordValidationError::Id(_) => TransactionMalformedReason::IdMismatch,
+                RecordValidationError::CandidatePaths => {
+                    TransactionMalformedReason::MetadataOutsideScratchLayout
+                }
+            }));
         }
     };
-    if record.phase != PREPARED_PHASE {
-        return Ok(ReshapeTransactionState {
-            id: id.to_string(),
-            kind: ReshapeTransactionKind::Malformed {
-                reason: TransactionMalformedReason::UnrecognizedPhase,
-            },
-        });
-    }
-    if record.id != id {
-        return Ok(ReshapeTransactionState {
-            id: id.to_string(),
-            kind: ReshapeTransactionKind::Malformed {
-                reason: TransactionMalformedReason::IdMismatch,
-            },
-        });
-    }
-    if record.backup_path != txn_dir.join("backup") || record.staging_path != txn_dir.join("new") {
-        return Ok(ReshapeTransactionState {
-            id: id.to_string(),
-            kind: ReshapeTransactionKind::Malformed {
-                reason: TransactionMalformedReason::MetadataOutsideScratchLayout,
-            },
-        });
-    }
 
     let backup = inspect_candidate(
-        &record.backup_path,
-        record.source_shape,
+        record.backup_path(),
+        record.source_shape(),
         ReshapeRecoveryChoice::RestoreBackup,
     );
     let staged = inspect_candidate(
-        &record.staging_path,
-        record.target_shape,
+        record.staging_path(),
+        record.target_shape(),
         ReshapeRecoveryChoice::PromoteStaged,
     );
     let status = classify_prepared(live_intact, &backup, &staged);
