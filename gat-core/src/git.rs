@@ -171,29 +171,9 @@ struct HexBuf {
 }
 
 impl HexBuf {
-    const fn new() -> Self {
-        Self {
-            buf: [0; 64],
-            len: 0,
-        }
-    }
-
     fn as_str(&self) -> &str {
-        // Only ASCII hex digits are ever written by `GitCommitId::write_hex`.
+        // Only ASCII hex digits are ever written by `GitCommitId::encoded`.
         std::str::from_utf8(&self.buf[..self.len]).expect("hex output is always ASCII")
-    }
-}
-
-impl fmt::Write for HexBuf {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        let bytes = s.as_bytes();
-        let end = self.len + bytes.len();
-        if end > self.buf.len() {
-            return Err(fmt::Error);
-        }
-        self.buf[self.len..end].copy_from_slice(bytes);
-        self.len = end;
-        Ok(())
     }
 }
 
@@ -259,19 +239,25 @@ impl GitCommitId {
         }
     }
 
-    /// Writes this commit id's canonical lowercase-hex spelling into
-    /// `out` directly, with no intermediate `String` allocation.
-    fn write_hex(&self, out: &mut impl fmt::Write) -> fmt::Result {
-        for byte in self.as_bytes() {
-            write!(out, "{byte:02x}")?;
+    /// One stack encoding shared by display and serialization.
+    fn encoded(&self) -> HexBuf {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let bytes = self.as_bytes();
+        let mut out = HexBuf {
+            buf: [0; 64],
+            len: 2 * bytes.len(),
+        };
+        for (byte, pair) in bytes.iter().zip(out.buf.chunks_exact_mut(2)) {
+            pair[0] = HEX[usize::from(byte >> 4)];
+            pair[1] = HEX[usize::from(byte & 15)];
         }
-        Ok(())
+        out
     }
 }
 
 impl fmt::Display for GitCommitId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.write_hex(f)
+        f.write_str(self.encoded().as_str())
     }
 }
 
@@ -291,10 +277,7 @@ impl serde::Serialize for GitCommitId {
     where
         S: serde::Serializer,
     {
-        let mut buf = HexBuf::new();
-        self.write_hex(&mut buf)
-            .expect("canonical commit id hex always fits in the fixed buffer");
-        serializer.serialize_str(buf.as_str())
+        serializer.serialize_str(self.encoded().as_str())
     }
 }
 
@@ -328,6 +311,24 @@ mod tests {
         assert_eq!(json, "\"origin/main\"");
         let back: GitRevisionSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(back, spec);
+    }
+
+    #[test]
+    fn commit_id_display_and_serialization_preserve_every_digest_byte() {
+        for byte in 0..=255u8 {
+            for id in [
+                GitCommitId::Sha1([byte; 20]),
+                GitCommitId::Sha256([byte; 32]),
+            ] {
+                let expected = format!("{byte:02x}").repeat(id.as_bytes().len());
+                assert_eq!(id.to_string(), expected);
+                assert_eq!(
+                    serde_json::to_string(&id).unwrap(),
+                    format!("\"{expected}\"")
+                );
+                assert_eq!(GitCommitId::parse_hex(&expected).unwrap(), id);
+            }
+        }
     }
 
     #[test]
