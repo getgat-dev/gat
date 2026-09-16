@@ -76,7 +76,7 @@ impl FileGc {
             FileDeleteBatch(
                 batch
                     .iter()
-                    .map(|oid| self.root.join(crate::cache::object_key_oid(oid)))
+                    .map(|oid| crate::cache::layout::object_path(&self.root, oid))
                     .collect(),
             )
         })

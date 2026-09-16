@@ -270,30 +270,27 @@ impl RemoteClient {
     /// Pure preparation; physical work starts only after local admission.
     #[must_use]
     pub fn prepare_file_read(&self, oid: Oid) -> Option<PreparedFileRead> {
-        let info = self.operator.info();
-        (info.scheme() == "fs").then(|| PreparedFileRead {
-            source: PathBuf::from(info.root()).join(crate::cache::object_key_oid(&oid)),
-            oid,
-        })
+        self.file_object_path(&oid)
+            .map(|source| PreparedFileRead { source, oid })
     }
 
     #[must_use]
     pub fn prepare_file_presence(&self, oid: &Oid) -> Option<PreparedFilePresence> {
-        let info = self.operator.info();
-        (info.scheme() == "fs").then(|| {
-            PreparedFilePresence(PathBuf::from(info.root()).join(crate::cache::object_key_oid(oid)))
-        })
+        self.file_object_path(oid).map(PreparedFilePresence)
     }
 
     /// Select the filesystem capability without exposing its resolved root.
     /// The operator's canonical root preserves query-root and platform handling.
     #[must_use]
     pub fn prepare_file_write(&self, oid: &Oid, size: u64) -> Option<PreparedFileWrite> {
+        self.file_object_path(oid)
+            .map(|destination| PreparedFileWrite { destination, size })
+    }
+
+    fn file_object_path(&self, oid: &Oid) -> Option<PathBuf> {
         let info = self.operator.info();
-        (info.scheme() == "fs").then(|| PreparedFileWrite {
-            destination: PathBuf::from(info.root()).join(crate::cache::object_key_oid(oid)),
-            size,
-        })
+        (info.scheme() == "fs")
+            .then(|| crate::cache::layout::object_path(Path::new(&info.root()), oid))
     }
 }
 

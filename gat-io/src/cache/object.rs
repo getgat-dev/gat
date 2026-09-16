@@ -170,18 +170,7 @@ fn ensure_cache_directory(dir: &Path) -> Result<()> {
     })
 }
 
-/// Builds the complete on-disk path for an already-validated [`Oid`] via
-/// the shared stack-based object-key encoding, infallibly (an `Oid` is
-/// always well-formed, so there is no [`gat_core::oid::OidFormatError`]
-/// to propagate) and in one destination allocation.
-pub fn cache_path_oid(objects_dir: &Path, oid: &Oid) -> PathBuf {
-    let encoded = crate::cache::layout::ObjectKey::new(oid);
-    let key = encoded.as_str();
-    let mut path = PathBuf::with_capacity(objects_dir.as_os_str().len() + 1 + key.len());
-    path.push(objects_dir);
-    path.push(key);
-    path
-}
+pub(crate) use super::layout::object_path as cache_path_oid;
 
 /// The root of the finalized BLAKE3 object namespace under `objects_dir`
 /// (`<objects_dir>/blake3`) -- the directory whose only well-formed
