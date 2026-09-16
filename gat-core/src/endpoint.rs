@@ -110,7 +110,12 @@ pub enum TemplateToken<'a> {
     /// `$$`, expanded to one literal dollar.
     EscapedDollar,
     /// A validated environment variable name.
-    Reference(&'a str),
+    ///
+    /// ```compile_fail
+    /// use gat_core::endpoint::TemplateToken;
+    /// let reference = TemplateToken::Reference("TOKEN=SECRET");
+    /// ```
+    Reference(crate::name::EnvironmentName<'a>),
 }
 
 /// Template syntax errors carry offsets only, never input text.
@@ -145,14 +150,8 @@ pub fn tokenize_template(input: &str) -> Result<Vec<TemplateToken<'_>>, Template
                 .find('}')
                 .ok_or(TemplateSyntaxError::UnterminatedReference { offset })?;
             let name = &body[..close];
-            let mut chars = name.bytes();
-            if !chars
-                .next()
-                .is_some_and(|c| c == b'_' || c.is_ascii_alphabetic())
-                || !chars.all(|c| c == b'_' || c.is_ascii_alphanumeric())
-            {
-                return Err(TemplateSyntaxError::InvalidVariableName { offset });
-            }
+            let name = crate::name::EnvironmentName::parse(name)
+                .ok_or(TemplateSyntaxError::InvalidVariableName { offset })?;
             tokens.push(TemplateToken::Reference(name));
             offset += close + 3;
         } else {

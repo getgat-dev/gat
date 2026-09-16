@@ -1,4 +1,4 @@
-//! Persistent, lexical identity types for remotes, routes, mounts, and selections.
+//! Lexical identity types for resources and validated environment names.
 //!
 //! [`RemoteName`], [`RouteName`], and [`MountName`] wrap the map-key text
 //! Gat already accepts for `remotes:`, `routes:`, and `mounts:` config
@@ -141,9 +141,62 @@ persistent_name!(
     MountName
 );
 
+/// An environment name validated as `[A-Za-z_][A-Za-z0-9_]*`.
+/// Borrowed names avoid allocation during template parsing; owned names can
+/// safely outlive the template in structured diagnostics.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnvironmentName<'a>(std::borrow::Cow<'a, str>);
+
+impl<'a> EnvironmentName<'a> {
+    #[must_use]
+    pub fn parse(value: &'a str) -> Option<Self> {
+        let mut bytes = value.bytes();
+        (bytes
+            .next()
+            .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+            && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+        .then_some(Self(std::borrow::Cow::Borrowed(value)))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn into_owned(self) -> EnvironmentName<'static> {
+        EnvironmentName(std::borrow::Cow::Owned(self.0.into_owned()))
+    }
+}
+
+impl fmt::Display for EnvironmentName<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn environment_names_validate_without_copying_and_can_outlive_the_input() {
+        for valid in ["A", "_", "_TOKEN_2", "lower_case", "a0"] {
+            let name = EnvironmentName::parse(valid).unwrap();
+            assert_eq!(name.as_str().as_ptr(), valid.as_ptr());
+            assert_eq!(name.clone().into_owned(), name);
+        }
+        for invalid in [
+            "", "2TOKEN", "A-B", "A=B", "A B", "A\nB", "é", "A\0B", "${TOKEN}",
+        ] {
+            assert!(EnvironmentName::parse(invalid).is_none(), "{invalid:?}");
+        }
+        let name = {
+            let input = String::from("TEMPORARY_INPUT");
+            EnvironmentName::parse(&input).unwrap().into_owned()
+        };
+        assert_eq!(name.as_str(), "TEMPORARY_INPUT");
+    }
 
     #[test]
     fn round_trips_through_serde_as_a_scalar_string() {

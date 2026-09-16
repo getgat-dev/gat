@@ -7,15 +7,8 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// A name validated against the template/setting ASCII grammar.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EnvironmentName(String);
-impl EnvironmentName {
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
+/// An owned, validated environment name retained in invocation diagnostics.
+pub type EnvironmentName = gat_core::name::EnvironmentName<'static>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputValueReason {
@@ -47,12 +40,15 @@ impl TemplateResolver {
         crate::remote::interpolate_with(template, |name| {
             let value = self
                 .0
-                .get(normalize(name).as_ref())
-                .ok_or_else(|| crate::InterpolateError::MissingVariable { name: name.into() })?;
+                .get(normalize(name.as_str()).as_ref())
+                .ok_or_else(|| crate::InterpolateError::MissingVariable {
+                    name: name.clone().into_owned(),
+                })?;
             value
                 .to_str()
-                .map(str::to_owned)
-                .ok_or_else(|| crate::InterpolateError::NonUnicodeVariable { name: name.into() })
+                .ok_or_else(|| crate::InterpolateError::NonUnicodeVariable {
+                    name: name.clone().into_owned(),
+                })
         })
     }
 }
@@ -80,16 +76,19 @@ impl InvocationInputs {
         let mut variables = BTreeMap::new();
         for (key, value) in pairs {
             let key = key.into();
-            let Some(key) = key.to_str().filter(|s| valid_name(s)) else {
+            let Some(key) = key
+                .to_str()
+                .and_then(gat_core::name::EnvironmentName::parse)
+            else {
                 continue;
             };
-            match variables.entry(normalize(key).into_owned()) {
+            match variables.entry(normalize(key.as_str()).into_owned()) {
                 Entry::Vacant(entry) => {
                     entry.insert(value.into());
                 }
-                Entry::Occupied(entry) => {
+                Entry::Occupied(_) => {
                     return Err(InvocationInputError::DuplicateName {
-                        name: EnvironmentName(entry.key().clone()),
+                        name: key.into_owned(),
                     });
                 }
             }
@@ -127,13 +126,6 @@ impl InvocationInputs {
         self.templates.clone()
     }
 }
-fn valid_name(name: &str) -> bool {
-    let mut bytes = name.bytes();
-    bytes
-        .next()
-        .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
-        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
-}
 fn normalize(name: &str) -> Cow<'_, str> {
     if cfg!(windows) && name.bytes().any(|byte| byte.is_ascii_lowercase()) {
         Cow::Owned(name.to_ascii_uppercase())
@@ -170,6 +162,30 @@ mod tests {
         let mut config = Config::default();
         inputs.settings().apply_to(&mut config);
         config
+    }
+
+    #[test]
+    fn captured_names_and_template_references_share_validation() {
+        for invalid in ["1BAD", "BAD-NAME", "TOKEN=SECRET", "BAD\nNAME", "é"] {
+            let inputs = InvocationInputs::from_pairs([(invalid, "secret")]).unwrap();
+            let template = format!("${{{invalid}}}");
+            let error = inputs.templates.expand(&template).unwrap_err();
+            assert!(matches!(
+                error,
+                crate::InterpolateError::InvalidVariableName { .. }
+            ));
+            assert!(!format!("{error:?} {error}").contains(invalid));
+        }
+        let inputs = InvocationInputs::from_pairs([("_TOKEN_2", "a+b&c")]).unwrap();
+        assert_eq!(
+            inputs.templates.expand("${_TOKEN_2}/${_TOKEN_2}").unwrap(),
+            "a+b&c/a+b&c"
+        );
+        let error = inputs.templates.expand("${MISSING}").unwrap_err();
+        let crate::InterpolateError::MissingVariable { name } = error else {
+            panic!("expected missing variable");
+        };
+        assert_eq!(name.as_str(), "MISSING");
     }
 
     #[test]

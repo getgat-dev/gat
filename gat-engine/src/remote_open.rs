@@ -4,9 +4,9 @@
 /// or opened. Classification contains no resolved endpoint values.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemoteOpenFailureKind {
-    NonUnicodeVariable { name: String },
+    NonUnicodeVariable { name: crate::EnvironmentName },
     InvalidInterpolation,
-    MissingVariable { name: String },
+    MissingVariable { name: crate::EnvironmentName },
     MalformedUrl,
     UnsupportedBackend,
     InvalidFileRemotePath { hint: &'static str },

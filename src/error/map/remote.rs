@@ -33,12 +33,12 @@ pub(super) fn semantic_remote_open_failure(
 
     let subject = UserLine::redacted_url(&crate::redaction::render_remote_template(template));
     let (diagnostic, expected) = match kind {
-        RemoteOpenFailureKind::NonUnicodeVariable { name } => (non_unicode_variable_diagnostic(name), true),
+        RemoteOpenFailureKind::NonUnicodeVariable { name } => (non_unicode_variable_diagnostic(name.as_str()), true),
         RemoteOpenFailureKind::InvalidInterpolation => {
             (super::interpolate::interpolation_syntax_diagnostic(), true)
         }
         RemoteOpenFailureKind::MissingVariable { name } => {
-            (super::interpolate::missing_variable_diagnostic(name), true)
+            (super::interpolate::missing_variable_diagnostic(name.as_str()), true)
         }
         RemoteOpenFailureKind::MalformedUrl => (
             Diagnostic::new(ErrorCode::RemoteInvalid, "Invalid remote url")
@@ -148,7 +148,7 @@ pub(super) fn readiness_diagnostic(
         UserLine::authored("'"),
     ]);
     match kind {
-        RemoteOpenFailureKind::NonUnicodeVariable { name } => Some(non_unicode_variable_diagnostic(name)),
+        RemoteOpenFailureKind::NonUnicodeVariable { name } => Some(non_unicode_variable_diagnostic(name.as_str())),
         RemoteOpenFailureKind::ReadinessTimedOut { budget } => Some(
             Diagnostic::new(ErrorCode::RemoteUnavailable, UserLine::compose([
                 UserLine::authored("Readiness check for "), remote,
