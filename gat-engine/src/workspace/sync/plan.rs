@@ -8,6 +8,7 @@
 //! Only `super::execute` is allowed to write.
 
 use std::borrow::Borrow;
+use std::num::NonZeroUsize;
 
 use super::{ConflictResolution, PlanSink, Result, SyncAction, SyncError, SyncPlan, Validation};
 use crate::repository::Repository as Repo;
@@ -194,7 +195,7 @@ pub(crate) mod test_support {
 /// `Vec<SyncAction>` merely so a later phase can apply or collect it.
 struct MergeBuffer<'a> {
     cache: &'a CacheClient,
-    merge_window: usize,
+    merge_window: NonZeroUsize,
     sink: &'a mut dyn PlanSink,
     rows: Vec<BufferedRow>,
     pending_oids: Vec<Oid>,
@@ -231,7 +232,7 @@ struct MergeBuffer<'a> {
 impl<'a> MergeBuffer<'a> {
     fn new(
         cache: &'a CacheClient,
-        merge_window: usize,
+        merge_window: NonZeroUsize,
         sink: &'a mut dyn PlanSink,
         rematerialize: bool,
     ) -> Self {
@@ -280,7 +281,7 @@ impl<'a> MergeBuffer<'a> {
     }
 
     fn flush_if_full(&mut self) -> Result<()> {
-        if self.rows.len() >= self.merge_window {
+        if self.rows.len() >= self.merge_window.get() {
             self.flush()?;
         }
         Ok(())
@@ -473,8 +474,7 @@ fn next_matching_prior(
 pub fn plan(repo: &Repo, selection: &Selection, validation: Validation) -> Result<SyncPlan> {
     let merge_window = crate::limits::ExecutionLimits::production()
         .sync
-        .merge_window
-        .get();
+        .merge_window;
     let store = StateStore::open_if_exists(repo.layout())?;
     let policy = crate::ReconciliationPolicy::from(validation)
         .for_ledger(store.as_ref().is_some_and(StateStore::validation_required));
@@ -482,7 +482,7 @@ pub fn plan(repo: &Repo, selection: &Selection, validation: Validation) -> Resul
     // desired-index freshness guarantee, so the authoritative on-disk
     // `gat.lock` -- not the SQLite mirror -- is the only correct source
     // here. Callers that already refreshed the mirror plan through
-    // `plan_with_store(.., None, ..)` instead, which streams.
+    // `DesiredSource::Store` instead, which streams.
     let desired_lock = LockStore::load_repository(repo.layout())?;
     // This standalone read-only entry point has no operation/`Operation`
     // to source a shared cache from -- it is used outside the `Operation`
@@ -495,9 +495,9 @@ pub fn plan(repo: &Repo, selection: &Selection, validation: Validation) -> Resul
     plan_with_store(
         repo,
         &cache,
-        DesiredSource {
+        DesiredSource::Lock {
             store: store.as_ref(),
-            desired_lock: Some(&desired_lock),
+            lock: &desired_lock,
         },
         selection,
         // This read-only planning API never rematerializes: only
@@ -509,26 +509,7 @@ pub fn plan(repo: &Repo, selection: &Selection, validation: Validation) -> Resul
     )
 }
 
-/// Like [`plan`], but optionally takes an already-loaded `desired_lock`
-/// (`Some`) instead of streaming desired rows from `SQLite` (`None`).
-/// Callers that cannot assume the mirror is fresh (a `--dry-run` sync, or
-/// any use before the mirror has been built) must pass a freshly-loaded
-/// [`Lock`]. Callers that *can* assume the mirror is fresh should pass
-/// `None`: planning then streams the desired side directly from `SQLite`
-/// through the shared desired-query layer and never materializes a full
-/// [`Lock`] at all; exclude regeneration afterwards streams
-/// desired paths from the same store (`excludes::sync_from_store`).
-///
-/// `store` may also be `None`, for a store that is genuinely absent
-/// (see [`StateStore::open_if_exists`]) rather than merely empty:
-/// there is no materialized cursor to drive at all, so every desired path
-/// is compared against an implicit "nothing has ever been materialized
-/// here" prior, exactly as the merge loop treats a desired path with no
-/// matching materialized row.
-/// [`super::PlanSink`] that reconstructs a complete [`SyncPlan`] -- the
-/// read-only planning API's behavior (`plan()`, `--dry-run`, and any other
-/// caller that genuinely needs the whole plan for inspection) unchanged
-/// from before `plan_into_sink` existed.
+/// Collects a complete plan for callers that need to inspect its actions.
 #[derive(Default)]
 pub(crate) struct CollectPlanSink {
     actions: Vec<SyncAction>,
@@ -547,89 +528,78 @@ impl super::PlanSink for CollectPlanSink {
     }
 }
 
-/// Like [`plan_with_store`], but delivers every classified action (and
-/// stat refresh) to `sink` as it's produced instead of collecting a
-/// complete [`SyncPlan`]. The mutating `Validation::Validate`
-/// sync path drives this directly with an
-/// [`super::execute::ExecutePlanSink`] so a huge repository's full
-/// desired/materialized merge never has to be fully classified in memory
-/// before the first action is applied.
-/// The store/`Lock` combination [`plan_into_sink`]/[`plan_with_store`]
-/// merge desired rows against a prior materialized cursor with -- bundled
-/// into one value so adding `merge_window` alongside them didn't push
-/// either function over clippy's argument-count lint (which this codebase
-/// treats as a real "too many independently-supplied values" signal, not
-/// boilerplate to suppress.
-/// [`Self::desired_lock`] documents the same `Some`/`None` streaming
-/// contract [`plan_into_sink`] always had.
-pub(crate) struct DesiredSource<'a> {
-    pub(crate) store: Option<&'a StateStore>,
-    pub(crate) desired_lock: Option<&'a Lock>,
+/// An authoritative desired source, with prior materialized state when available.
+pub(crate) enum DesiredSource<'a> {
+    /// Use a freshly loaded lock when the desired mirror may be stale or absent.
+    Lock {
+        lock: &'a Lock,
+        store: Option<&'a StateStore>,
+    },
+    /// Stream desired and materialized rows from an already refreshed store.
+    Store(&'a StateStore),
 }
 
+/// Delivers classified actions and stat refreshes in bounded batches to `sink`.
+/// Mutating sync can apply each batch without retaining a complete plan.
 pub(crate) fn plan_into_sink(
     repo: &Repo,
     cache: &CacheClient,
     desired: DesiredSource<'_>,
     selection: &Selection,
     policy: crate::ReconciliationPolicy,
-    merge_window: usize,
+    merge_window: NonZeroUsize,
     sink: &mut dyn super::PlanSink,
 ) -> Result<()> {
-    let DesiredSource {
-        store,
-        desired_lock,
-    } = desired;
     let scope = selection.scope_path();
 
-    if let Some(desired_lock) = desired_lock {
-        let desired = filter_desired_entries(&desired_lock.entries, selection);
-        debug_assert_sorted_entries(&desired);
-        let mut desired_iter = desired.into_iter();
-        match store {
-            Some(store) => store.with_rows_in_scope(scope, |mut materialized| {
-                let mut next_prior = || materialized.next();
-                merge_desired_with_prior(
+    match desired {
+        DesiredSource::Lock { lock, store } => {
+            let desired = filter_desired_entries(&lock.entries, selection);
+            debug_assert_sorted_entries(&desired);
+            let mut desired_iter = desired.into_iter();
+            match store {
+                Some(store) => store.with_rows_in_scope(scope, |mut materialized| {
+                    let mut next_prior = || materialized.next();
+                    merge_desired_with_prior(
+                        repo,
+                        cache,
+                        policy,
+                        &mut || Ok(desired_iter.next()),
+                        &mut || next_matching_prior(&mut next_prior, selection),
+                        merge_window,
+                        sink,
+                    )
+                })?,
+                None => merge_desired_with_prior(
                     repo,
                     cache,
                     policy,
                     &mut || Ok(desired_iter.next()),
-                    &mut || next_matching_prior(&mut next_prior, selection),
+                    &mut || Ok(None),
                     merge_window,
                     sink,
-                )
-            })?,
-            None => merge_desired_with_prior(
-                repo,
-                cache,
-                policy,
-                &mut || Ok(desired_iter.next()),
-                &mut || Ok(None),
-                merge_window,
-                sink,
-            )?,
+                )?,
+            }
         }
-    } else {
-        let Some(store) = store else {
-            return Err(SyncError::missing_materialized_store());
-        };
-        // The desired side is narrowed by `Selection::scope_path()` in
-        // SQL and filtered by `Selection::matches` as the residual
-        // authority; see `DesiredQuery::for_selection`.
-        store.with_desired_rows(DesiredQuery::for_selection(selection), |mut desired| {
-            store.with_rows_in_scope(scope, |mut materialized| {
-                let mut next_prior = || materialized.next();
-                merge_desired_with_prior(
-                    repo,
-                    cache,
-                    policy,
-                    &mut || Ok(desired.next()?.map(DesiredRow::into_entry)),
-                    &mut || next_matching_prior(&mut next_prior, selection),
-                    merge_window,
-                    sink,
-                )
-            })
-        })?;
+        DesiredSource::Store(store) => {
+            // The desired side is narrowed by `Selection::scope_path()` in
+            // SQL and filtered by `Selection::matches` as the residual
+            // authority; see `DesiredQuery::for_selection`.
+            store.with_desired_rows(DesiredQuery::for_selection(selection), |mut desired| {
+                store.with_rows_in_scope(scope, |mut materialized| {
+                    let mut next_prior = || materialized.next();
+                    merge_desired_with_prior(
+                        repo,
+                        cache,
+                        policy,
+                        &mut || Ok(desired.next()?.map(DesiredRow::into_entry)),
+                        &mut || next_matching_prior(&mut next_prior, selection),
+                        merge_window,
+                        sink,
+                    )
+                })
+            })?;
+        }
     }
     Ok(())
 }
@@ -640,7 +610,7 @@ pub(crate) fn plan_with_store(
     desired: DesiredSource<'_>,
     selection: &Selection,
     policy: crate::ReconciliationPolicy,
-    merge_window: usize,
+    merge_window: NonZeroUsize,
 ) -> Result<SyncPlan> {
     let mut sink = CollectPlanSink::default();
     plan_into_sink(
@@ -677,7 +647,7 @@ fn merge_desired_with_prior<D: Borrow<Entry>>(
     policy: crate::ReconciliationPolicy,
     next_desired: &mut dyn FnMut() -> Result<Option<D>>,
     next_prior: &mut dyn FnMut() -> Result<Option<MaterializedRow>>,
-    merge_window: usize,
+    merge_window: NonZeroUsize,
     sink: &mut dyn super::PlanSink,
 ) -> Result<()> {
     let validation = policy.validation();

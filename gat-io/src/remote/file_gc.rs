@@ -93,19 +93,9 @@ impl FileObjectScan {
     fn read_batch(&mut self) -> io::Result<Option<Vec<Oid>>> {
         if !self.started {
             self.started = true;
-            match std::fs::symlink_metadata(&self.root) {
-                Ok(metadata) if metadata.is_dir() => {
-                    self.stack
-                        .push((std::fs::read_dir(&self.root)?, ScanLevel::Namespace));
-                }
-                Ok(_) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "invalid object namespace",
-                    ));
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => return Err(error),
+            if let Some(directory) = crate::local_directory::read_directory_if_present(&self.root)?
+            {
+                self.stack.push((directory, ScanLevel::Namespace));
             }
         }
         let mut objects = Vec::with_capacity(FILE_GC_BATCH_SIZE);

@@ -186,14 +186,14 @@ fn temporary_entries(objects_dir: &Path, remove: bool) -> Result<usize, CacheMai
 }
 
 pub fn purge_objects(objects_dir: &Path) -> Result<usize, CacheMaintenanceError> {
-    purge_namespace(&objects_dir.join("blake3"))
+    purge_namespace(&super::object::object_namespace_dir(objects_dir))
 }
 
 fn purge_namespace(path: &Path) -> Result<usize, CacheMaintenanceError> {
-    let entries = match std::fs::read_dir(path) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(source) => return Err(CacheMaintenanceError::io(path, source)),
+    let Some(entries) = crate::local_directory::read_directory_if_present(path)
+        .map_err(|source| CacheMaintenanceError::io(path, source))?
+    else {
+        return Ok(0);
     };
     let mut purged = 0;
     for entry in entries {
@@ -233,6 +233,32 @@ fn remove_database_files(objects_dir: &Path) -> Result<(), CacheMaintenanceError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn purge_rejects_a_namespace_symlink_without_touching_its_target() {
+        let cache = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let payload = external.path().join("user-file");
+        std::fs::write(&payload, b"preserve").unwrap();
+        let namespace = super::super::object::object_namespace_dir(cache.path());
+        std::os::unix::fs::symlink(external.path(), &namespace).unwrap();
+        assert!(
+            matches!(purge_objects(cache.path()), Err(CacheMaintenanceError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::InvalidData)
+        );
+        assert_eq!(std::fs::read(payload).unwrap(), b"preserve");
+        assert!(std::fs::symlink_metadata(namespace).unwrap().is_symlink());
+    }
+
+    #[test]
+    fn purge_rejects_a_non_directory_namespace() {
+        let cache = tempfile::tempdir().unwrap();
+        let namespace = super::super::object::object_namespace_dir(cache.path());
+        std::fs::write(&namespace, b"preserve").unwrap();
+        assert!(purge_objects(cache.path()).is_err());
+        assert_eq!(std::fs::read(namespace).unwrap(), b"preserve");
+    }
 
     #[test]
     fn purge_objects_removes_only_the_blake3_namespace() {

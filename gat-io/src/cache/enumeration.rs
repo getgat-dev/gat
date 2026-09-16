@@ -1,4 +1,4 @@
-use super::layout::ObjectFanout;
+use super::layout::{ObjectFanout, parse_fanout_segment};
 use super::object::object_namespace_dir;
 use super::proof::{CacheProofError, CacheState};
 use gat_core::oid::Oid;
@@ -70,13 +70,12 @@ pub(crate) fn sweep_objects<E>(
 ) -> Result<Result<CacheSweepStats, E>, CacheEnumerationError> {
     let objects_dir = &root.objects_dir;
     let namespace = object_namespace_dir(objects_dir);
-    let entries = match std::fs::read_dir(&namespace) {
-        Ok(entries) => collect_entries(&namespace, entries)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Ok(CacheSweepStats::default()));
-        }
-        Err(source) => return Err(CacheEnumerationError::io("read", &namespace, source)),
+    let Some(entries) = crate::local_directory::read_directory_if_present(&namespace)
+        .map_err(|source| CacheEnumerationError::io("read", &namespace, source))?
+    else {
+        return Ok(Ok(CacheSweepStats::default()));
     };
+    let entries = collect_entries(&namespace, entries)?;
     // Merely enumerating objects needs neither a writable proof database nor
     // a removal buffer. Initialize them only when a deletion is selected.
     let mut state = None;
@@ -85,6 +84,9 @@ pub(crate) fn sweep_objects<E>(
 
     for l1 in entries {
         let l1_name = l1.file_name();
+        let Some(first) = l1_name.to_str().and_then(parse_fanout_segment) else {
+            continue;
+        };
         let l1_path = l1.path();
         if !l1
             .file_type()
@@ -95,6 +97,11 @@ pub(crate) fn sweep_objects<E>(
         }
         let mut l1_nonempty = false;
         for l2 in directory_entries(&l1_path)? {
+            let l2_name = l2.file_name();
+            let Some(second) = l2_name.to_str().and_then(parse_fanout_segment) else {
+                l1_nonempty = true;
+                continue;
+            };
             let l2_path = l2.path();
             if !l2
                 .file_type()
@@ -104,17 +111,11 @@ pub(crate) fn sweep_objects<E>(
                 l1_nonempty = true;
                 continue;
             }
-            let l2_name = l2.file_name();
-            let fanout = l1_name
-                .to_str()
-                .zip(l2_name.to_str())
-                .and_then(|(first, second)| ObjectFanout::from_segments(first, second));
+            let fanout = ObjectFanout::new(first, second);
             let mut l2_nonempty = false;
             for leaf in directory_entries(&l2_path)? {
                 let name = leaf.file_name();
-                let Some(oid) = fanout
-                    .and_then(|fanout| name.to_str().and_then(|name| fanout.parse_leaf(name)))
-                else {
+                let Some(oid) = name.to_str().and_then(|name| fanout.parse_leaf(name)) else {
                     l2_nonempty = true;
                     continue;
                 };
@@ -250,6 +251,52 @@ mod tests {
             )),
             Err(CacheEnumerationError::Io { .. })
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sweep_rejects_namespace_symlinks_before_visiting_external_objects() {
+        let temp = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let oid = ingest(external.path(), std::io::Cursor::new(b"external payload"))
+            .unwrap()
+            .oid;
+        let namespace = object_namespace_dir(temp.path());
+        std::os::unix::fs::symlink(object_namespace_dir(external.path()), &namespace).unwrap();
+        let root = super::super::root::CacheRootInner::new(temp.path().to_path_buf(), None);
+        for dry_run in [true, false] {
+            let result = sweep_objects::<std::convert::Infallible>(&root, dry_run, |_| {
+                panic!("symlinked namespace must never reach the deletion policy")
+            });
+            assert!(
+                matches!(result, Err(CacheEnumerationError::Io { source, .. }) if source.kind() == std::io::ErrorKind::InvalidData)
+            );
+            assert_eq!(
+                std::fs::read(cache_path_oid(external.path(), &oid)).unwrap(),
+                b"external payload"
+            );
+            assert!(std::fs::symlink_metadata(&namespace).unwrap().is_symlink());
+        }
+    }
+
+    #[test]
+    fn invalid_fanout_directories_are_preserved_without_traversal_or_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let namespace = object_namespace_dir(temp.path());
+        for path in ["not-fanout/aa", "aa/not-fanout"] {
+            std::fs::create_dir_all(namespace.join(path)).unwrap();
+        }
+        let root = super::super::root::CacheRootInner::new(temp.path().to_path_buf(), None);
+        test_support::reset_remove_dir_attempt_count();
+        let stats = sweep_objects::<std::convert::Infallible>(&root, false, |_| {
+            panic!("no canonical objects")
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(stats, CacheSweepStats::default());
+        assert_eq!(test_support::remove_dir_attempt_count(), 0);
+        assert!(namespace.join("not-fanout/aa").is_dir());
+        assert!(namespace.join("aa/not-fanout").is_dir());
     }
 
     #[test]

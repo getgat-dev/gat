@@ -55,8 +55,7 @@ impl From<SyncError> for Failure {
                 | MutationAuthorityFailureKind::InvalidArgument
                 | MutationAuthorityFailureKind::Conflict,
             ) => Self::expected_with_source(diagnostic, err),
-            SyncErrorKind::Internal
-            | SyncErrorKind::InvalidObjectId
+            SyncErrorKind::InvalidObjectId
             | SyncErrorKind::Filesystem(_)
             | SyncErrorKind::State(_)
             | SyncErrorKind::Cache(_)
@@ -78,9 +77,6 @@ pub(super) fn classify(err: &SyncError) -> Diagnostic {
 
 pub(super) fn classify_kind(kind: &SyncErrorKind) -> Diagnostic {
     match kind {
-        SyncErrorKind::Internal => {
-            Diagnostic::new(ErrorCode::Internal, "Gat hit an unexpected internal error")
-        }
         SyncErrorKind::InvalidTrackedPath(path) => {
             Diagnostic::new(ErrorCode::InvalidPath, "gat.lock tracks an invalid path")
                 .with_subject(UserLine::path_text(path))

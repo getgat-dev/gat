@@ -72,7 +72,6 @@ pub enum MutationAuthorityFailureKind {
 /// Application-facing category for a reconciliation failure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SyncErrorKind {
-    Internal,
     InvalidTrackedPath(String),
     Filesystem(FilesystemFailureKind),
     Lock(LockFailureKind),
@@ -126,10 +125,6 @@ impl SyncError {
             .is_some()
     }
 
-    pub(crate) fn missing_materialized_store() -> Self {
-        Self::new(SyncErrorKind::Internal, MissingStateStore)
-    }
-
     pub(crate) fn flush_after_failure(primary: Self, flush_error: Self) -> Self {
         let kind = primary.kind.clone();
         Self::new(
@@ -145,7 +140,6 @@ impl SyncError {
 impl std::fmt::Display for SyncError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let stage = match self.kind {
-            SyncErrorKind::Internal => "prepare reconciliation",
             SyncErrorKind::InvalidTrackedPath(_) | SyncErrorKind::WorktreePath { .. } => {
                 "validate a working-tree path"
             }
@@ -169,10 +163,6 @@ impl std::error::Error for SyncError {
         Some(&*self.source)
     }
 }
-
-#[derive(Debug, thiserror::Error)]
-#[error("streaming desired planning requires a materialized-state store")]
-struct MissingStateStore;
 
 /// Retains both typed halves of a reconciliation failure whose recovery flush
 /// also failed.
@@ -577,8 +567,12 @@ mod tests {
     #[test]
     fn flush_failure_retains_both_complete_sync_errors() {
         let error = SyncError::flush_after_failure(
-            SyncError::missing_materialized_store(),
-            SyncError::missing_materialized_store(),
+            SyncError::from(StateStoreError::InvalidRow {
+                detail: "primary".into(),
+            }),
+            SyncError::from(LockError::Atomic(AtomicError::LockTimedOut {
+                path: PathBuf::from("flush"),
+            })),
         );
         let composite = error
             .source()
@@ -586,8 +580,14 @@ mod tests {
             .downcast_ref::<FlushFailureComposite>()
             .expect("flush composite should remain the direct source");
 
-        assert_eq!(composite.primary.kind(), &SyncErrorKind::Internal);
-        assert_eq!(composite.flush_error.kind(), &SyncErrorKind::Internal);
+        assert_eq!(
+            composite.primary.kind(),
+            &SyncErrorKind::State(StateFailureKind::Corrupt)
+        );
+        assert_eq!(
+            composite.flush_error.kind(),
+            &SyncErrorKind::Lock(LockFailureKind::RepositoryLocked)
+        );
         assert!(error.flush_failed());
     }
 }
