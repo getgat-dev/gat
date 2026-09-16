@@ -273,10 +273,9 @@ impl GitIntegration {
         let Some(existing) = read_optional_text(&path, false)? else {
             return Ok(GitIntegrationStatus::Unchanged);
         };
-        if !existing.contains(ATTR_BEGIN) {
+        let Some(updated) = gat_core::managed_block::remove(&existing, ATTR_BEGIN, ATTR_END) else {
             return Ok(GitIntegrationStatus::Unchanged);
-        }
-        let updated = gat_core::managed_block::remove(&existing, ATTR_BEGIN, ATTR_END);
+        };
         if updated.trim().is_empty() {
             remove_file(&path)?;
         } else {

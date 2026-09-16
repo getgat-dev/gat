@@ -11,7 +11,6 @@ impl From<MoveError> for Failure {
             MoveError::Path(source) => source.into(),
             MoveError::Acquisition(source) => (*source).into(),
             MoveError::PathPolicy(source) => source.into(),
-            MoveError::RemoteCatalog(source) => source.into(),
             MoveError::RepositoryMutation(source) => (*source).into(),
             MoveError::SourceNotTracked { ref path } => Self::expected(
                 Diagnostic::new(ErrorCode::Conflict, "This path is not tracked by gat")

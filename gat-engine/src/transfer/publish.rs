@@ -14,7 +14,7 @@ use futures::stream::{BoxStream, SelectAll};
 use futures::{FutureExt, StreamExt};
 use gat_core::lexical_path::GatPath;
 use gat_core::oid::Oid;
-use gat_io::{CacheError, CacheObject, CompletedCacheVerification, ObjectVerification};
+use gat_io::{CacheError, CompletedCacheVerification, VerifiedCacheEntry, VerifiedCacheObject};
 use std::collections::{BTreeMap, VecDeque};
 
 const VERIFICATION_BATCH_SIZE: usize = 128;
@@ -118,14 +118,14 @@ impl CacheRejection {
 
 enum VerificationState {
     Running { waiting: WaitingObligations },
-    Valid { source: CacheObject },
+    Valid { source: VerifiedCacheObject },
     Invalid { rejection: CacheRejection },
 }
 
 /// The next action after a remote reports an object missing.
 enum VerificationAction {
     Wait,
-    Upload(CacheObject),
+    Upload(VerifiedCacheObject),
     Reject(CacheRejection),
 }
 
@@ -523,10 +523,7 @@ pub fn publish_window(
                                         )
                                     };
                                     match verification {
-                                        ObjectVerification::Valid => {
-                                            let source = services
-                                                .cache_session
-                                                .object_source(services.cache_root, &oid);
+                                        VerifiedCacheEntry::Valid(source) => {
                                             for &index in waiting.iter() {
                                                 enqueue_upload(
                                                     &mut state,
@@ -540,14 +537,12 @@ pub fn publish_window(
                                                 .verification
                                                 .insert(oid, VerificationState::Valid { source });
                                         }
-                                        ObjectVerification::Missing
-                                        | ObjectVerification::Corrupt => {
-                                            let rejection =
-                                                if verification == ObjectVerification::Missing {
-                                                    CacheRejection::Missing
-                                                } else {
-                                                    CacheRejection::Corrupt
-                                                };
+                                        VerifiedCacheEntry::Missing
+                                        | VerifiedCacheEntry::Corrupt => {
+                                            let rejection = match verification {
+                                                VerifiedCacheEntry::Missing => CacheRejection::Missing,
+                                                _ => CacheRejection::Corrupt,
+                                            };
                                             for &index in waiting.iter() {
                                                 complete_obligation(
                                                     &mut state.statuses,
@@ -693,7 +688,7 @@ fn enqueue_upload(
     handles: &BTreeMap<RemoteId, RemoteHandle>,
     objects: &[PublishObject],
     index: usize,
-    source: CacheObject,
+    source: VerifiedCacheObject,
 ) {
     if state
         .error
@@ -1036,7 +1031,18 @@ mod tests {
         state.record_error(1, PublishError::Upload(UploadError::Cancelled));
         // Simulate verified completions arriving after the error was recorded.
         for index in [2, 0, 1] {
-            let source = cache.object(&objects[index].oid);
+            let completed = cache
+                .prepare_verification(&[objects[index].oid])
+                .verify()
+                .unwrap();
+            let source = cache
+                .commit_verified_objects(completed)
+                .unwrap()
+                .pop()
+                .unwrap();
+            let VerifiedCacheEntry::Valid(source) = source else {
+                panic!("fixture source must be verified");
+            };
             enqueue_upload(&mut state, &handles, &objects, index, source);
         }
         let ready = &state.ready_uploads[&remote];
@@ -1052,7 +1058,6 @@ mod tests {
         let error = |message: &'static str| {
             PublishError::Presence(RemotePresenceError::PresenceCheck {
                 remote_name: Arc::from("a"),
-                route_name: None,
                 route: None,
                 path: GatPath::parse_canonical("f").unwrap(),
                 source: Box::new(std::io::Error::other(message)),

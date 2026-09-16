@@ -5,10 +5,9 @@ use gat_core::progress::{
     with_progress_typed,
 };
 use gat_engine::{
-    DestinationKind, EffectivePathPolicy, PathPolicyError, RemoteCatalog, RemoteCatalogError,
-    Repository, RepositoryMutationError, WorktreeMoveError, WorktreePathError,
-    WorktreeRollbackError, inspect_move_destination, move_worktree_path, rollback_worktree_move,
-    validate_mutation_path,
+    DestinationKind, MountOwnership, PathPolicyError, Repository, RepositoryMutationError,
+    WorktreeMoveError, WorktreePathError, WorktreeRollbackError, inspect_move_destination,
+    move_worktree_path, rollback_worktree_move, validate_mutation_path,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,8 +33,6 @@ pub enum MoveError {
     Acquisition(Box<gat_engine::RepoSnapshotError>),
     #[error(transparent)]
     PathPolicy(#[from] PathPolicyError),
-    #[error(transparent)]
-    RemoteCatalog(#[from] RemoteCatalogError),
     #[error(transparent)]
     RepositoryMutation(#[from] Box<RepositoryMutationError>),
     #[error("`{path}` is not tracked by gat")]
@@ -107,8 +104,7 @@ pub fn move_with_progress(
 ) -> Result<MoveOutcome> {
     let MoveRequest { src, dst, force } = request;
     repo.with_desired_mutation(progress, |cfg, mut desired| {
-        let catalog = RemoteCatalog::from_config(&cfg.remotes)?;
-        let policy = EffectivePathPolicy::from_config(cfg, &catalog)?;
+        let policy = MountOwnership::new(&cfg.mounts)?;
         assert_root_owned(&policy, &dst)?;
         let dst_collisions = with_progress_typed(
             progress,

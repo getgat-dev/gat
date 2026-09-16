@@ -6,8 +6,8 @@
 use gat_core::lexical_path::GatPath;
 use gat_core::oid::Oid;
 use gat_io::{
-    CacheClient, CacheError, CacheObject, CachePublication, CacheResult, CacheRoot,
-    CacheVerificationFailure, CompletedCacheVerification, DesiredStateSession, IngestStrategy,
+    CacheClient, CacheError, CachePublication, CacheResult, CacheRoot, CacheVerificationFailure,
+    CompletedCacheVerification, DesiredStateSession, IngestStrategy,
     MaterializationPreparationError, ObjectVerification, PreparedCacheVerification,
     PreparedMaterialization,
 };
@@ -72,15 +72,10 @@ impl CacheSession {
         &mut self,
         cache_root: &CacheRoot,
         completed: CompletedCacheVerification,
-    ) -> Result<Vec<ObjectVerification>, CacheVerificationError> {
+    ) -> Result<Vec<gat_io::VerifiedCacheEntry>, CacheVerificationError> {
         self.cache(cache_root)
-            .commit_verification(completed)
+            .commit_verified_objects(completed)
             .map_err(Into::into)
-    }
-
-    /// Create a lazy reader without exposing physical paths.
-    pub(crate) fn object_source(&mut self, cache_root: &CacheRoot, oid: &Oid) -> CacheObject {
-        self.cache(cache_root).object(oid)
     }
 
     /// Verifies callers' already globally deduplicated `oids` without

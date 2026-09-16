@@ -92,7 +92,6 @@ impl<K: Eq + Hash, V> StreamingWindow<K, V> {
         Ok(())
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     #[must_use]
     pub fn unique_count(&self) -> usize {
         self.seen.len()

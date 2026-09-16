@@ -22,17 +22,32 @@ fn strip_leading_terminator(s: &str) -> &str {
         .unwrap_or_else(|| s.strip_prefix('\n').unwrap_or(s))
 }
 
-/// Locate the first marker pair only when its markers do not overlap.
+/// Find the first complete pair of marker lines. Restarting at an unmatched
+/// opening marker preserves malformed user text before an appended valid block.
 fn marker_offsets(existing: &str, begin: &str, end: &str) -> Option<(usize, usize)> {
-    let start = existing.find(begin)?;
-    let end_at = existing.find(end)?;
-    (end_at > start && end_at >= start + begin.len()).then_some((start, end_at))
+    if begin.is_empty() || end.is_empty() || begin == end {
+        return None;
+    }
+    let mut start = None;
+    let mut offset = 0;
+    for line in existing.split_inclusive('\n') {
+        let text = crate::newline::strip_terminator(line);
+        if text == begin {
+            start = Some(offset);
+        } else if text == end
+            && let Some(start) = start
+        {
+            return Some((start, offset));
+        }
+        offset += line.len();
+    }
+    None
 }
 
 /// Replaces a marked block or appends it using the file's detected line endings.
 /// `body` uses LF terminators and includes its final newline when nonempty.
-/// Missing, reversed, or overlapping markers leave the existing text intact
-/// and cause a new block to be appended.
+/// Markers must occupy complete lines. Unmatched markers and inline marker
+/// text are preserved; when no complete pair exists, a new block is appended.
 #[must_use]
 pub fn upsert(existing: &str, begin: &str, end: &str, body: &str) -> String {
     let eol = Eol::detect(existing);
@@ -64,21 +79,17 @@ pub fn upsert(existing: &str, begin: &str, end: &str, body: &str) -> String {
 }
 
 /// Removes a marked block and its following line terminator, preserving
-/// all other bytes. Missing, reversed, or overlapping markers are a no-op.
+/// all other bytes. `None` means no complete pair of marker lines was present;
+/// that case allocates nothing and requires no filesystem update.
 #[must_use]
-pub fn remove(existing: &str, begin: &str, end: &str) -> String {
-    match marker_offsets(existing, begin, end) {
-        Some((start, end_at)) => {
-            let before = &existing[..start];
-            let after = &existing[end_at + end.len()..];
-            let after = strip_leading_terminator(after);
-            format!("{before}{after}")
-        }
-        _ => existing.to_string(),
-    }
+pub fn remove(existing: &str, begin: &str, end: &str) -> Option<String> {
+    let (start, end_at) = marker_offsets(existing, begin, end)?;
+    let before = &existing[..start];
+    let after = strip_leading_terminator(&existing[end_at + end.len()..]);
+    Some(format!("{before}{after}"))
 }
 
-/// Returns the body between non-overlapping markers, excluding one line
+/// Returns the body between a complete pair of marker lines, excluding one line
 /// terminator immediately after the opening marker.
 #[must_use]
 pub fn extract_body<'a>(existing: &'a str, begin: &str, end: &str) -> Option<&'a str> {
@@ -96,10 +107,38 @@ mod tests {
     const END: &str = "# <<< gat <<<";
 
     #[test]
+    fn inline_marker_text_is_preserved_and_does_not_hide_a_real_block() {
+        for newline in ["\n", "\r\n"] {
+            let user = format!("echo '{BEGIN}'{newline}keep this{newline}# example {END}{newline}");
+            assert_eq!(extract_body(&user, BEGIN, END), None);
+            assert_eq!(remove(&user, BEGIN, END), None);
+            let installed = upsert(&user, BEGIN, END, "managed\n");
+            assert!(installed.starts_with(&user));
+            assert_eq!(remove(&installed, BEGIN, END), Some(user));
+            assert_eq!(upsert(&installed, BEGIN, END, "managed\n"), installed);
+        }
+    }
+
+    #[test]
+    fn malformed_markers_are_preserved_without_repeated_appends() {
+        for existing in [
+            format!("{END}\nuser content\n{BEGIN}\n"),
+            format!("{BEGIN}\nuser content\n"),
+            format!("{END}\nuser content\n"),
+            format!("{BEGIN} suffix\nuser content\n{END} suffix\n"),
+        ] {
+            assert_eq!(remove(&existing, BEGIN, END), None);
+            let installed = upsert(&existing, BEGIN, END, "managed\n");
+            assert_eq!(upsert(&installed, BEGIN, END, "managed\n"), installed);
+            assert_eq!(remove(&installed, BEGIN, END), Some(existing));
+        }
+    }
+
+    #[test]
     fn overlapping_markers_are_not_a_block() {
         let existing = "prefix abcde suffix";
         assert_eq!(extract_body(existing, "abcd", "cde"), None);
-        assert_eq!(remove(existing, "abcd", "cde"), existing);
+        assert_eq!(remove(existing, "abcd", "cde"), None);
         assert_eq!(
             upsert(existing, "abcd", "cde", "body\n"),
             "prefix abcde suffix\nabcd\nbody\ncde\n"
@@ -115,7 +154,7 @@ mod tests {
                 Some(format!("body{newline}").as_str())
             );
         }
-        assert_eq!(extract_body("BEGINEND", "BEGIN", "END"), Some(""));
+        assert_eq!(extract_body("BEGIN\nEND", "BEGIN", "END"), Some(""));
         assert_eq!(extract_body("END BEGIN", "BEGIN", "END"), None);
     }
 
@@ -142,20 +181,20 @@ mod tests {
     fn remove_drops_the_managed_block_only() {
         let existing = format!("#!/bin/sh\nsome-other-hook\n{BEGIN}\ngat hook x\n{END}\n");
         assert_eq!(
-            remove(&existing, BEGIN, END),
-            "#!/bin/sh\nsome-other-hook\n"
+            remove(&existing, BEGIN, END).as_deref(),
+            Some("#!/bin/sh\nsome-other-hook\n")
         );
     }
 
     #[test]
     fn remove_is_a_no_op_without_markers() {
-        assert_eq!(remove("#!/bin/sh\nfoo\n", BEGIN, END), "#!/bin/sh\nfoo\n");
+        assert_eq!(remove("#!/bin/sh\nfoo\n", BEGIN, END), None);
     }
 
     #[test]
     fn remove_leaves_nothing_when_block_was_the_only_content() {
         let existing = format!("{BEGIN}\ngat hook x\n{END}\n");
-        assert_eq!(remove(&existing, BEGIN, END), "");
+        assert_eq!(remove(&existing, BEGIN, END), Some(String::new()));
     }
 
     #[test]
@@ -207,14 +246,14 @@ mod tests {
         let existing =
             format!("#!/bin/sh\r\nsome-other-hook\r\n{BEGIN}\r\ngat hook x\r\n{END}\r\n");
         assert_eq!(
-            remove(&existing, BEGIN, END),
-            "#!/bin/sh\r\nsome-other-hook\r\n"
+            remove(&existing, BEGIN, END).as_deref(),
+            Some("#!/bin/sh\r\nsome-other-hook\r\n")
         );
     }
 
     #[test]
     fn remove_leaves_nothing_when_crlf_block_was_the_only_content() {
         let existing = format!("{BEGIN}\r\ngat hook x\r\n{END}\r\n");
-        assert_eq!(remove(&existing, BEGIN, END), "");
+        assert_eq!(remove(&existing, BEGIN, END), Some(String::new()));
     }
 }

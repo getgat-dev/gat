@@ -298,7 +298,7 @@ pub fn managed_block_present(repo: &Repo) -> Result<bool> {
     let Some(snapshot) = gat_io::read_info_exclude(repo.layout())? else {
         return Ok(false);
     };
-    Ok(snapshot.contents().contains(BEGIN) && snapshot.contents().contains(END))
+    Ok(gat_core::managed_block::extract_body(snapshot.contents(), BEGIN, END).is_some())
 }
 
 /// Remove only Gat's managed block from `.git/info/exclude`, leaving every
@@ -310,10 +310,9 @@ pub fn managed_block_present(repo: &Repo) -> Result<bool> {
 /// user-owned content and revalidate it before replacement or removal.
 pub fn remove_managed_block(repo: &Repo) -> Result<bool> {
     let update = gat_io::mutate_info_exclude(repo.layout(), false, |existing| {
-        if !(existing.contains(BEGIN) && existing.contains(END)) {
+        let Some(updated) = gat_core::managed_block::remove(existing, BEGIN, END) else {
             return gat_io::InfoExcludeMutation::Unchanged;
-        }
-        let updated = gat_core::managed_block::remove(existing, BEGIN, END);
+        };
         if updated.trim().is_empty() {
             gat_io::InfoExcludeMutation::Remove
         } else {
@@ -502,6 +501,28 @@ mod tests {
             .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
             .collect();
         gat_io::GitIgnoreMatcher::new(lines).is_ignored(path)
+    }
+
+    #[test]
+    fn inline_and_malformed_markers_are_not_managed_exclude_blocks() {
+        let tmp = git_repo();
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
+        let path = tmp.path().join(".git/info/exclude");
+        for user in [
+            format!("# example {BEGIN}\n*.user\n# example {END}\n"),
+            format!("{END}\n*.user\n{BEGIN}\n"),
+        ] {
+            std::fs::write(&path, &user).unwrap();
+            assert!(!managed_block_present(&repo).unwrap());
+            assert!(!remove_managed_block(&repo).unwrap());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), user);
+            sync_from_lock(&repo, &Lock::default(), false).unwrap();
+            assert!(managed_block_present(&repo).unwrap());
+            assert!(remove_managed_block(&repo).unwrap());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), user);
+        }
     }
 
     #[test]

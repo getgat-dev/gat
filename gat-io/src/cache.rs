@@ -18,7 +18,7 @@ pub use object::{
     CacheClient, CacheError, CacheIngest, CacheObject, CacheObjectOpenError, CacheObjectOpenStage,
     CacheObjectReader, CachePresence, CacheVerificationFailure, CacheWriter,
     CompletedCacheVerification, DEFAULT_INGEST_STRATEGY, ExpectedIngest, IngestStrategy, Ingested,
-    PreparedCacheVerification, Result, VERIFY_WINDOW,
+    PreparedCacheVerification, Result, VERIFY_WINDOW, VerifiedCacheEntry, VerifiedCacheObject,
 };
 pub use proof::{CacheProofError, CacheProofErrorKind, CachePublication, ObjectVerification};
 

@@ -63,115 +63,100 @@ impl ResolvedCacheLocation {
     }
 }
 
-/// Semantic category for an initialization infrastructure failure.
+/// Semantic initialization failure with its required diagnostic context.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InitializationErrorKind {
-    OpenRepository,
+pub enum InitializationErrorKind<'a> {
+    OpenRepository { path: &'a Path },
     Read,
-    NonUtf8Hook,
+    NonUtf8Hook { path: &'a Path },
     Write,
     GitConfig,
     GitConfigLocked,
     ConfigScaffold,
 }
 
-/// Failure to converge repository initialization state.
+/// Failure to converge repository initialization state. Its semantic view is
+/// derived from the retained typed failure, so kind, context, and cause cannot
+/// diverge.
 #[derive(Debug)]
-pub struct InitializationError {
-    kind: InitializationErrorKind,
-    filesystem_failure: Option<crate::FilesystemFailureKind>,
-    path: Option<PathBuf>,
-    operation: String,
-    source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
+pub struct InitializationError(InitializationFailure);
+
+#[derive(Debug)]
+enum InitializationFailure {
+    Git(gat_io::GitIntegrationError),
+    ConfigScaffold(gat_io::ConfigWriteError),
 }
 
 impl InitializationError {
     #[must_use]
-    pub const fn kind(&self) -> InitializationErrorKind {
-        self.kind
+    pub fn kind(&self) -> InitializationErrorKind<'_> {
+        use gat_io::GitIntegrationErrorKind;
+        match &self.0 {
+            InitializationFailure::Git(source) => match source.kind() {
+                GitIntegrationErrorKind::OpenRepository => {
+                    InitializationErrorKind::OpenRepository {
+                        path: source.path(),
+                    }
+                }
+                GitIntegrationErrorKind::Read => InitializationErrorKind::Read,
+                GitIntegrationErrorKind::NonUtf8 => InitializationErrorKind::NonUtf8Hook {
+                    path: source.path(),
+                },
+                GitIntegrationErrorKind::Write => InitializationErrorKind::Write,
+                GitIntegrationErrorKind::Config => InitializationErrorKind::GitConfig,
+                GitIntegrationErrorKind::ConfigLocked => InitializationErrorKind::GitConfigLocked,
+            },
+            InitializationFailure::ConfigScaffold(_) => InitializationErrorKind::ConfigScaffold,
+        }
     }
 
     #[must_use]
-    pub const fn filesystem_failure(&self) -> Option<crate::FilesystemFailureKind> {
-        self.filesystem_failure
-    }
-
-    #[must_use]
-    pub fn path(&self) -> Option<&Path> {
-        self.path.as_deref()
-    }
-
-    #[must_use]
-    pub fn operation(&self) -> &str {
-        &self.operation
+    pub fn filesystem_failure(&self) -> Option<crate::FilesystemFailureKind> {
+        let kind = match &self.0 {
+            InitializationFailure::Git(source) => source.io_kind(),
+            InitializationFailure::ConfigScaffold(source) => match source {
+                gat_io::ConfigWriteError::Write(source) => source.io_kind(),
+                gat_io::ConfigWriteError::Serialize { .. } => None,
+            },
+        };
+        kind.map(crate::repository_access::classify_io_kind)
     }
 }
 
 impl From<gat_io::GitIntegrationError> for InitializationError {
     fn from(source: gat_io::GitIntegrationError) -> Self {
-        use gat_io::GitIntegrationErrorKind;
-
-        let kind = match source.kind() {
-            GitIntegrationErrorKind::OpenRepository => InitializationErrorKind::OpenRepository,
-            GitIntegrationErrorKind::Read => InitializationErrorKind::Read,
-            GitIntegrationErrorKind::NonUtf8 => InitializationErrorKind::NonUtf8Hook,
-            GitIntegrationErrorKind::Write => InitializationErrorKind::Write,
-            GitIntegrationErrorKind::Config => InitializationErrorKind::GitConfig,
-            GitIntegrationErrorKind::ConfigLocked => InitializationErrorKind::GitConfigLocked,
-        };
-        Self {
-            kind,
-            filesystem_failure: source
-                .io_kind()
-                .map(crate::repository_access::classify_io_kind),
-            path: Some(source.path().to_path_buf()),
-            operation: source.operation().to_string(),
-            source: (kind != InitializationErrorKind::NonUtf8Hook)
-                .then(|| Box::new(source) as Box<dyn std::error::Error + Send + Sync>),
-        }
+        Self(InitializationFailure::Git(source))
     }
 }
 
 impl From<gat_io::ConfigWriteError> for InitializationError {
     fn from(source: gat_io::ConfigWriteError) -> Self {
-        Self {
-            kind: InitializationErrorKind::ConfigScaffold,
-            filesystem_failure: match &source {
-                gat_io::ConfigWriteError::Write(source) => source
-                    .io_kind()
-                    .map(crate::repository_access::classify_io_kind),
-                gat_io::ConfigWriteError::Serialize { .. } => None,
-            },
-            operation: "creating the project gat.yaml".to_string(),
-            path: None,
-            source: Some(Box::new(source)),
-        }
+        Self(InitializationFailure::ConfigScaffold(source))
     }
 }
 
 impl std::fmt::Display for InitializationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.kind {
-            InitializationErrorKind::NonUtf8Hook => {
-                write!(
-                    f,
-                    "hook `{}` is not valid UTF-8",
-                    self.path
-                        .as_deref()
-                        .expect("git integration errors always carry a path")
-                        .display()
-                )
+        match &self.0 {
+            InitializationFailure::Git(source) => std::fmt::Display::fmt(source, f),
+            InitializationFailure::ConfigScaffold(_) => {
+                f.write_str("creating the project gat.yaml failed")
             }
-            _ => write!(f, "{} failed", self.operation),
         }
     }
 }
 
 impl std::error::Error for InitializationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source
-            .as_deref()
-            .map(|source| source as &(dyn std::error::Error + 'static))
+        match &self.0 {
+            InitializationFailure::Git(source)
+                if source.kind() == gat_io::GitIntegrationErrorKind::NonUtf8 =>
+            {
+                None
+            }
+            InitializationFailure::Git(source) => Some(source),
+            InitializationFailure::ConfigScaffold(source) => Some(source),
+        }
     }
 }
 
@@ -253,10 +238,9 @@ impl InitializationService<'_> {
             else {
                 continue;
             };
-            if !existing.contains(BEGIN) {
+            let Some(updated) = managed_block::remove(&existing, BEGIN, END) else {
                 continue;
-            }
-            let updated = managed_block::remove(&existing, BEGIN, END);
+            };
             let rest_is_empty = updated
                 .lines()
                 .all(|line| line.trim().is_empty() || line.trim() == "#!/bin/sh");

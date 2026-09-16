@@ -5,7 +5,6 @@ use crate::remote_catalog::{RemoteCatalog, RemoteId};
 use crate::remote_executor::RemoteJob;
 use crate::remote_session::RemoteSessionError;
 use gat_core::lexical_path::GatPath;
-use gat_core::name::RouteName;
 use gat_core::oid::Oid;
 use gat_io::RemoteError;
 use gat_io::{CacheError, CachePublication};
@@ -65,16 +64,14 @@ pub enum RepairError {
     Cancelled,
     RemoteOpen {
         remote_name: Arc<str>,
-        route_name: Option<RouteName>,
-        route: Option<GatPath>,
+        route: Option<super::TransferRoute>,
         path: GatPath,
         source: Arc<RemoteSessionError>,
     },
     RemoteRead {
         kind: RepairRemoteFailureKind,
         remote_name: Arc<str>,
-        route_name: Option<RouteName>,
-        route: Option<GatPath>,
+        route: Option<super::TransferRoute>,
         path: GatPath,
         source: Box<dyn Error + Send + Sync>,
     },
@@ -181,12 +178,10 @@ fn worker_error(
         WorkerError::Cancelled => RepairError::Cancelled,
         WorkerError::Remote(source) => {
             let kind = remote_kind(&source);
-            let (remote_name, route_name, route) =
-                diagnostic_remote(catalog, policy, &object.remote);
+            let (remote_name, route) = diagnostic_remote(catalog, policy, &object.remote);
             RepairError::RemoteRead {
                 kind,
                 remote_name,
-                route_name,
                 route,
                 path: object.representative_path.clone(),
                 source: Box::new(source),
@@ -204,12 +199,10 @@ fn worker_error(
                 | std::io::ErrorKind::UnexpectedEof => RepairRemoteFailureKind::Unavailable,
                 _ => RepairRemoteFailureKind::OperationFailed,
             };
-            let (remote_name, route_name, route) =
-                diagnostic_remote(catalog, policy, &object.remote);
+            let (remote_name, route) = diagnostic_remote(catalog, policy, &object.remote);
             RepairError::RemoteRead {
                 kind,
                 remote_name,
-                route_name,
                 route,
                 path: object.representative_path.clone(),
                 source: Box::new(CacheError::SourceUnreadable { source }),
@@ -297,12 +290,11 @@ pub fn repair_window(
     let mut jobs = Vec::new();
     for (index, object) in objects.iter().enumerate() {
         if let Some(source) = unavailable.get(&object.remote.id()) {
-            let (remote_name, route_name, route) =
+            let (remote_name, route) =
                 diagnostic_remote(services.remotes_catalog, services.policy, &object.remote);
             progress.inc(object.entries);
             results[index] = Some(Err(RepairError::RemoteOpen {
                 remote_name,
-                route_name,
                 route,
                 path: object.representative_path.clone(),
                 source: Arc::clone(source),

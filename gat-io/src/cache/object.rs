@@ -232,18 +232,33 @@ pub mod test_support {
     }
 
     /// Scoped override: `verify_window()` reflects `size` until the
-    /// returned guard drops, then reverts to the production default.
-    #[must_use]
+    /// returned guard drops, then restores the enclosing override.
+    ///
+    /// # Panics
+    /// Panics if `size` is zero.
     pub fn with_verify_window(size: usize) -> VerifyWindowGuard {
-        VERIFY_WINDOW_OVERRIDE.with(|c| c.set(Some(size)));
-        VerifyWindowGuard
+        assert!(size > 0, "verification window must be nonzero");
+        VerifyWindowGuard {
+            previous: VERIFY_WINDOW_OVERRIDE.with(|c| c.replace(Some(size))),
+            thread_bound: std::marker::PhantomData,
+        }
     }
 
-    pub struct VerifyWindowGuard;
+    /// Restore the enclosing override on the thread that installed it.
+    ///
+    /// ```compile_fail
+    /// let guard = gat_io::object_test_support::with_verify_window(4);
+    /// std::thread::spawn(move || drop(guard));
+    /// ```
+    #[must_use]
+    pub struct VerifyWindowGuard {
+        previous: Option<usize>,
+        thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+    }
 
     impl Drop for VerifyWindowGuard {
         fn drop(&mut self) {
-            VERIFY_WINDOW_OVERRIDE.with(|c| c.set(None));
+            VERIFY_WINDOW_OVERRIDE.with(|c| c.set(self.previous));
         }
     }
 
@@ -331,6 +346,43 @@ impl CacheObject {
         };
         Ok(CacheObjectReader { file, size })
     }
+}
+
+/// An object whose size and content identity were established together.
+/// This records a verification observation; later external changes can still
+/// make opening or reading the object fail.
+///
+/// ```compile_fail
+/// use gat_io::{CacheObject, VerifiedCacheObject};
+/// fn verified(source: CacheObject) -> VerifiedCacheObject { source.into() }
+/// ```
+#[derive(Clone)]
+pub struct VerifiedCacheObject {
+    path: Arc<PathBuf>,
+    size: u64,
+}
+
+impl VerifiedCacheObject {
+    #[must_use]
+    pub const fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Retain the observed size when handing the source to a reader.
+    #[must_use]
+    pub fn into_object(self) -> CacheObject {
+        CacheObject {
+            path: self.path,
+            verified_size: Some(self.size),
+        }
+    }
+}
+
+/// Verification with a usable source present exactly when the object is valid.
+pub enum VerifiedCacheEntry {
+    Missing,
+    Corrupt,
+    Valid(VerifiedCacheObject),
 }
 
 /// Which local operation failed while opening an opaque cache object.
@@ -585,7 +637,7 @@ pub struct CacheClient {
 pub struct PreparedCacheVerification {
     generation: Arc<()>,
     oids: Vec<Oid>,
-    known: std::collections::HashMap<Oid, ObjectVerification>,
+    known: std::collections::HashMap<Oid, CacheObservation>,
     pending: Vec<PreparedCacheObjectVerification>,
 }
 
@@ -600,7 +652,7 @@ struct PreparedCacheObjectVerification {
 pub struct CompletedCacheVerification {
     generation: Arc<()>,
     oids: Vec<Oid>,
-    known: std::collections::HashMap<Oid, ObjectVerification>,
+    known: std::collections::HashMap<Oid, CacheObservation>,
     results: Vec<(Oid, CacheObservation, Option<CachePublication>)>,
 }
 
@@ -812,7 +864,7 @@ impl CacheClient {
             let mut seen = std::collections::HashSet::new();
             for oid in oids {
                 if let Some(observation) = memo.get(oid).copied() {
-                    known.insert(*oid, observation.status());
+                    known.insert(*oid, observation);
                 } else if seen.insert(*oid) {
                     pending_oids.push(*oid);
                 }
@@ -858,6 +910,31 @@ impl CacheClient {
         &self,
         completed: CompletedCacheVerification,
     ) -> std::result::Result<Vec<ObjectVerification>, CacheVerificationFailure> {
+        self.commit_verification_with(completed, |_, observation| observation.status())
+    }
+
+    /// Commit verification and return sources with their verified sizes.
+    /// This has the same ticket validation and input ordering as
+    /// [`Self::commit_verification`], without a second memo lookup per source.
+    pub fn commit_verified_objects(
+        &self,
+        completed: CompletedCacheVerification,
+    ) -> std::result::Result<Vec<VerifiedCacheEntry>, CacheVerificationFailure> {
+        self.commit_verification_with(completed, |oid, observation| match observation {
+            CacheObservation::Missing => VerifiedCacheEntry::Missing,
+            CacheObservation::Corrupt => VerifiedCacheEntry::Corrupt,
+            CacheObservation::Valid { size } => VerifiedCacheEntry::Valid(VerifiedCacheObject {
+                path: Arc::new(cache_path_oid(&self.root.objects_dir, oid)),
+                size,
+            }),
+        })
+    }
+
+    fn commit_verification_with<T>(
+        &self,
+        completed: CompletedCacheVerification,
+        project: impl Fn(&Oid, CacheObservation) -> T,
+    ) -> std::result::Result<Vec<T>, CacheVerificationFailure> {
         // Foreign or invalidated tickets are observations of another state.
         // Re-prepare only on this cold path; ordinary batches need one pointer check.
         let completed = if Arc::ptr_eq(
@@ -885,16 +962,17 @@ impl CacheClient {
         #[cfg(any(test, feature = "test-support"))]
         test_support::record_memo_size(memo.len());
         // Fresh observations already live in the memo; do not build a second
-        // OID-keyed map containing their projected statuses. `known` preserves
+        // OID-keyed map containing their observations. `known` preserves
         // only the memo hits captured during preparation.
         let statuses = oids
             .iter()
             .map(|oid| {
-                known
+                let observation = known
                     .get(oid)
                     .copied()
-                    .or_else(|| memo.get(oid).copied().map(CacheObservation::status))
-                    .unwrap_or(ObjectVerification::Missing)
+                    .or_else(|| memo.get(oid).copied())
+                    .unwrap_or(CacheObservation::Missing);
+                project(oid, observation)
             })
             .collect();
         drop(memo);
@@ -1868,6 +1946,67 @@ pub fn symlink(obj: &Path, dest: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use std::io::{Cursor, Read};
+
+    #[test]
+    fn verification_window_override_restores_nested_and_unwound_scopes() {
+        assert_eq!(verify_window_size(), VERIFY_WINDOW);
+        {
+            let _outer = test_support::with_verify_window(7);
+            {
+                let _inner = test_support::with_verify_window(3);
+                assert_eq!(verify_window_size(), 3);
+            }
+            assert_eq!(verify_window_size(), 7);
+            let panic = std::panic::catch_unwind(|| {
+                let _inner = test_support::with_verify_window(2);
+                panic!("unwind the inner scope");
+            });
+            assert!(panic.is_err());
+            assert_eq!(verify_window_size(), 7);
+            assert!(std::panic::catch_unwind(|| test_support::with_verify_window(0)).is_err());
+            assert_eq!(verify_window_size(), 7);
+        }
+        assert_eq!(verify_window_size(), VERIFY_WINDOW);
+    }
+
+    #[test]
+    fn committed_sources_carry_sizes_for_fresh_and_memoized_objects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = crate::RepositoryLayout::at(tmp.path().to_owned()).resolve_cache_root(None);
+        let cache = root.open_client();
+        let empty = root.writer().ingest(&b""[..]).unwrap().0.oid;
+        let content = root.writer().ingest(&b"payload"[..]).unwrap().0.oid;
+        let missing = Oid::from_bytes([7; 32]);
+        let corrupt = Oid::from_bytes([8; 32]);
+        let path = cache_path_oid(cache.objects_dir(), &corrupt);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"wrong content").unwrap();
+        cache.verify(&empty).unwrap();
+        for _ in 0..2 {
+            let completed = cache
+                .prepare_verification(&[content, empty, missing, corrupt, content])
+                .verify()
+                .unwrap();
+            let mut entries = cache
+                .commit_verified_objects(completed)
+                .unwrap()
+                .into_iter();
+            for expected in [b"payload".as_slice(), b"".as_slice()] {
+                let VerifiedCacheEntry::Valid(source) = entries.next().unwrap() else {
+                    panic!("valid bytes must return a verified source");
+                };
+                assert_eq!(source.size(), expected.len() as u64);
+                let mut reader = source.into_object().open().unwrap();
+                assert_eq!(reader.read_small(32).unwrap(), expected);
+            }
+            assert!(matches!(entries.next(), Some(VerifiedCacheEntry::Missing)));
+            assert!(matches!(entries.next(), Some(VerifiedCacheEntry::Corrupt)));
+            assert!(
+                matches!(entries.next(), Some(VerifiedCacheEntry::Valid(source)) if source.size() == 7)
+            );
+            assert!(entries.next().is_none());
+        }
+    }
 
     #[test]
     fn opaque_cache_object_opens_with_exact_size_and_bytes() {

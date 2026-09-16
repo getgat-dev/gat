@@ -6,7 +6,6 @@ use crate::remote_catalog::RemoteCatalog;
 use crate::remote_executor::RemoteJob;
 use crate::remote_session::RemoteSessionError;
 use gat_core::lexical_path::GatPath;
-use gat_core::name::RouteName;
 use gat_core::oid::Oid;
 use gat_core::progress::ProgressActivity;
 use gat_io::RemoteError;
@@ -62,16 +61,14 @@ pub enum DownloadError {
     Cancelled,
     RemoteOpen {
         remote_name: Arc<str>,
-        route_name: Option<RouteName>,
-        route: Option<GatPath>,
+        route: Option<super::TransferRoute>,
         path: GatPath,
         source: Box<RemoteSessionError>,
     },
     RemoteRead {
         kind: DownloadRemoteFailureKind,
         remote_name: Arc<str>,
-        route_name: Option<RouteName>,
-        route: Option<GatPath>,
+        route: Option<super::TransferRoute>,
         path: GatPath,
         source: Box<dyn Error + Send + Sync>,
     },
@@ -91,22 +88,6 @@ pub enum DownloadError {
     },
 }
 
-fn write_remote_context(
-    f: &mut std::fmt::Formatter<'_>,
-    remote_name: &str,
-    route_name: Option<&RouteName>,
-    route: Option<&GatPath>,
-) -> std::fmt::Result {
-    match (route_name, route) {
-        (Some(route_name), Some(route)) => write!(
-            f,
-            "remote `{remote_name}` via route `{route_name}` (`{route}`)"
-        ),
-        (_, Some(route)) => write!(f, "remote `{remote_name}` via route `{route}`"),
-        _ => write!(f, "remote `{remote_name}`"),
-    }
-}
-
 impl std::fmt::Display for DownloadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -114,24 +95,22 @@ impl std::fmt::Display for DownloadError {
             Self::Cancelled => f.write_str("transfer cancelled"),
             Self::RemoteOpen {
                 remote_name,
-                route_name,
                 route,
                 path,
                 ..
             } => {
                 f.write_str("could not resolve/open ")?;
-                write_remote_context(f, remote_name, route_name.as_ref(), route.as_ref())?;
+                super::write_remote_context(f, remote_name, route.as_ref())?;
                 write!(f, " for `{path}`")
             }
             Self::RemoteRead {
                 remote_name,
-                route_name,
                 route,
                 path,
                 ..
             } => {
                 f.write_str("could not read from ")?;
-                write_remote_context(f, remote_name, route_name.as_ref(), route.as_ref())?;
+                super::write_remote_context(f, remote_name, route.as_ref())?;
                 write!(f, " selected by `{path}`")
             }
             Self::Cache { path, .. } => {
@@ -219,10 +198,9 @@ fn remote_open(
     object: &DownloadObject,
     source: RemoteSessionError,
 ) -> DownloadError {
-    let (remote_name, route_name, route) = diagnostic_remote(catalog, policy, &object.remote);
+    let (remote_name, route) = diagnostic_remote(catalog, policy, &object.remote);
     DownloadError::RemoteOpen {
         remote_name,
-        route_name,
         route,
         path: object.representative_path.clone(),
         source: Box::new(source),
@@ -239,12 +217,10 @@ fn worker_error(
         WorkerError::Cancelled => DownloadError::Cancelled,
         WorkerError::Remote(source) => {
             let kind = remote_kind(&source);
-            let (remote_name, route_name, route) =
-                diagnostic_remote(catalog, policy, &object.remote);
+            let (remote_name, route) = diagnostic_remote(catalog, policy, &object.remote);
             DownloadError::RemoteRead {
                 kind,
                 remote_name,
-                route_name,
                 route,
                 path: object.representative_path.clone(),
                 source: Box::new(source),
@@ -262,12 +238,10 @@ fn worker_error(
                 | std::io::ErrorKind::UnexpectedEof => DownloadRemoteFailureKind::Unavailable,
                 _ => DownloadRemoteFailureKind::OperationFailed,
             };
-            let (remote_name, route_name, route) =
-                diagnostic_remote(catalog, policy, &object.remote);
+            let (remote_name, route) = diagnostic_remote(catalog, policy, &object.remote);
             DownloadError::RemoteRead {
                 kind,
                 remote_name,
-                route_name,
                 route,
                 path: object.representative_path.clone(),
                 source: Box::new(CacheError::SourceUnreadable { source }),

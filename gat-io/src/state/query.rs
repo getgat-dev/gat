@@ -212,7 +212,7 @@ fn query_for_selection(selection: &Selection) -> DesiredQuery<'_> {
     if includes.is_empty() {
         return DesiredQuery::in_scope(scope);
     }
-    let mut bounds = Vec::with_capacity(includes.len().max(1));
+    let mut bounds = Vec::with_capacity(includes.len());
     for include in includes {
         match include.bound() {
             GlobBound::Any => {
@@ -240,15 +240,7 @@ fn query_for_selection(selection: &Selection) -> DesiredQuery<'_> {
             }
         }
     }
-    if let Some(scope) = scope {
-        if bounds.is_empty() {
-            DesiredQuery::scope(scope)
-        } else {
-            DesiredQuery::from_candidate_bounds(bounds)
-        }
-    } else {
-        DesiredQuery::from_candidate_bounds(bounds)
-    }
+    DesiredQuery::from_candidate_bounds(bounds)
 }
 
 fn join_scope(scope: &str, rel: &str) -> String {

@@ -169,11 +169,8 @@ impl GatPath {
     }
 
     /// Whether `self` is exactly `prefix` or a directory descendant of it
-    /// (`prefix/...`) -- the same lexical rule
-    /// `crate::lock::path_matches_scope` uses for scope matching,
-    /// exposed here for internal call sites (e.g. `gat mv`'s desired/
-    /// materialized-state prefix rewrite) that need it without holding a
-    /// full `PathScope`.
+    /// (`prefix/...`). Sibling prefixes do not match: `data` does not
+    /// include `data.bin`.
     #[must_use]
     pub fn is_or_under(&self, prefix: &Self) -> bool {
         self.0 == prefix.0

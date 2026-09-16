@@ -15,6 +15,8 @@ fn repository() -> (tempfile::TempDir, Repository) {
 #[test]
 fn typed_mutation_requests_share_one_authoritative_repository_path() {
     let (tmp, repo) = repository();
+    #[cfg(feature = "test-support")]
+    let routing_before = gat_engine::test_support::policy_compilations();
     std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
 
     let added = gat_command::add(
@@ -57,6 +59,12 @@ fn typed_mutation_requests_share_one_authoritative_repository_path() {
         vec!["b.bin"]
     );
     assert!(!tmp.path().join("b.bin").exists());
+    #[cfg(feature = "test-support")]
+    assert_eq!(
+        gat_engine::test_support::policy_compilations(),
+        routing_before,
+        "local mutations need mount ownership, not compiled remote routing"
+    );
 }
 
 #[cfg(feature = "test-support")]

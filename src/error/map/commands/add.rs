@@ -44,7 +44,6 @@ impl From<AddError> for Failure {
             AddError::Glob(source) => source.into(),
             AddError::Config(source) => (*source).into(),
             AddError::PathPolicy(source) => source.into(),
-            AddError::RemoteCatalog(source) => source.into(),
             AddError::RepositoryState(source) => (*source).into(),
             AddError::RepositoryMutation(source) => {
                 let published = matches!(*source,

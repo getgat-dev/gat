@@ -204,7 +204,7 @@ impl StateStore {
 
     /// Load exactly the row at `scope` plus every row nested under it,
     /// matching the same exact-file/subtree semantics as
-    /// [`gat_core::lock::path_matches_scope`] but expressed as the
+    /// [`gat_core::lexical_path::GatPath::is_or_under`] but expressed as the
     /// lexical byte range from `descendant_range` so `SQLite` work scales
     /// with rows in scope rather than total rows in the state table.
     ///

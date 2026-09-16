@@ -374,6 +374,9 @@ impl RemoteExecutor {
                     });
                     admitted = true;
                 }
+                // Once drained, a window's remote queue never gains more work.
+                // Retire it so later completions only scan pending remotes.
+                queues.retain(|(_, queue)| !queue.is_empty());
                 if !admitted {
                     break;
                 }
@@ -390,7 +393,7 @@ impl RemoteExecutor {
                 }
                 observer.completed(index, &result);
                 results[index] = Some(result);
-            } else if queues.iter().all(|(_, queue)| queue.is_empty()) {
+            } else if queues.is_empty() {
                 break;
             } else {
                 // Another coordinator can own capacity from this operation.

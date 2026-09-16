@@ -67,7 +67,7 @@
 //! reinterpreted -- `SQLite`'s default `BINARY` collation on `TEXT` already
 //! compares raw bytes the same way Rust's `str::starts_with` does, which
 //! is exactly the lexical, case-sensitive scope matching
-//! [`gat_core::lock::path_matches_scope`] implements in memory.
+//! [`gat_core::lexical_path::GatPath::is_or_under`] implements in memory.
 //!
 //! Because desired/materialized state share one row, every materialized
 //! mutation (`upsert_many`/`remove_exact`/`remove_prefix`/`move_prefix`)
@@ -823,7 +823,6 @@ fn read_validation_required(conn: &Connection) -> Result<bool> {
 mod tests {
     use super::*;
     use crate::repository_layout::RepositoryLayout as Repo;
-    use gat_core::lock::path_matches_scope;
 
     fn git_repo() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
@@ -1147,7 +1146,7 @@ mod tests {
     }
 
     #[test]
-    fn load_scope_matches_filtering_load_all_by_path_matches_scope() {
+    fn load_scope_matches_filtering_load_all_by_path_prefix() {
         let tmp = git_repo();
         let repo = Repo::at(tmp.path().to_path_buf());
         let mut store = StateStore::open(&repo).unwrap();
@@ -1185,7 +1184,7 @@ mod tests {
                     .unwrap()
                     .entries
                     .into_iter()
-                    .filter(|entry| path_matches_scope(&entry.path, &gp(scope)))
+                    .filter(|entry| entry.path.is_or_under(&gp(scope)))
                     .collect::<Vec<_>>();
                 assert_eq!(
                     from_sql, from_filter,

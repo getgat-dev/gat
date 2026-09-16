@@ -57,6 +57,10 @@ pub fn with_stream_buffer<T>(size_hint: Option<u64>, f: impl FnOnce(&mut [u8]) -
     STREAM_BUFFER.with(|cell| {
         let mut buf = cell.borrow_mut();
         if buf.len() < wanted {
+            // Geometric Vec growth can retain more than the transfer budget
+            // when a worker first sees an intermediate-sized object.
+            let additional = wanted - buf.len();
+            buf.reserve_exact(additional);
             buf.resize(wanted, 0);
         }
         f(&mut buf[..wanted])
@@ -204,6 +208,28 @@ mod tests {
             "the largest hint seen (a full-cap request) must have grown the buffer to \
              exactly STREAM_BUFFER_SIZE and no later smaller call may shrink it back down"
         );
+    }
+
+    #[test]
+    fn stream_buffer_growth_from_intermediate_sizes_stays_within_budget() {
+        std::thread::spawn(|| {
+            let intermediate = STREAM_BUFFER_SIZE * 3 / 4;
+            with_stream_buffer(Some(intermediate as u64), |buf| {
+                assert_eq!(buf.len(), intermediate);
+            });
+            let allocation = with_stream_buffer(None, |buf| {
+                assert_eq!(buf.len(), STREAM_BUFFER_SIZE);
+                buf.as_ptr() as usize
+            });
+            STREAM_BUFFER.with(|cell| {
+                assert_eq!(cell.borrow().capacity(), STREAM_BUFFER_SIZE);
+            });
+            with_stream_buffer(Some(7), |buf| {
+                assert_eq!(buf.as_ptr() as usize, allocation);
+            });
+        })
+        .join()
+        .unwrap();
     }
 
     fn cap_with_multi(min: Option<usize>, max: Option<usize>) -> opendal::Capability {

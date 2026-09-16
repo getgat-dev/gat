@@ -13,7 +13,6 @@ impl From<RemoveError> for Failure {
             RemoveError::Glob(source) => source.into(),
             RemoveError::Acquisition(source) => (*source).into(),
             RemoveError::PathPolicy(source) => source.into(),
-            RemoveError::RemoteCatalog(source) => source.into(),
             RemoveError::RepositoryMutation(source) => (*source).into(),
             RemoveError::Cleanup(source) => {
                 let failure = match *source {
