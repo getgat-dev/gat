@@ -344,7 +344,7 @@ impl PreparedFileWrite {
             if count == 0 {
                 break;
             }
-            if count as u64 > writer.remaining {
+            if !matches!(writer.state, CopyState::Copying(remaining) if count as u64 <= remaining) {
                 return Err(FileUploadError::CacheRead {
                     source: io::Error::new(io::ErrorKind::InvalidData, "cache source grew"),
                     cleanup: writer.abort().err(),
@@ -357,7 +357,7 @@ impl PreparedFileWrite {
             }
         }
         drop(source);
-        if writer.remaining != 0 {
+        if !matches!(writer.state, CopyState::Copying(0)) {
             return Err(FileUploadError::CacheRead {
                 source: io::Error::new(io::ErrorKind::UnexpectedEof, "cache source shrank"),
                 cleanup: writer.abort().err(),
@@ -392,8 +392,7 @@ impl PreparedFileWrite {
         Ok(FileObjectWriter {
             temporary,
             destination: self.destination,
-            remaining: self.size,
-            failed: false,
+            state: CopyState::Copying(self.size),
         })
     }
 }
@@ -403,22 +402,30 @@ impl PreparedFileWrite {
 pub struct FileObjectWriter {
     temporary: tempfile::NamedTempFile,
     destination: PathBuf,
-    remaining: u64,
-    failed: bool,
+    state: CopyState,
+}
+
+/// Only a healthy copy carries a remaining-byte budget. Failed copies can
+/// still be aborted, but cannot resume or proceed to publication.
+enum CopyState {
+    Copying(u64),
+    Failed,
 }
 
 impl FileObjectWriter {
     /// Source identity verification remains the caller's responsibility.
     pub fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
-        if self.failed || bytes.len() as u64 > self.remaining {
-            self.failed = true;
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "source grew"));
-        }
-        if let Err(error) = self.temporary.write_all(bytes) {
-            self.failed = true;
-            return Err(error);
-        }
-        self.remaining -= bytes.len() as u64;
+        let CopyState::Copying(remaining) = self.state else {
+            return Err(io::Error::other("copy previously failed"));
+        };
+        // Poison before attempting I/O: even a partially written chunk must
+        // never leave the staging file eligible for publication.
+        self.state = CopyState::Failed;
+        let remaining = remaining
+            .checked_sub(bytes.len() as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "source grew"))?;
+        self.temporary.write_all(bytes)?;
+        self.state = CopyState::Copying(remaining);
         Ok(())
     }
 
@@ -464,17 +471,20 @@ impl FileObjectWriter {
                 io::Error::from(io::ErrorKind::Interrupted),
             ));
         }
-        if self.failed {
-            return Err(self.fail(
-                FileWritePhase::Copy,
-                io::Error::other("copy previously failed"),
-            ));
-        }
-        if self.remaining != 0 {
-            return Err(self.fail(
-                FileWritePhase::Copy,
-                io::Error::new(io::ErrorKind::UnexpectedEof, "source shrank"),
-            ));
+        match self.state {
+            CopyState::Failed => {
+                return Err(self.fail(
+                    FileWritePhase::Copy,
+                    io::Error::other("copy previously failed"),
+                ));
+            }
+            CopyState::Copying(0) => {}
+            CopyState::Copying(_) => {
+                return Err(self.fail(
+                    FileWritePhase::Copy,
+                    io::Error::new(io::ErrorKind::UnexpectedEof, "source shrank"),
+                ));
+            }
         }
         if let Err(source) = sync_file(self.temporary.as_file()) {
             return Err(self.fail(FileWritePhase::Sync, source));
