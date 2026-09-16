@@ -78,6 +78,7 @@ pub fn repair_with_operation(
         }
     }
     let mut reporting = ProgressUpdates::new(progress.clone());
+    let mut objects = Vec::new();
 
     let mut run_window = |batch: gat_engine::WindowBatch<'_, RepairCandidate>| {
         run_repair_window(
@@ -86,6 +87,7 @@ pub fn repair_with_operation(
             request.remote,
             reporting_enabled,
             &mut results,
+            &mut objects,
             &mut reporting,
         );
         Ok::<(), std::convert::Infallible>(())
@@ -127,9 +129,11 @@ fn run_repair_window(
     remote_override: Option<&RemoteName>,
     reporting_enabled: bool,
     results: &mut BTreeMap<Oid, RepairResult>,
+    objects: &mut Vec<RepairObject>,
     progress: &mut ProgressUpdates,
 ) {
-    let mut objects = Vec::with_capacity(window.len());
+    objects.clear();
+    objects.reserve(window.len());
     for candidate in window {
         let entries = if reporting_enabled {
             results[&candidate.oid].entries
@@ -165,13 +169,7 @@ fn run_repair_window(
         }
     }
 
-    #[allow(
-        clippy::needless_collect,
-        reason = "Keep OIDs for result association before repair_window consumes the objects"
-    )]
-    let oids: Vec<Oid> = objects.iter().map(gat_engine::RepairObject::oid).collect();
-    let outcome = repair_window(operation, objects, progress);
-    for (oid, result) in oids.into_iter().zip(outcome.results) {
+    for gat_engine::RepairResult { oid, result } in repair_window(operation, objects, progress) {
         results.entry(oid).or_default().result =
             Some(result.map_err(RepairError::from).map_err(Arc::new));
     }

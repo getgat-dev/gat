@@ -36,11 +36,6 @@ impl RepairObject {
             entries,
         }
     }
-
-    #[must_use]
-    pub const fn oid(&self) -> Oid {
-        self.oid
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,10 +129,11 @@ impl Error for RepairError {
     }
 }
 
-/// Results aligned with the input repair objects.
-#[derive(Debug, Default)]
-pub struct RepairOutcome {
-    pub results: Vec<Result<(), RepairError>>,
+/// A terminal repair result paired with its object identity.
+#[derive(Debug)]
+pub struct RepairResult {
+    pub oid: Oid,
+    pub result: Result<(), RepairError>,
 }
 
 use super::receive::{ReceiveError as WorkerError, receive};
@@ -225,7 +221,8 @@ fn worker_error(
     }
 }
 
-/// Attempts every object in one bounded window and returns aligned results.
+/// Attempts every object in one bounded window and returns identified results.
+/// Borrows the request buffer so callers can reuse its allocation between windows.
 ///
 /// Failures are values rather than a fail-fast return so a bad object or
 /// remote never prevents later repair candidates from being attempted.
@@ -235,11 +232,11 @@ fn worker_error(
 )]
 pub fn repair_window(
     operation: &mut Operation<'_>,
-    objects: Vec<RepairObject>,
+    objects: &[RepairObject],
     progress: &mut crate::ProgressUpdates,
-) -> RepairOutcome {
+) -> Vec<RepairResult> {
     if objects.is_empty() {
-        return RepairOutcome::default();
+        return Vec::new();
     }
     debug_assert!(objects.len() <= operation.limits().transfer.window.get());
 
@@ -253,16 +250,17 @@ pub fn repair_window(
             .and_then(|()| operation.policy().validate_remote(&object.remote))
             .err()
     }) {
-        for object in &objects {
+        for object in objects {
             progress.inc(object.entries);
         }
         progress.flush();
-        return RepairOutcome {
-            results: objects
-                .iter()
-                .map(|_| Err(RepairError::Identity(error)))
-                .collect(),
-        };
+        return objects
+            .iter()
+            .map(|object| RepairResult {
+                oid: object.oid,
+                result: Err(RepairError::Identity(error)),
+            })
+            .collect();
     }
     let services = operation.window_services();
     let cache_writer = services.cache_root.writer();
@@ -345,12 +343,14 @@ pub fn repair_window(
     }
 
     progress.flush();
-    RepairOutcome {
-        results: results
-            .into_iter()
-            .map(|result| result.expect("every repair object reaches a terminal result"))
-            .collect(),
-    }
+    objects
+        .iter()
+        .zip(results)
+        .map(|(object, result)| RepairResult {
+            oid: object.oid,
+            result: result.expect("every repair object reaches a terminal result"),
+        })
+        .collect()
 }
 
 #[cfg(any(test, feature = "test-support"))]

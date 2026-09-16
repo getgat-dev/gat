@@ -235,7 +235,7 @@ pub use transfer::{
     DownloadCacheFailureKind, DownloadError, DownloadObject, DownloadOutcome,
     DownloadRemoteFailureKind, PublishError, PublishObject, PublishOutcome, PublishStatus,
     RemotePresenceError, RemotePresenceObligation, RemotePresenceResult, RepairCacheFailureKind,
-    RepairError, RepairObject, RepairOutcome, RepairRemoteFailureKind, SelectedObject,
+    RepairError, RepairObject, RepairRemoteFailureKind, RepairResult, SelectedObject,
     StreamingWindow, TransferCacheSource, TransferRoute, UploadCacheFailureKind, UploadError,
     UploadRemoteFailureKind, UploadWriteFailureKind, WindowBatch, download_window, publish_window,
     repair_window, visit_current_state_objects, visit_history_objects,

@@ -21,7 +21,7 @@ pub(crate) use presence::check_remote_presence_streaming;
 pub use presence::{RemotePresenceError, RemotePresenceObligation, RemotePresenceResult};
 pub use publish::{PublishError, PublishObject, PublishOutcome, PublishStatus, publish_window};
 pub use repair::{
-    RepairCacheFailureKind, RepairError, RepairObject, RepairOutcome, RepairRemoteFailureKind,
+    RepairCacheFailureKind, RepairError, RepairObject, RepairRemoteFailureKind, RepairResult,
     repair_window,
 };
 #[doc(hidden)]
@@ -181,14 +181,24 @@ mod tests {
                 RemoteIdentityError::ForeignOwner
             )))
         ));
-        let repairs = vec![RepairObject::new(oid, path, remote, 1)];
-        let outcome = repair_window(&mut operation, repairs, &mut ProgressUpdates::new(progress));
-        assert!(matches!(
-            outcome.results.as_slice(),
-            [Err(RepairError::Identity(
-                RemoteIdentityError::ForeignOwner
-            ))]
-        ));
+        let second_oid = Oid::from_bytes([17; 32]);
+        let repairs = vec![
+            RepairObject::new(oid, path.clone(), remote, 1),
+            RepairObject::new(second_oid, path, remote, 1),
+        ];
+        let outcome = repair_window(
+            &mut operation,
+            &repairs,
+            &mut ProgressUpdates::new(progress),
+        );
+        assert_eq!(
+            outcome.iter().map(|result| result.oid).collect::<Vec<_>>(),
+            [oid, second_oid]
+        );
+        assert!(outcome.iter().all(|result| matches!(
+            result.result,
+            Err(RepairError::Identity(RemoteIdentityError::ForeignOwner))
+        )));
         assert_eq!(crate::remote_session::test_support::remote_opens(), opens);
     }
 }

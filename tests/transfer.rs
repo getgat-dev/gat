@@ -2181,7 +2181,7 @@ fn repair_corrupted_dedups_the_same_oid_across_a_repair_window_boundary() {
 fn repair_continues_after_missing_and_mismatched_objects_with_one_transfer_slot() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
-    for window in [1, 4] {
+    for window in [1, 3, 4] {
         let tmp = test_repo();
         let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
             .unwrap()
@@ -2219,7 +2219,7 @@ fn repair_continues_after_missing_and_mismatched_objects_with_one_transfer_slot(
             .map(|(path, oid)| (gp(path), oid))
             .collect::<Vec<_>>();
         // One slot forces failures to finish before the valid objects start.
-        // Exercise both one shared window and four successive windows.
+        // Exercise successive windows, a partial tail, and one shared window.
         let limits = ExecutionLimits::for_test(window, 10_000, 4096, 1, 1);
         let desired = DesiredOperation::acquire_with_limits(&repo, &NoopProgress, limits).unwrap();
         let progress = RecordingProgress::new();
