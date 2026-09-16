@@ -6,7 +6,6 @@ use gat_core::name::MountName;
 use gat_core::oid::Oid;
 use gat_core::selection::Selection;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
@@ -434,14 +433,14 @@ impl MountJournal {
         self.reset_staged_rows()?;
         let exact_source_path = selection
             .has_no_glob_filter()
-            .then(|| selection.scope_path().cloned())
+            .then(|| selection.scope_path())
             .flatten();
         let mut rows = Vec::with_capacity(window_size);
         let mut windows = 0usize;
         let mut flush_error = None;
         let outcome = LockStore::visit_selected(
             source_root,
-            exact_source_path.as_ref(),
+            exact_source_path,
             |path| selection.matches_str(path),
             |entry| {
                 let Some(relative) = selection.reparent_relative(&entry.path) else {
@@ -500,7 +499,14 @@ impl MountJournal {
                 ))
             };
         };
-        let mut found = BTreeSet::new();
+        let unexpected_entry = || {
+            MountJournalError::invalid(
+                &directory,
+                MountJournalValidationError::UnexpectedStagedEntry,
+            )
+        };
+        // Grow from observed entries, never from an untrusted journal count.
+        let mut found = Vec::new();
         for entry in entries {
             let entry =
                 entry.map_err(|source| MountJournalError::io("validating", &directory, source))?;
@@ -509,21 +515,18 @@ impl MountJournal {
                 .to_str()
                 .and_then(parse_staged_window_name)
                 .filter(|window| *window < count)
-                .ok_or_else(|| {
-                    MountJournalError::invalid(
-                        &directory,
-                        MountJournalValidationError::UnexpectedStagedEntry,
-                    )
-                })?;
+                .ok_or_else(unexpected_entry)?;
             let kind = entry
                 .file_type()
                 .map_err(|source| MountJournalError::io("validating", entry.path(), source))?;
-            if !kind.is_file() || !found.insert(window) {
-                return Err(MountJournalError::invalid(
-                    &directory,
-                    MountJournalValidationError::UnexpectedStagedEntry,
-                ));
+            if !kind.is_file() {
+                return Err(unexpected_entry());
             }
+            found.push(window);
+        }
+        found.sort_unstable();
+        if found.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(unexpected_entry());
         }
         let mut expected = 0;
         for window in found {
