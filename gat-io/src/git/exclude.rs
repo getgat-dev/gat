@@ -55,27 +55,29 @@ impl InfoExcludeUpdate {
 }
 
 /// Opaque evidence that the recorded managed exclude block is current.
-pub struct InfoExcludeVerification {
-    current: bool,
-    refreshed_proof: Option<StatProof>,
+pub struct InfoExcludeVerification(Verification);
+
+enum Verification {
+    Stale,
+    Current { refreshed_proof: Option<StatProof> },
 }
 
 impl InfoExcludeVerification {
     #[must_use]
     pub const fn is_current(&self) -> bool {
-        self.current
+        matches!(self.0, Verification::Current { .. })
     }
 
     pub(crate) const fn into_refreshed_proof(self) -> Option<StatProof> {
-        self.refreshed_proof
+        match self.0 {
+            Verification::Stale => None,
+            Verification::Current { refreshed_proof } => refreshed_proof,
+        }
     }
 
     #[cfg(test)]
     pub(crate) const fn current_for_test(refreshed_proof: Option<StatProof>) -> Self {
-        Self {
-            current: true,
-            refreshed_proof,
-        }
+        Self(Verification::Current { refreshed_proof })
     }
 }
 
@@ -115,9 +117,18 @@ pub enum InfoExcludeError {
     FileState(#[from] FileStateError),
 }
 
-struct Source {
-    contents: String,
-    proof: Option<StatProof>,
+enum Source {
+    Missing,
+    Present(crate::file_state::CoherentObservation<String>),
+}
+
+impl Source {
+    fn contents(&self) -> &str {
+        match self {
+            Self::Missing => "",
+            Self::Present(observation) => &observation.value,
+        }
+    }
 }
 
 fn path(layout: &RepositoryLayout) -> Result<PathBuf, InfoExcludeError> {
@@ -128,10 +139,7 @@ fn path(layout: &RepositoryLayout) -> Result<PathBuf, InfoExcludeError> {
 
 fn acquire(path: &Path) -> Result<Source, InfoExcludeError> {
     match std::fs::symlink_metadata(path) {
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(Source {
-            contents: String::new(),
-            proof: None,
-        }),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(Source::Missing),
         Err(source) => Err(InfoExcludeError::Read {
             path: path.to_path_buf(),
             source,
@@ -151,20 +159,19 @@ fn acquire(path: &Path) -> Result<Source, InfoExcludeError> {
                     source,
                 })
             })?;
-            Ok(Source {
-                contents: observation.value,
-                proof: Some(observation.proof),
-            })
+            Ok(Source::Present(observation))
         }
     }
 }
 
 fn source_is_current(path: &Path, source: &Source) -> bool {
-    let current = crate::file_state::observe_regular_file_no_follow(path);
-    match (source.proof, current) {
-        (None, None) => true,
-        (Some(prior), Some(current)) => current.matches(&prior),
-        _ => false,
+    match source {
+        // No regular-file proof can also mean a symlink, directory, or stat
+        // failure. Only NotFound confirms an originally absent source.
+        Source::Missing => matches!(std::fs::symlink_metadata(path), Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound),
+        Source::Present(prior) => crate::file_state::observe_regular_file_no_follow(path)
+            .is_some_and(|current| current.matches(&prior.proof)),
     }
 }
 
@@ -172,10 +179,12 @@ fn source_is_current(path: &Path, source: &Source) -> bool {
 pub fn read_info_exclude(
     layout: &RepositoryLayout,
 ) -> Result<Option<InfoExcludeSnapshot>, InfoExcludeError> {
-    let source = acquire(&path(layout)?)?;
-    Ok(source.proof.map(|_| InfoExcludeSnapshot {
-        contents: source.contents,
-    }))
+    Ok(match acquire(&path(layout)?)? {
+        Source::Missing => None,
+        Source::Present(observation) => Some(InfoExcludeSnapshot {
+            contents: observation.value,
+        }),
+    })
 }
 
 /// Verify the recorded managed block without exposing filesystem evidence.
@@ -194,25 +203,24 @@ pub(crate) fn verify_info_exclude(
         && let Some(current) = crate::file_state::observe_regular_file_no_follow(&path)
         && current.matches(&prior)
     {
-        return Ok(InfoExcludeVerification {
-            current: true,
+        return Ok(InfoExcludeVerification(Verification::Current {
             refreshed_proof: None,
-        });
+        }));
     }
 
-    let source = acquire(&path)?;
-    let current = source
-        .proof
-        .and_then(|proof| {
-            gat_core::managed_block::extract_body(&source.contents, begin, end)
-                .map(|body| (proof, *blake3::hash(body.as_bytes()).as_bytes()))
-        })
-        .filter(|(_, identity)| Some(*identity) == record.block_identity());
-
-    Ok(InfoExcludeVerification {
-        current: current.is_some(),
-        refreshed_proof: current.map(|(proof, _)| proof),
-    })
+    let Source::Present(observation) = acquire(&path)? else {
+        return Ok(InfoExcludeVerification(Verification::Stale));
+    };
+    let identity = gat_core::managed_block::extract_body(&observation.value, begin, end)
+        .map(|body| *blake3::hash(body.as_bytes()).as_bytes());
+    let verification = if identity.is_some() && identity == record.block_identity() {
+        Verification::Current {
+            refreshed_proof: Some(observation.proof),
+        }
+    } else {
+        Verification::Stale
+    };
+    Ok(InfoExcludeVerification(verification))
 }
 
 /// Applies a caller-provided pure transformation to one coherent source
@@ -225,7 +233,7 @@ pub fn mutate_info_exclude(
     let path = path(layout)?;
     for attempt in 0..CONCURRENT_MODIFICATION_RETRIES {
         let source = acquire(&path)?;
-        let mutation = derive(&source.contents);
+        let mutation = derive(source.contents());
         if mutation == InfoExcludeMutation::Unchanged {
             return Ok(InfoExcludeUpdate {
                 changed: false,
