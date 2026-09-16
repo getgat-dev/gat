@@ -90,18 +90,12 @@ pub(crate) fn sync_from_lock_with_config(
     cfg: &gat_core::config::Config,
 ) -> Result<SyncStatus> {
     let plan = compact::IgnoreCoveragePlan::new(cfg.git.effective_ignore_patterns());
-    let mut exact: Vec<_> = lock
+    let exact: Vec<_> = lock
         .entries
         .iter()
         .filter(|entry| !plan.covers(&entry.path))
-        .map(|entry| entry.path.as_str().to_string())
+        .map(|entry| entry.path.as_str())
         .collect();
-    // Unlike the store-backed path below, `lock.entries` carries no
-    // ordering/uniqueness guarantee of its own.
-    if !exact.is_sorted() {
-        exact.sort_unstable();
-    }
-    exact.dedup();
     render(repo, cfg, exact, dry_run)
 }
 
@@ -163,10 +157,6 @@ fn sync_from_path_source(
         }
         Ok(())
     })?;
-    if !exact.is_sorted() {
-        exact.sort_unstable();
-    }
-    exact.dedup();
     render(repo, cfg, exact, dry_run)
 }
 
@@ -257,22 +247,26 @@ fn append_exact_exclude_pattern(escaped: &mut String, path: &str) {
     }
 }
 
-/// Render `exact` (already the final, sorted, deduplicated set of paths that
-/// need their own rule) plus `git.ignore_patterns` into the
+/// Sort and deduplicate paths needing exact rules, then render them plus
+/// `git.ignore_patterns` into the
 /// gat-managed `.git/info/exclude` block, writing it out unless `dry_run` or
-/// nothing changed. Shared tail of lock-backed and store-backed generation
-/// once each has produced its `exact` set. `exact` entries are Gat-managed
+/// nothing changed. Borrow loaded lock paths; streamed mutation paths own
+/// their text until rendering. `exact` entries are Gat-managed
 /// paths and are rendered through [`append_exact_exclude_pattern`]; `git.ignore_patterns`
 /// are hand-authored; comments matching block markers gain a comment prefix.
-fn render(
+fn render<P: AsRef<str> + Ord>(
     repo: &Repo,
     cfg: &gat_core::config::Config,
-    exact: Vec<String>,
+    mut exact: Vec<P>,
     dry_run: bool,
 ) -> Result<SyncStatus> {
+    if !exact.is_sorted() {
+        exact.sort_unstable();
+    }
+    exact.dedup();
     let mut body = ExcludeBody::new(cfg);
     for path in exact {
-        body.push_path(&path);
+        body.push_path(path.as_ref());
     }
     Ok(render_with_proof(repo, body, dry_run)?.0)
 }
@@ -854,6 +848,27 @@ mod tests {
         assert!(status.changed);
         let status = sync(&repo, true).unwrap();
         assert!(!status.changed);
+    }
+
+    #[test]
+    fn loaded_lock_excludes_are_sorted_unique_and_idempotent() {
+        let tmp = git_repo();
+        let repo = crate::Invocation::from_pairs([] as [(&str, &str); 0])
+            .unwrap()
+            .repository_at(tmp.path().to_path_buf());
+        let mut lock = Lock::default();
+        insert(&mut lock, "a.bin", 'a');
+        insert(&mut lock, "b.bin", 'b');
+        lock.entries.reverse();
+        lock.entries.push(lock.entries[0].clone());
+        let status = sync_from_lock(&repo, &lock, false).unwrap();
+        assert_eq!(status.count, 2);
+        let text = std::fs::read_to_string(tmp.path().join(".git/info/exclude")).unwrap();
+        assert_eq!(
+            gat_core::managed_block::extract_body(&text, BEGIN, END),
+            Some("/a.bin\n/b.bin\n")
+        );
+        assert!(!sync_from_lock(&repo, &lock, false).unwrap().changed);
     }
 
     #[test]
