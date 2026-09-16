@@ -6255,17 +6255,13 @@ mod tests {
         std::fs::write(&path, b"aaaa").unwrap();
         let identity = crate::lock::hash_shard_bytes(b"aaaa");
         let proof = crate::file_state::observe_regular_file_no_follow(&path).unwrap();
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
 
         // Rewrite with different, same-length content, then force the
         // exact same persisted mtime back onto it -- a metadata-preserving
         // rewrite indistinguishable from "unchanged" by `StatProof`
         // equality alone.
         std::fs::write(&path, b"bbbb").unwrap();
-        let mtime = std::time::UNIX_EPOCH
-            + std::time::Duration::new(
-                u64::try_from(proof.mtime_secs).unwrap(),
-                u32::try_from(proof.mtime_nanos).unwrap(),
-            );
         let times = std::fs::FileTimes::new().set_modified(mtime);
         std::fs::OpenOptions::new()
             .write(true)

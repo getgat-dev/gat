@@ -563,11 +563,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo = crate::RepositoryLayout::at(tmp.path().to_path_buf());
         let mut store = StateStore::open(&repo).unwrap();
-        let proof = StatProof {
-            size: 42,
-            mtime_secs: -7,
-            mtime_nanos: 123,
-        };
+        let proof = StatProof::for_test(42, -7, 123);
         let mut rows: Vec<_> = ["a'quoted.bin", "b\nline.bin", "é.bin"]
             .into_iter()
             .enumerate()

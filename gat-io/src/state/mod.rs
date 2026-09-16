@@ -856,11 +856,7 @@ mod tests {
     }
 
     fn stat_proof(size: u64, mtime_secs: i64) -> StatProof {
-        StatProof {
-            size,
-            mtime_secs,
-            mtime_nanos: 0,
-        }
+        StatProof::for_test(size, mtime_secs, 0)
     }
 
     fn load_scope_paths(store: &StateStore, scope: &str) -> Vec<String> {
@@ -878,11 +874,11 @@ mod tests {
         byte: u8,
         entries: Vec<Entry>,
     ) {
-        let proof = Some(crate::file_state::StatProof {
-            size: entries.len() as u64,
-            mtime_secs: i64::from(byte),
-            mtime_nanos: 0,
-        });
+        let proof = Some(crate::file_state::StatProof::for_test(
+            entries.len() as u64,
+            i64::from(byte),
+            0,
+        ));
         store
             .apply_shard_refresh(
                 &[ChangedShard {
@@ -2091,11 +2087,7 @@ mod tests {
     #[test]
     fn decode_row_proof_blob_round_trips() {
         // A well-formed proof BLOB round-trips through the shared codec.
-        let proof = crate::file_state::StatProof {
-            size: 4242,
-            mtime_secs: 1_700_000_000,
-            mtime_nanos: 0,
-        };
+        let proof = crate::file_state::StatProof::for_test(4242, 1_700_000_000, 0);
         let blob = crate::file_state::encode_stat_proof(&proof).to_vec();
         let row = decode_row_raw("a.bin".to_string(), vec![9u8; 32], Some(blob)).unwrap();
         assert_eq!(row.proof, Some(proof));
@@ -2311,11 +2303,7 @@ mod tests {
                     shard_id: sid("gat.lock"),
                     prior_identity: None,
                     identity: ShardIdentity::from_array([0u8; 32]),
-                    proof: Some(crate::file_state::StatProof {
-                        size: 0,
-                        mtime_secs: 0,
-                        mtime_nanos: 0,
-                    }),
+                    proof: Some(crate::file_state::StatProof::for_test(0, 0, 0)),
                     entries: vec![e.clone()],
                 }],
                 &[],
@@ -2334,11 +2322,7 @@ mod tests {
         let repo = Repo::at(tmp.path().to_path_buf());
         let mut store = StateStore::open(&repo).unwrap();
         let e = entry("a.bin", 1, 1);
-        let stat = Some(crate::file_state::StatProof {
-            size: 0,
-            mtime_secs: 0,
-            mtime_nanos: 0,
-        });
+        let stat = Some(crate::file_state::StatProof::for_test(0, 0, 0));
         store
             .apply_shard_refresh(
                 &[ChangedShard {
@@ -2398,11 +2382,7 @@ mod tests {
         let tmp = git_repo();
         let repo = Repo::at(tmp.path().to_path_buf());
         let mut store = StateStore::open(&repo).unwrap();
-        let stat = Some(crate::file_state::StatProof {
-            size: 0,
-            mtime_secs: 0,
-            mtime_nanos: 0,
-        });
+        let stat = Some(crate::file_state::StatProof::for_test(0, 0, 0));
         store
             .apply_shard_refresh(
                 &[ChangedShard {
@@ -2481,11 +2461,7 @@ mod tests {
         let tmp = git_repo();
         let repo = Repo::at(tmp.path().to_path_buf());
         let mut store = StateStore::open(&repo).unwrap();
-        let stat = Some(crate::file_state::StatProof {
-            size: 1,
-            mtime_secs: 1,
-            mtime_nanos: 0,
-        });
+        let stat = Some(crate::file_state::StatProof::for_test(1, 1, 0));
         let initial: Vec<ChangedShard> = (0..1_000usize)
             .map(|i| ChangedShard {
                 shard_id: nsid(u32::try_from(i).unwrap()),
@@ -2541,11 +2517,7 @@ mod tests {
         // (empty) state.
         assert_eq!(empty, *empty_identity.as_bytes());
 
-        let stat = Some(crate::file_state::StatProof {
-            size: 10,
-            mtime_secs: 1,
-            mtime_nanos: 0,
-        });
+        let stat = Some(crate::file_state::StatProof::for_test(10, 1, 0));
         store
             .apply_shard_refresh(
                 &[ChangedShard {
@@ -2614,11 +2586,7 @@ mod tests {
         let tmp = git_repo();
         let repo = Repo::at(tmp.path().to_path_buf());
         let mut store = StateStore::open(&repo).unwrap();
-        let stat = Some(crate::file_state::StatProof {
-            size: 1,
-            mtime_secs: 1,
-            mtime_nanos: 0,
-        });
+        let stat = Some(crate::file_state::StatProof::for_test(1, 1, 0));
 
         // Seed three shards.
         let seed: Vec<ChangedShard> = (0..3u8)
@@ -2682,11 +2650,7 @@ mod tests {
         let tmp = git_repo();
         let repo = Repo::at(tmp.path().to_path_buf());
         let mut store = StateStore::open(&repo).unwrap();
-        let stat = crate::file_state::StatProof {
-            size: 1,
-            mtime_secs: 1,
-            mtime_nanos: 0,
-        };
+        let stat = crate::file_state::StatProof::for_test(1, 1, 0);
 
         // A catalog much larger than the two shards this test actually
         // touches.
@@ -2756,11 +2720,7 @@ mod tests {
         assert_eq!(empty.block_identity(), None);
         assert!(!empty.has_reusable_proof());
 
-        let proof = crate::file_state::StatProof {
-            size: 3,
-            mtime_secs: 100,
-            mtime_nanos: 0,
-        };
+        let proof = crate::file_state::StatProof::for_test(3, 100, 0);
         store
             .record_exclude_output(
                 [7u8; 32],

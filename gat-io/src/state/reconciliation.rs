@@ -1503,11 +1503,11 @@ mod tests {
     }
 
     fn seed_shard(store: &mut StateStore, shard_id: LockShardId, byte: u8, entries: Vec<Entry>) {
-        let proof = Some(StatProof {
-            size: entries.len() as u64,
-            mtime_secs: i64::from(byte),
-            mtime_nanos: 0,
-        });
+        let proof = Some(StatProof::for_test(
+            entries.len() as u64,
+            i64::from(byte),
+            0,
+        ));
         store
             .apply_shard_refresh(
                 &[ChangedShard {
@@ -1569,11 +1569,7 @@ mod tests {
         // otherwise itself be the conflict (proving it's actually
         // skipped) and one real non-excluded shard holding the actual
         // conflict this test expects to find.
-        let stat = Some(StatProof {
-            size: 1,
-            mtime_secs: 0,
-            mtime_nanos: 0,
-        });
+        let stat = Some(StatProof::for_test(1, 0, 0));
         let excluded_real_shard = sid("gat.lock/aa.tsv");
         let shards: Vec<ChangedShard> = vec![
             ChangedShard {

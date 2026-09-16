@@ -154,6 +154,24 @@ impl HistoryVisitStats {
     }
 }
 
+// Convert storage failures at this boundary while preserving callback errors
+// unchanged. Both history visitors share the same conversion policy.
+struct HistoryCallbackError<E>(E);
+
+impl<E: From<HistoryError>> From<gat_io::GitHistoryError> for HistoryCallbackError<E> {
+    fn from(error: gat_io::GitHistoryError) -> Self {
+        Self(E::from(HistoryError(error)))
+    }
+}
+
+impl<E: From<gat_core::lock::LockError>> From<gat_core::lock::LockError>
+    for HistoryCallbackError<E>
+{
+    fn from(error: gat_core::lock::LockError) -> Self {
+        Self(E::from(error))
+    }
+}
+
 impl Repository {
     /// Resolves a revision strictly to a commit in this repository.
     pub fn resolve_commit(
@@ -172,17 +190,6 @@ impl Repository {
     where
         E: From<HistoryError>,
     {
-        enum Bridge<E> {
-            History(HistoryError),
-            Callback(E),
-        }
-
-        impl<E> From<gat_io::GitHistoryError> for Bridge<E> {
-            fn from(error: gat_io::GitHistoryError) -> Self {
-                Self::History(HistoryError(error))
-            }
-        }
-
         let reader = match gat_io::GitReader::open(self.layout()) {
             Ok(reader) => reader,
             Err(error) => {
@@ -191,14 +198,11 @@ impl Repository {
         };
         let mut visit = visit;
         reader
-            .visit_history_commits::<Bridge<E>>(selection, |commit| {
-                visit(commit).map_err(Bridge::Callback)
+            .visit_history_commits::<HistoryCallbackError<E>>(selection, |commit| {
+                visit(commit).map_err(HistoryCallbackError)
             })
             .map(HistoryVisitStats::from_io)
-            .map_err(|error| match error {
-                Bridge::History(error) => E::from(error),
-                Bridge::Callback(error) => error,
-            })
+            .map_err(|HistoryCallbackError(error)| error)
     }
 
     /// Streams selected historical lock rows after collecting and deduplicating
@@ -212,24 +216,6 @@ impl Repository {
     where
         E: From<HistoryError> + From<gat_core::lock::LockError>,
     {
-        enum Bridge<E> {
-            History(HistoryError),
-            Lock(gat_core::lock::LockError),
-            Callback(E),
-        }
-
-        impl<E> From<gat_io::GitHistoryError> for Bridge<E> {
-            fn from(error: gat_io::GitHistoryError) -> Self {
-                Self::History(HistoryError(error))
-            }
-        }
-
-        impl<E> From<gat_core::lock::LockError> for Bridge<E> {
-            fn from(error: gat_core::lock::LockError) -> Self {
-                Self::Lock(error)
-            }
-        }
-
         let reader = match gat_io::GitReader::open(self.layout()) {
             Ok(reader) => reader,
             Err(error) => {
@@ -238,14 +224,10 @@ impl Repository {
         };
         let mut visit = visit;
         reader
-            .visit_history_lock_entries::<Bridge<E>>(selection, keep, |entry| {
-                visit(entry).map_err(Bridge::Callback)
+            .visit_history_lock_entries::<HistoryCallbackError<E>>(selection, keep, |entry| {
+                visit(entry).map_err(HistoryCallbackError)
             })
             .map(HistoryVisitStats::from_io)
-            .map_err(|error| match error {
-                Bridge::History(error) => E::from(error),
-                Bridge::Lock(error) => E::from(error),
-                Bridge::Callback(error) => error,
-            })
+            .map_err(|HistoryCallbackError(error)| error)
     }
 }

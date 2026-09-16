@@ -35,18 +35,6 @@ use std::path::Path;
 /// `anyhow::Result`.
 type Result<T> = super::Result<T>;
 
-/// Directly delegates to [`coherent_observation`], generic over this
-/// module's own typed [`LockError`] (via `LockError`'s `#[from]
-/// FileStateError`) so `op`'s failure and `coherent_observation`'s own
-/// stat-race detection both stay fully typed end to end -- no `anyhow`
-/// round-trip, no downcast recovery.
-fn coherent_read_bytes(
-    path: &Path,
-    op: impl FnOnce() -> Result<Vec<u8>>,
-) -> Result<crate::file_state::CoherentObservation<Vec<u8>>> {
-    coherent_observation(path, op)
-}
-
 /// Hash `bytes` with BLAKE3 -- the one, only shard content identity
 /// computation in the codebase: every caller that
 /// needs a shard's canonical identity, whether during publication
@@ -158,7 +146,7 @@ pub fn resolve_shard_identity(
         });
     }
 
-    let observation = coherent_read_bytes(full_path, read)?;
+    let observation = coherent_observation(full_path, read)?;
     let identity = hash_shard_bytes(&observation.value);
     Ok(ShardIdentityResolution::Coherent {
         identity,
