@@ -943,15 +943,7 @@ fn replay_record(
                     return Ok(None);
                 };
                 replay_fault("replay.before_publish")?;
-                Ok(Some(
-                    rows?
-                        .into_iter()
-                        .map(|row| gat_core::lock::Entry {
-                            path: row.path,
-                            oid: row.oid,
-                        })
-                        .collect(),
-                ))
+                Ok(Some(rows?))
             },
             result,
             || {

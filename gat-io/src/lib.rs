@@ -502,7 +502,7 @@ pub use git::{
 };
 pub use journal::mount::{
     MOUNT_TXN_VERSION, MountJournal, MountJournalError, MountJournalValidationError,
-    MountTxnChange, MountTxnPhase, MountTxnRecord, StagedRow, StagedWindows,
+    MountTxnChange, MountTxnPhase, MountTxnRecord,
 };
 pub use lock::{
     CandidateInvalidReason, CompletedLockReshape, InvalidOidReason, LiveLockInvalidReason,

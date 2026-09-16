@@ -106,19 +106,19 @@ impl PreparedRecord {
 /// never be mistaken for absent scratch, including a dangling symlink.
 pub(super) fn read_record(txn_dir: &Path) -> Result<Option<TxnRecord>> {
     let record_path = txn_dir.join("txn.json");
-    match std::fs::symlink_metadata(&record_path) {
-        Ok(metadata) if metadata.is_file() => {}
-        Ok(_) => {
-            return Err(LockError::UnsupportedOnDiskKind {
-                path: record_path,
+    let Some(text) =
+        crate::journal::read_text_if_present(&record_path).map_err(|error| match error {
+            crate::journal::JournalReadError::NotRegular => LockError::UnsupportedOnDiskKind {
+                path: record_path.clone(),
                 detail: "not a regular transaction record".into(),
-            });
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => return Err(LockError::io("reading", &record_path, source)),
-    }
-    let text = std::fs::read_to_string(&record_path)
-        .map_err(|source| LockError::io("reading", &record_path, source))?;
+            },
+            crate::journal::JournalReadError::Io(source) => {
+                LockError::io("reading", &record_path, source)
+            }
+        })?
+    else {
+        return Ok(None);
+    };
     serde_json::from_str(&text).map(Some).map_err(|source| {
         PersistenceError::TxnRecordMalformed {
             record_path,
