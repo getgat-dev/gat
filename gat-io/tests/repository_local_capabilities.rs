@@ -108,6 +108,57 @@ fn state_maintenance_derives_database_and_sidecar_paths_from_the_layout() {
     ));
 }
 
+#[cfg(unix)]
+#[test]
+fn database_inspection_rejects_live_and_dangling_symlinks_before_preparation() {
+    for exists in [false, true] {
+        let repository = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let layout = layout(repository.path());
+        let target = external.path().join("external.sqlite3");
+        if exists {
+            let connection = rusqlite::Connection::open(&target).unwrap();
+            connection
+                .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE sentinel(value);")
+                .unwrap();
+        }
+        let before = std::fs::read(&target).ok();
+        for relative in [".gat/state/state.sqlite3", ".gat/objects/cache.sqlite3"] {
+            let link = repository.path().join(relative);
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+        }
+
+        assert!(matches!(
+            inspect_database(&layout).unwrap(),
+            StateDatabaseHealth::Unreadable(gat_io::StateDatabaseUnreadable::NotARegularFile)
+        ));
+        assert!(matches!(
+            layout
+                .resolve_cache_root(None)
+                .maintenance()
+                .inspect_database()
+                .unwrap(),
+            gat_io::CacheDatabaseHealth::Unreadable(
+                gat_io::CacheDatabaseUnreadable::NotARegularFile
+            )
+        ));
+        assert_eq!(std::fs::read(&target).ok(), before);
+        assert_eq!(
+            std::fs::read_dir(external.path()).unwrap().count(),
+            usize::from(exists)
+        );
+        assert!(!repository.path().join(".gat/.gitignore").exists());
+        for relative in [".gat/state/state.sqlite3", ".gat/objects/cache.sqlite3"] {
+            assert!(
+                std::fs::symlink_metadata(repository.path().join(relative))
+                    .unwrap()
+                    .is_symlink()
+            );
+        }
+    }
+}
+
 #[test]
 fn mount_journal_is_repository_bound_and_preserves_typed_records() {
     let repository = tempfile::tempdir().unwrap();

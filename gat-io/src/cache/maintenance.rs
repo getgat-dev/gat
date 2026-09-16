@@ -1,9 +1,7 @@
 use super::object::TEMP_PREFIX;
-use super::proof::{CacheState, SCHEMA_VERSION};
+use super::proof::{CACHE_DB_FILENAME, CacheState, SCHEMA_VERSION};
 use rusqlite::{Connection, OpenFlags};
 use std::path::{Path, PathBuf};
-
-const CACHE_DB_FILENAME: &str = "cache.sqlite3";
 
 #[derive(Debug)]
 pub enum CacheDatabaseHealth {
@@ -93,7 +91,7 @@ fn inspect_database(
     root: &crate::cache::root::CacheRootInner,
 ) -> Result<CacheDatabaseHealth, CacheMaintenanceError> {
     let path = root.objects_dir.join(CACHE_DB_FILENAME);
-    let meta = match std::fs::metadata(&path) {
+    let meta = match std::fs::symlink_metadata(&path) {
         Ok(meta) => meta,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             return Ok(CacheDatabaseHealth::Absent);

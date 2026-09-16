@@ -55,7 +55,7 @@ pub fn inspect_database(
 ) -> Result<StateDatabaseHealth, StateMaintenanceError> {
     let db_path = repository.materialized_db_path();
     let path = db_path.as_path();
-    let meta = match std::fs::metadata(path) {
+    let meta = match std::fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             return Ok(StateDatabaseHealth::Absent);

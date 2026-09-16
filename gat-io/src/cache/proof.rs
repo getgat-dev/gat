@@ -210,7 +210,7 @@ impl From<gat_core::oid::OidFormatError> for CacheStateError {
 
 /// The filename the shared proof cache always uses, directly under the
 /// content-addressed objects directory it accelerates.
-const CACHE_DB_FILENAME: &str = "cache.sqlite3";
+pub(super) const CACHE_DB_FILENAME: &str = "cache.sqlite3";
 
 /// The schema version this build of `gat` writes and requires. Unlike
 /// the repository-local materialized-state database, an
