@@ -22,7 +22,7 @@ impl ProcessResourcePolicy {
         let cpu_threads = parallelism.unwrap_or_else(|| NonZeroUsize::new(1).unwrap());
         Self {
             // This pool also performs synchronous file I/O; overlap its waits.
-            cpu: NonZeroUsize::new(cpu_threads.get().saturating_mul(2)).unwrap(),
+            cpu: NonZeroUsize::new(cpu_threads.get().saturating_mul(4)).unwrap(),
             tokio_worker: NonZeroUsize::new(cpu_threads.get().min(2)).unwrap(),
             tokio_blocking: NonZeroUsize::new(TOKIO_BLOCKING_THREADS)
                 .expect("Tokio blocking thread policy must be positive"),
@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn policy_uses_minimal_workers_when_parallelism_detection_fails() {
         let policy = ProcessResourcePolicy::from_parallelism(None);
-        assert_eq!(policy.cpu.get(), 2);
+        assert_eq!(policy.cpu.get(), 4);
         assert_eq!(policy.tokio_worker.get(), 1);
         assert_eq!(policy.tokio_blocking.get(), TOKIO_BLOCKING_THREADS);
     }
@@ -78,7 +78,7 @@ mod tests {
     #[test]
     fn policy_bounds_async_workers_independently_of_cpu_workers() {
         let policy = ProcessResourcePolicy::from_parallelism(Some(NonZeroUsize::new(7).unwrap()));
-        assert_eq!(policy.cpu.get(), 14);
+        assert_eq!(policy.cpu.get(), 28);
         assert_eq!(policy.tokio_worker.get(), 2);
         assert_eq!(policy.tokio_blocking.get(), TOKIO_BLOCKING_THREADS);
     }
