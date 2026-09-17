@@ -8,39 +8,10 @@ impl From<gat_engine::WorktreePathError> for Failure {
         use gat_engine::WorktreePathError as EngineError;
 
         match &err {
-            EngineError::NotRelative { path } => Self::expected(
-                Diagnostic::new(ErrorCode::PathOutsideRepository, "Path must be relative")
-                    .with_subject(UserLine::path_text(path))
-                    .with_hint("Pass a path that stays inside the repository root."),
-            ),
-            EngineError::ParentTraversal { path } => Self::expected(
-                Diagnostic::new(
-                    ErrorCode::PathOutsideRepository,
-                    "Path escapes the repository (contains `..`)",
-                )
-                .with_subject(UserLine::path_text(path))
-                .with_hint("Pass a path that stays inside the repository root."),
-            ),
             EngineError::NotMaterializable { path } => Self::expected(
                 Diagnostic::new(
                     ErrorCode::PathOutsideRepository,
                     "Path cannot be represented on this host",
-                )
-                .with_subject(UserLine::path_text(path))
-                .with_hint("Pass a path that stays inside the repository root."),
-            ),
-            EngineError::NonUtf8Component { path } => Self::expected(
-                Diagnostic::new(
-                    ErrorCode::PathOutsideRepository,
-                    "Path contains non-UTF-8 characters",
-                )
-                .with_subject(UserLine::path_text(path))
-                .with_hint("Pass a path that stays inside the repository root."),
-            ),
-            EngineError::EscapesWorktree { path } => Self::expected(
-                Diagnostic::new(
-                    ErrorCode::PathOutsideRepository,
-                    "Path escapes the repository root",
                 )
                 .with_subject(UserLine::path_text(path))
                 .with_hint("Pass a path that stays inside the repository root."),

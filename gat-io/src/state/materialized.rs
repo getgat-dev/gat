@@ -27,7 +27,9 @@ fn bulk_upsert_materialized(
              ) VALUES {placeholders}
              ON CONFLICT(path) DO UPDATE SET
                  materialized_oid = excluded.materialized_oid,
-                 materialized_proof = excluded.materialized_proof"
+                 materialized_proof = excluded.materialized_proof
+             WHERE state.materialized_oid IS NOT excluded.materialized_oid
+                OR state.materialized_proof IS NOT excluded.materialized_proof"
         );
         // Borrow paths and OIDs; only encoded proofs need temporary storage.
         // Keep those fixed-size values together instead of allocating per row.
@@ -95,34 +97,19 @@ fn bulk_refresh_materialized_proofs(
     Ok(())
 }
 
-/// Clear the *materialized* half of exactly the rows named by `paths`
-/// (an `IN (...)` list), then delete any of those rows that are now
-/// entirely empty (`desired_oid`/`materialized_oid` both `NULL`) -- a row
-/// only exists to record a non-`NULL` desired or materialized half, never
-/// as a bare tombstone.
-fn clear_materialized_exact_tx(tx: &rusqlite::Transaction<'_>, paths: &[&GatPath]) -> Result<()> {
-    for chunk in paths.chunks(sql_chunk_size(1)) {
-        let placeholders = sql_placeholders("?", chunk.len());
-        tx.execute(
-            &format!(
-                "UPDATE state
-                 SET materialized_oid = NULL,
-                     materialized_proof = NULL
-                 WHERE path IN ({placeholders})"
-            ),
-            params_from_iter(chunk.iter().map(|p| p.as_str())),
-        )
-        .with_state_context(|| format!("clearing {} materialized-state row(s)", chunk.len()))?;
-        tx.execute(
-            &format!(
-                "DELETE FROM state WHERE path IN ({placeholders})
-                 AND desired_oid IS NULL AND materialized_oid IS NULL"
-            ),
-            params_from_iter(chunk.iter().map(|p| p.as_str())),
-        )
-        .with_state_context(|| format!("pruning {} emptied state row(s)", chunk.len()))?;
-    }
-    Ok(())
+/// Clear the materialized half of each exact path, preserving desired state.
+/// Rows without a desired half are deleted directly.
+fn clear_materialized_exact_tx<'path>(
+    tx: &rusqlite::Transaction<'_>,
+    paths: impl IntoIterator<Item = &'path GatPath>,
+) -> Result<()> {
+    super::clear_exact_paths_tx(
+        tx,
+        paths,
+        "DELETE FROM state WHERE path = ?1 AND desired_oid IS NULL",
+        "UPDATE state SET materialized_oid = NULL, materialized_proof = NULL
+         WHERE path = ?1 AND materialized_oid IS NOT NULL",
+    )
 }
 
 /// Clear the materialized half of a lexical subtree without first
@@ -134,6 +121,12 @@ fn clear_materialized_prefix_tx(tx: &rusqlite::Transaction<'_>, path: &GatPath) 
     let path = path.as_str();
     let (lower, upper) = descendant_range(path);
     tx.execute(
+        "DELETE FROM state WHERE (path = ?1 OR (path >= ?2 AND path < ?3))
+         AND desired_oid IS NULL",
+        (path, &lower, &upper),
+    )
+    .state_context("pruning emptied state rows")?;
+    tx.execute(
         "UPDATE state
          SET materialized_oid = NULL,
              materialized_proof = NULL
@@ -142,12 +135,6 @@ fn clear_materialized_prefix_tx(tx: &rusqlite::Transaction<'_>, path: &GatPath) 
         (path, &lower, &upper),
     )
     .state_context("clearing materialized-state rows")?;
-    tx.execute(
-        "DELETE FROM state WHERE (path = ?1 OR (path >= ?2 AND path < ?3))
-         AND desired_oid IS NULL AND materialized_oid IS NULL",
-        (path, &lower, &upper),
-    )
-    .state_context("pruning emptied state rows")?;
     Ok(())
 }
 
@@ -359,8 +346,8 @@ impl StateStore {
 
     /// Clear the materialized half of exactly the rows for `paths` (no
     /// prefix expansion -- callers resolve directory scopes against
-    /// `gat.lock` first and pass the concrete rows affected), via one or
-    /// more chunked statements inside one transaction. `dirty` updates
+    /// `gat.lock` first and pass the concrete rows affected), inside one
+    /// transaction. `dirty` updates
     /// (and, if a row's desired half was already `NULL` too, deletion of
     /// the now-empty row) happen in the same transaction.
     pub fn remove_exact(&mut self, paths: &[GatPath]) -> Result<()> {
@@ -371,8 +358,7 @@ impl StateStore {
             .conn
             .transaction()
             .state_context("beginning materialized-state transaction")?;
-        let refs: Vec<&GatPath> = paths.iter().collect();
-        clear_materialized_exact_tx(&tx, &refs)?;
+        clear_materialized_exact_tx(&tx, paths)?;
         tx.commit()
             .state_context("committing materialized-state removal")
     }
@@ -478,167 +464,24 @@ impl StateStore {
                     while i < ops.len() && matches!(ops[i].0, StateMutationKind::RemoveExact(_)) {
                         i += 1;
                     }
-                    let paths: Vec<&GatPath> = ops[start..i]
-                        .iter()
-                        .map(|op| match &op.0 {
-                            StateMutationKind::RemoveExact(path) => path,
-                            StateMutationKind::Upsert(_)
-                            | StateMutationKind::RefreshStat { .. } => {
-                                unreachable!()
-                            }
-                        })
-                        .collect();
-                    clear_materialized_exact_tx(&tx, &paths)?;
+                    let paths = ops[start..i].iter().map(|op| match &op.0 {
+                        StateMutationKind::RemoveExact(path) => path,
+                        StateMutationKind::Upsert(_) | StateMutationKind::RefreshStat { .. } => {
+                            unreachable!()
+                        }
+                    });
+                    clear_materialized_exact_tx(&tx, paths)?;
                 }
             }
         }
         tx.commit()
             .state_context("committing batched materialized-state mutation")
     }
-
-    /// Move the materialized half of every row at `src` (exact path) or
-    /// nested under it (`src/...`) to the equivalent path under `dst`, in
-    /// one transaction. A destination row's existing desired half (if
-    /// any) is left untouched -- only `materialized_oid`/
-    /// `materialized_proof` move. Rows already present at a destination
-    /// path have their materialized half overwritten (matching `gat mv`'s
-    /// existing collision behavior of unconditionally upserting the
-    /// moved rows). Rows are read via `descendant_range` once (a stable
-    /// snapshot for this transaction), then cleared before that snapshot is
-    /// published under `dst`. A transaction-local `SQLite` table keeps overlapping
-    /// prefixes safe without retaining a second row set in application memory.
-    pub fn move_prefix(&mut self, src: &GatPath, dst: &GatPath) -> Result<()> {
-        if src == dst {
-            return Ok(());
-        }
-        let source_path = src;
-        let src = src.as_str();
-        let dst = dst.as_str();
-        let (lower, upper) = descendant_range(src);
-        let tx = self
-            .conn
-            .transaction()
-            .state_context("beginning materialized-state transaction")?;
-        let rest_start = i64::try_from(src.len() + 1).map_err(|_| StateStoreError::InvalidRow {
-            detail: format!("src path too long ({} bytes)", src.len()),
-        })?;
-        // SQLite text substr counts characters and stops at NUL. Use byte
-        // slices so the offset agrees with canonical UTF-8 path byte lengths.
-        tx.execute(
-            "CREATE TEMP TABLE materialized_move AS
-             SELECT CASE WHEN path = ?1 THEN ?2
-                         ELSE CAST(CAST(?2 AS BLOB) || substr(CAST(path AS BLOB), ?3) AS TEXT)
-                    END AS path,
-                    materialized_oid, materialized_proof
-             FROM state
-             WHERE materialized_oid IS NOT NULL
-               AND (path = ?1 OR (path >= ?4 AND path < ?5))",
-            (src, dst, rest_start, &lower, &upper),
-        )
-        .state_context("staging materialized-state move")?;
-        clear_materialized_prefix_tx(&tx, source_path)?;
-        tx.execute(
-            "INSERT INTO state (path, materialized_oid, materialized_proof)
-             SELECT path, materialized_oid, materialized_proof
-             FROM temp.materialized_move WHERE true
-             ON CONFLICT(path) DO UPDATE SET
-                 materialized_oid = excluded.materialized_oid,
-                 materialized_proof = excluded.materialized_proof",
-            [],
-        )
-        .state_context("publishing materialized-state move")?;
-        tx.execute("DROP TABLE temp.materialized_move", [])
-            .state_context("discarding materialized-state move staging")?;
-        tx.commit()
-            .state_context("committing materialized-state move")
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn failed_move_rolls_back_source_clear_and_temporary_staging() {
-        let tmp = tempfile::tempdir().unwrap();
-        let layout = crate::RepositoryLayout::at(tmp.path().to_path_buf());
-        let mut store = StateStore::open(&layout).unwrap();
-        let src = GatPath::parse_canonical("source").unwrap();
-        let dst = GatPath::parse_canonical("target").unwrap();
-        let row = MaterializedRow {
-            path: GatPath::parse_canonical("source/a").unwrap(),
-            oid: gat_core::oid::Oid::from_bytes([7; 32]),
-            proof: Some(StatProof::for_test(42, -7, 123)),
-        };
-        store.upsert_rows(std::slice::from_ref(&row)).unwrap();
-        store
-            .conn
-            .execute_batch(
-                "CREATE TEMP TRIGGER reject_move BEFORE INSERT ON state
-             WHEN NEW.path = 'target/a' BEGIN SELECT RAISE(ABORT, 'injected'); END;",
-            )
-            .unwrap();
-        assert!(store.move_prefix(&src, &dst).is_err());
-        let loaded = store.load_all_raw().unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].path, row.path);
-        assert_eq!(loaded[0].oid, row.oid);
-        assert_eq!(loaded[0].proof, row.proof);
-        store
-            .conn
-            .execute_batch("DROP TRIGGER reject_move")
-            .unwrap();
-        store.move_prefix(&src, &dst).unwrap();
-        assert_eq!(store.load_all_raw().unwrap()[0].path.as_str(), "target/a");
-    }
-
-    #[test]
-    fn materialized_moves_preserve_overlapping_and_multibyte_paths_and_proofs() {
-        for (src, dst) in [
-            ("data", "data/nested"),
-            ("data/nested", "data"),
-            ("é", "移動"),
-            ("é\0源", "目\0先"),
-            ("same", "same"),
-        ] {
-            let tmp = tempfile::tempdir().unwrap();
-            let layout = crate::RepositoryLayout::at(tmp.path().to_path_buf());
-            let mut store = StateStore::open(&layout).unwrap();
-            let mut expected: Vec<_> = ["a", "nested/b"]
-                .into_iter()
-                .enumerate()
-                .map(|(index, suffix)| MaterializedRow {
-                    path: GatPath::parse_canonical(&format!("{src}/{suffix}")).unwrap(),
-                    oid: gat_core::oid::Oid::from_bytes([u8::try_from(index).unwrap(); 32]),
-                    proof: Some(StatProof::for_test(42, -7, 123)),
-                })
-                .collect();
-            store.upsert_rows(&expected).unwrap();
-            store
-                .move_prefix(
-                    &GatPath::parse_canonical(src).unwrap(),
-                    &GatPath::parse_canonical(dst).unwrap(),
-                )
-                .unwrap();
-            for (row, suffix) in expected.iter_mut().zip(["a", "nested/b"]) {
-                row.path = GatPath::parse_canonical(&format!("{dst}/{suffix}")).unwrap();
-            }
-            let actual = store.load_all_raw().unwrap();
-            assert_eq!(actual.len(), expected.len(), "{src:?} -> {dst:?}");
-            for (actual, expected) in actual.iter().zip(&expected) {
-                assert_eq!(actual.path, expected.path);
-                assert_eq!(actual.oid, expected.oid);
-                assert_eq!(actual.proof, expected.proof);
-            }
-            // A second move must not encounter a leftover staging table.
-            store
-                .move_prefix(
-                    &GatPath::parse_canonical(dst).unwrap(),
-                    &GatPath::parse_canonical("final").unwrap(),
-                )
-                .unwrap();
-        }
-    }
 
     #[test]
     fn materialized_bindings_preserve_paths_oids_and_optional_proofs() {

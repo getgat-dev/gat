@@ -12,18 +12,13 @@ mod fetch;
 mod gc;
 mod init;
 mod merge_driver;
-mod mount;
 #[path = "move.rs"]
 mod move_cmd;
 mod ownership;
 mod push;
-mod remote;
 mod remote_status;
 mod remove;
 mod repair;
-mod resource;
-mod route;
-mod saved_selection;
 mod selection;
 mod status;
 mod sync;
@@ -38,6 +33,14 @@ pub use diff::{DiffChange, DiffError, DiffOutcome, DiffRequest, DiffRow, DiffTar
 pub use fetch::{
     FetchError, FetchOutcome, FetchRequest, FetchSource, fetch, fetch_with_desired_operation,
 };
+// Configuration-resource workflows are owned by the engine.
+pub use gat_engine::{
+    DefaultRemoteRoute, MatchedRoute, MountDetails, MountError, MountOutcome, MountRecord,
+    MountRequest, MountRouteBootstrap, RemoteDefault, RemoteError, RemoteOutcome, RemoteRecord,
+    RemoteRequest, ResourceKind, ResourceScopeError, RouteDetails, RouteError, RouteOutcome,
+    RouteRecord, RouteRequest, SavedSelectionError, SelectionDefault, SelectionOutcome,
+    SelectionRecord, SelectionRequest, mount, named_selection, remote, route, saved_selection,
+};
 pub use gc::{
     GcEngineError, GcError, GcFailure, GcFailureKind, GcOutcome, GcRepositoryFailureKind,
     GcRepositoryIssue, GcRequest, gc, gc_with_lifecycle_observer,
@@ -47,10 +50,6 @@ pub use init::{
     InitRequest, init,
 };
 pub use merge_driver::{MergeDriverError, MergeDriverOutcome, MergeDriverRequest, merge_driver};
-pub use mount::{
-    MatchedRoute, MountDetails, MountError, MountOutcome, MountRecord, MountRequest,
-    MountRouteBootstrap, mount,
-};
 pub use move_cmd::{MoveError, MoveOutcome, MoveRequest, move_path, move_with_progress};
 pub use ownership::OwnershipError;
 #[cfg(any(test, feature = "test-support"))]
@@ -60,7 +59,6 @@ pub use push::{
     PushError, PushOutcome, PushRequest, PushSkip, PushSkipReason, PushSource, push,
     push_with_desired_operation,
 };
-pub use remote::{RemoteDefault, RemoteError, RemoteOutcome, RemoteRecord, RemoteRequest, remote};
 pub use remote_status::{
     MissingRemoteConfigError, MissingRemoteObject, RemoteStatusError, RemoteStatusOutcome,
     RemoteStatusRequest, remote_status, remote_status_with_desired_operation,
@@ -70,14 +68,6 @@ pub use remove::{RemoveError, RemoveOutcome, RemoveRequest, remove, remove_with_
 #[doc(hidden)]
 pub use repair::test_support as repair_test_support;
 pub use repair::{RepairError, RepairFailure, RepairOutcome, RepairRequest, repair_with_operation};
-pub use resource::{ResourceKind, ResourceScopeError};
-pub use route::{
-    DefaultRemoteRoute, RouteDetails, RouteError, RouteOutcome, RouteRecord, RouteRequest, route,
-};
-pub use saved_selection::{
-    SavedSelectionError, SelectionDefault, SelectionOutcome, SelectionRecord, SelectionRequest,
-    named_selection, saved_selection,
-};
 pub use selection::SelectionScope;
 pub use status::{
     CachePresence, LsFilesError, LsFilesOutcome, LsFilesRequest, StatusChange, StatusError,

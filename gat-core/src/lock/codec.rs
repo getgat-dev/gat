@@ -61,59 +61,9 @@ pub struct Lock {
     pub entries: Vec<Entry>,
 }
 
-/// Cheap, allocation-free check that `path` is already in the exact
-/// canonical form [`GatPath::normalize`](crate::lexical_path::GatPath::normalize)
-/// would produce for it. Used by
-/// `Lock::visit_filtered`'s per-row validation, where the overwhelming
-/// majority of rows in a real `gat.lock` are already canonical (gat
-/// itself only ever writes canonical paths): `GatPath::normalize` builds an
-/// owned `Vec<String>` of path components plus a joined `String` just to
-/// compare the result back against the original, so calling it for
-/// every parsed row -- including rows a scoped read discards -- costs
-/// `O(row count)` heap churn even when nothing is actually malformed.
-///
-/// A `false` result does **not** mean `path` is invalid, only that this
-/// cheap check couldn't prove it canonical either way; the caller must
-/// fall back to `GatPath::normalize` to find out for sure. A `true` result is
-/// a hard guarantee: every condition `GatPath::normalize` would otherwise
-/// need to fix up (a `.`/`..`/empty path segment, a leading/trailing/
-/// doubled `/`, a `\`) is absent here, so the component walk it performs
-/// is a no-op and its result is `path` itself.
-pub(super) fn is_canonical_rel_path(path: &str) -> bool {
-    if path.is_empty() || path.starts_with('/') || path.ends_with('/') {
-        return false;
-    }
-
-    let mut segment_len = 0usize;
-    let mut segment_all_dots = true;
-
-    for b in path.bytes() {
-        match b {
-            b'/' => {
-                if segment_len == 0 || (segment_all_dots && (segment_len == 1 || segment_len == 2))
-                {
-                    return false;
-                }
-                segment_len = 0;
-                segment_all_dots = true;
-            }
-            b'\\' => return false,
-            b'.' => {
-                segment_len += 1;
-            }
-            _ => {
-                segment_len += 1;
-                segment_all_dots = false;
-            }
-        }
-    }
-
-    !(segment_len == 0 || (segment_all_dots && (segment_len == 1 || segment_len == 2)))
-}
-
 /// Validate canonical components without allocating on successful input.
 pub(super) fn validate_path(path: &str, line: usize) -> Result<()> {
-    if is_canonical_rel_path(path) {
+    if crate::lexical_path::validate_canonical_str(path).is_ok() {
         return Ok(());
     }
     crate::lexical_path::GatPath::normalize(path).map_err(|source| {
@@ -334,30 +284,13 @@ impl Lock {
     /// requires a terminator. Decoded paths must be canonical and strictly
     /// increasing, with no duplicates or file/directory-prefix conflicts.
     pub fn parse(text: &str) -> Result<Self> {
-        let entries = Self::parse_filtered(text, |_| true)?;
-        Ok(Self { entries })
-    }
-
-    /// Certify the whole file, then materialize only selected rows.
-    pub(crate) fn parse_filtered(
-        text: &str,
-        mut keep: impl FnMut(&str) -> bool,
-    ) -> Result<Vec<Entry>> {
-        let mut kept = Vec::new();
-        Self::visit_filtered(text, &mut keep, |entry| {
-            kept.push(entry);
-            Ok(())
-        })?;
-        Ok(kept)
-    }
-
-    /// Certify the whole file before invoking selection or emission callbacks.
-    pub(crate) fn visit_filtered(
-        text: &str,
-        keep: impl FnMut(&str) -> bool,
-        visit: impl FnMut(Entry) -> Result<()>,
-    ) -> Result<()> {
-        visit_filtered_matching(text, keep, visit)
+        let view = super::reader::ValidatedLockFile::parse(text)?;
+        Ok(Self {
+            entries: view
+                .rows()
+                .map(|(path, oid)| entry_from_validated_parts(path, oid))
+                .collect(),
+        })
     }
 
     /// Insert or update the row for `path`, given as already-typed
@@ -398,8 +331,7 @@ impl Lock {
 
     /// Remove the row for `path` and any row nested under it (`path/...`),
     /// covering both single-file and whole-directory untrack in one call.
-    /// A trailing slash on `path` (e.g. `data/`) is ignored so it matches
-    /// the same rows as the slash-less form. Returns the paths of the rows
+    /// Returns the paths of the rows
     /// that were removed, so callers can report the real number of tracked
     /// files affected (a directory may hold any number of tracked files)
     /// and know exactly which files to delete on disk.
@@ -407,15 +339,10 @@ impl Lock {
         &mut self,
         path: &crate::lexical_path::GatPath,
     ) -> Vec<crate::lexical_path::GatPath> {
-        let mut removed = Vec::new();
-        self.entries.retain(|e| {
-            let matches = e.path.is_or_under(path);
-            if matches {
-                removed.push(e.path.clone());
-            }
-            !matches
-        });
-        removed
+        self.entries
+            .extract_if(.., |entry| entry.path.is_or_under(path))
+            .map(|entry| entry.path)
+            .collect()
     }
 }
 

@@ -169,9 +169,11 @@ pub struct CoherentObservation<T> {
 /// `Unstable` model this replaces, there is no successful-but-proof-less
 /// outcome. `op` runs only after the initial stat succeeds; its effects may
 /// already have happened when the post-operation stat rejects the observation.
+/// The callback receives the initial observation so it can reuse metadata
+/// such as the byte size without another filesystem lookup.
 pub fn coherent_observation<T, E>(
     path: &Path,
-    op: impl FnOnce() -> std::result::Result<T, E>,
+    op: impl FnOnce(&StatProof) -> std::result::Result<T, E>,
 ) -> std::result::Result<CoherentObservation<T>, E>
 where
     E: From<FileStateError>,
@@ -181,7 +183,7 @@ where
             path: path.to_path_buf(),
         })
     })?;
-    let value = op()?;
+    let value = op(&before)?;
     let after = observe_regular_file_no_follow(path).ok_or_else(|| {
         E::from(FileStateError::Observed {
             path: path.to_path_buf(),
@@ -291,7 +293,7 @@ where
             return Ok(IdentityCheck::SizeMismatch);
         }
     }
-    let observation = coherent_observation(path, || hash(path))?;
+    let observation = coherent_observation(path, |_| hash(path))?;
     let matches = expected_oid.oid_eq(&observation.value);
     Ok(IdentityCheck::Hashed {
         oid: observation.value,
@@ -577,7 +579,11 @@ mod tests {
         let path = dir.path().join("f.txt");
         fs::write(&path, b"hello").unwrap();
 
-        let observed = coherent_observation(&path, || Ok::<_, FileStateError>(42)).unwrap();
+        let observed = coherent_observation(&path, |before| {
+            assert_eq!(before.size, 5);
+            Ok::<_, FileStateError>(42)
+        })
+        .unwrap();
         assert_eq!(observed.value, 42);
         assert_eq!(observed.proof.size, 5);
     }
@@ -593,7 +599,7 @@ mod tests {
         fs::write(&path, b"hello").unwrap();
         let path_clone = path.clone();
         let result: std::result::Result<CoherentObservation<()>, FileStateError> =
-            coherent_observation(&path, move || {
+            coherent_observation(&path, move |_| {
                 fs::write(&path_clone, b"hello world, changed").unwrap();
                 Ok(())
             });
@@ -610,7 +616,7 @@ mod tests {
         fs::write(&path, b"hello").unwrap();
         let path_clone = path.clone();
         let result: std::result::Result<CoherentObservation<()>, FileStateError> =
-            coherent_observation(&path, move || {
+            coherent_observation(&path, move |_| {
                 fs::remove_file(&path_clone).unwrap();
                 Ok(())
             });
@@ -625,7 +631,7 @@ mod tests {
         let path = dir.path().join("does-not-exist.txt");
         let mut called = false;
         let result: std::result::Result<CoherentObservation<()>, FileStateError> =
-            coherent_observation(&path, || {
+            coherent_observation(&path, |_| {
                 called = true;
                 Ok(())
             });
@@ -649,7 +655,7 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
         let result: std::result::Result<CoherentObservation<()>, FileStateError> =
-            coherent_observation(&link, || Ok(()));
+            coherent_observation(&link, |_| Ok(()));
         assert!(result.is_err());
     }
 

@@ -235,11 +235,7 @@ fn classify_cache(source: &CacheError) -> CacheFailureKind {
 
 fn classify_worktree_path(source: &WorktreePathError) -> (WorktreePathFailureKind, Option<String>) {
     match source {
-        WorktreePathError::NotRelative { path }
-        | WorktreePathError::ParentTraversal { path }
-        | WorktreePathError::NotMaterializable { path }
-        | WorktreePathError::NonUtf8Component { path }
-        | WorktreePathError::EscapesWorktree { path }
+        WorktreePathError::NotMaterializable { path }
         | WorktreePathError::SymlinkAncestor { path, .. } => (
             WorktreePathFailureKind::OutsideRepository,
             Some(path.clone()),

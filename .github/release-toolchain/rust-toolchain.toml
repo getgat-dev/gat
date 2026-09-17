@@ -1,0 +1,4 @@
+# Release compiler; source compatibility is checked separately on MSRV.
+[toolchain]
+channel = "1.98.1"
+profile = "minimal"

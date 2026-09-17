@@ -146,7 +146,7 @@ pub fn resolve_shard_identity(
         });
     }
 
-    let observation = coherent_observation(full_path, read)?;
+    let observation = coherent_observation(full_path, |_| read())?;
     let identity = hash_shard_bytes(&observation.value);
     Ok(ShardIdentityResolution::Coherent {
         identity,

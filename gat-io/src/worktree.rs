@@ -13,16 +13,8 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
 pub enum WorktreePathError {
-    #[error("path `{path}` must be relative")]
-    NotRelative { path: String },
-    #[error("path `{path}` escapes the worktree (contains `..`)")]
-    ParentTraversal { path: String },
     #[error("path `{path}` cannot be materialized on this host")]
     NotMaterializable { path: String },
-    #[error("path `{path}` contains non-UTF-8 characters")]
-    NonUtf8Component { path: String },
-    #[error("path `{path}` escapes the worktree after joining with the repository root")]
-    EscapesWorktree { path: String },
     #[error(
         "path `{path}` traverses symlinked ancestor `{ancestor}`; refusing to {verb} outside the repository"
     )]
@@ -70,6 +62,22 @@ impl<'root> WorktreeClient<'root> {
         confine_mutation(self.root, path).map(|_| ())
     }
 
+    /// Preflight paths in input order, checking shared parents once. This is
+    /// not a mutation receipt: each physical mutation still checks its ancestors.
+    pub fn validate_mutations(&self, paths: &[GatPath]) -> PathResult<()> {
+        let mut parents = HashSet::new();
+        for path in paths {
+            let dest = resolve_worktree_path(self.root, path)?;
+            if let Some(parent) = dest.parent()
+                && !parents.contains(parent)
+            {
+                ensure_no_symlink_ancestors(self.root, &dest)?;
+                parents.insert(parent.to_path_buf());
+            }
+        }
+        Ok(())
+    }
+
     pub fn reject_infrastructure(path: &GatPath) -> PathResult<()> {
         reject_infrastructure_path(path.as_str())
     }
@@ -82,6 +90,9 @@ impl<'root> WorktreeClient<'root> {
         move_path(self.root, src, dst)
     }
 
+    /// Remove files concurrently, then prune empty touched ancestors. All file
+    /// removals finish before returning the first input-order error, if any;
+    /// a failure skips pruning and may leave a partially removed worktree.
     pub fn remove_and_prune(&self, paths: &[GatPath]) -> Result<(), RemovePathError> {
         remove_and_prune(self.root, paths)
     }
@@ -159,31 +170,18 @@ pub struct RemovalReceipt {
 }
 
 fn resolve_worktree_path(root: &Path, rel: &GatPath) -> PathResult<PathBuf> {
-    use std::path::Component;
-
-    for component in Path::new(rel.as_str()).components() {
-        match component {
-            Component::Normal(_) | Component::CurDir => {}
-            Component::ParentDir => {
-                return Err(WorktreePathError::ParentTraversal {
-                    path: rel.to_string(),
-                });
-            }
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(WorktreePathError::NotMaterializable {
-                    path: rel.to_string(),
-                });
-            }
-        }
-    }
-
-    let dest = root.join(rel.as_str());
-    if !dest.starts_with(root) {
-        return Err(WorktreePathError::EscapesWorktree {
+    // GatPath has already excluded absolute paths, parent traversal and
+    // noncanonical separators. Only Windows adds native drive-prefix syntax.
+    if cfg!(windows)
+        && Path::new(rel.as_str())
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(WorktreePathError::NotMaterializable {
             path: rel.to_string(),
         });
     }
-    Ok(dest)
+    Ok(root.join(rel.as_str()))
 }
 
 fn ensure_no_symlink_ancestors(root: &Path, dest: &Path) -> PathResult<()> {
@@ -521,19 +519,26 @@ pub enum RemovePathError {
 }
 
 fn remove_and_prune(root: &Path, paths: &[GatPath]) -> Result<(), RemovePathError> {
-    let mut deleted = Vec::new();
-    for path in paths {
-        let full = confine_mutation(root, path)?;
-        match std::fs::remove_file(&full) {
-            Ok(()) => deleted.push(full),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(RemovePathError::Delete {
+    use rayon::prelude::*;
+
+    // Complete physical work before pruning; retain input-order error selection.
+    let results: Vec<_> = paths
+        .par_iter()
+        .map(|path| {
+            let full = confine_mutation(root, path)?;
+            match std::fs::remove_file(&full) {
+                Ok(()) => Ok(Some(full)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(source) => Err(RemovePathError::Delete {
                     path: path.to_string(),
                     source,
-                });
+                }),
             }
-        }
+        })
+        .collect();
+    let mut deleted = Vec::new();
+    for result in results {
+        deleted.extend(result?);
     }
     prune_touched_ancestor_dirs(root, deleted.iter().map(PathBuf::as_path))?;
     Ok(())
@@ -579,14 +584,15 @@ fn prune_touched_ancestor_dirs<'path>(
             if parent == root || !parent.starts_with(root) {
                 break;
             }
-            if !candidates.insert(parent.to_path_buf()) {
+            if candidates.contains(parent) {
                 break;
             }
+            candidates.insert(parent.to_path_buf());
             current = parent;
         }
     }
     let mut ordered: Vec<_> = candidates.into_iter().collect();
-    ordered.sort_by_key(|dir| std::cmp::Reverse(dir.components().count()));
+    ordered.sort_by_cached_key(|dir| std::cmp::Reverse(dir.components().count()));
 
     let mut blocked = HashSet::new();
     for dir in &ordered {
@@ -783,14 +789,8 @@ pub(crate) fn ingest_file(
     large_file_threshold: u64,
 ) -> Result<WorktreeIngested, WorktreeMutationError> {
     let full = confine_read(root, path)?;
-    let observation = crate::file_state::coherent_observation(&full, || {
-        let size = std::fs::metadata(&full)
-            .map(|metadata| metadata.len())
-            .map_err(|source| CacheError::PathUnreadable {
-                path: full.clone(),
-                source,
-            })
-            .map_err(WorktreeMutationError::from)?;
+    let observation = crate::file_state::coherent_observation(&full, |before| {
+        let size = before.size;
         if size > large_file_threshold {
             cache::object::ingest_file_delta(objects_dir, &full, strategy)
                 .map_err(WorktreeMutationError::from)
@@ -799,7 +799,8 @@ pub(crate) fn ingest_file(
                 path: full.clone(),
                 source,
             })?;
-            cache::object::ingest_delta(objects_dir, file).map_err(WorktreeMutationError::from)
+            cache::object::ingest_sized_delta(objects_dir, file, size)
+                .map_err(WorktreeMutationError::from)
         }
     })?;
     let (ingested, receipt) = observation.value;

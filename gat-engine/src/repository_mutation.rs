@@ -211,11 +211,6 @@ pub enum RepositoryMutationError {
         #[source]
         source: Box<SyncError>,
     },
-    #[error("could not move materialized repository state")]
-    MoveMaterialized {
-        #[source]
-        source: Box<SyncError>,
-    },
     #[error("could not regenerate repository excludes")]
     RegenerateExcludes {
         #[source]
@@ -547,18 +542,6 @@ impl<'repo, 'config> DesiredMutation<'repo, 'config> {
     ) -> Result<(), RepositoryMutationError> {
         self.session.forget_materialized(paths).map_err(|source| {
             RepositoryMutationError::ForgetMaterialized {
-                source: Box::new(source.into()),
-            }
-        })
-    }
-
-    pub fn move_materialized(
-        &mut self,
-        src: &GatPath,
-        dst: &GatPath,
-    ) -> Result<(), RepositoryMutationError> {
-        self.session.move_materialized(src, dst).map_err(|source| {
-            RepositoryMutationError::MoveMaterialized {
                 source: Box::new(source.into()),
             }
         })

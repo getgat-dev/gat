@@ -150,12 +150,6 @@ pub fn move_with_progress(
                     dst: dst.clone(),
                     source: Box::new(source),
                 };
-                if !dst_collision_paths.is_empty() {
-                    desired
-                        .forget_materialized(&dst_collision_paths)
-                        .map_err(published)?;
-                }
-                desired.move_materialized(&src, &dst).map_err(published)?;
                 desired.sync_excludes().map_err(published)?;
                 Ok(())
             },

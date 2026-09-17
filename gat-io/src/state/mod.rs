@@ -60,7 +60,7 @@
 //! Every mutation is one short, explicit transaction with chunked,
 //! set-based SQL (`INSERT ... VALUES (...), (...) ON CONFLICT DO UPDATE`,
 //! `DELETE ... WHERE path IN (...)`), not a per-row loop of prepared
-//! statement calls. Prefix operations (`remove_prefix`, `move_prefix`)
+//! statement calls. Prefix removals and repository moves
 //! match a tracked path or anything nested under it using an explicit
 //! lexical byte-range (`path >= 'dir/' AND path < 'dir0'`) rather than
 //! `LIKE`/`GLOB`, so `%`, `_`, backslashes, and case are never
@@ -70,7 +70,7 @@
 //! [`gat_core::lexical_path::GatPath::is_or_under`] implements in memory.
 //!
 //! Because desired/materialized state share one row, every materialized
-//! mutation (`upsert_many`/`remove_exact`/`remove_prefix`/`move_prefix`)
+//! mutation (`upsert_rows`/`remove_exact`/`apply_batch`)
 //! and every desired-state mutation (`apply_shard_refresh`) updates
 //! `dirty` as a side effect of the very same `UPDATE`/`INSERT` that
 //! changes the half it touches, inside the very same transaction --
@@ -92,6 +92,7 @@ mod desired;
 mod error;
 mod maintenance;
 mod materialized;
+mod movement;
 mod query;
 mod reconciliation;
 mod repository;
@@ -178,6 +179,31 @@ pub fn record_materialized_unlocked_for_test(
         })
         .collect::<Vec<_>>();
     StateStore::open(layout)?.upsert_rows(&rows)
+}
+
+/// Reuse fixed statements for exact-path cleanup of either state half.
+/// Delete rows without an opposite half before clearing the requested half.
+fn clear_exact_paths_tx<'path>(
+    tx: &rusqlite::Transaction<'_>,
+    paths: impl IntoIterator<Item = &'path GatPath>,
+    prune_sql: &str,
+    clear_sql: &str,
+) -> Result<()> {
+    let mut prune = tx
+        .prepare(prune_sql)
+        .state_context("preparing empty state-row cleanup")?;
+    let mut clear = tx
+        .prepare(clear_sql)
+        .state_context("preparing state-half cleanup")?;
+    for path in paths {
+        prune
+            .execute([path.as_str()])
+            .state_context("pruning emptied state row")?;
+        clear
+            .execute([path.as_str()])
+            .state_context("clearing state half")?;
+    }
+    Ok(())
 }
 
 /// Total bound-variable budget a single chunked statement should stay
@@ -375,22 +401,12 @@ impl std::fmt::Debug for MaterializedRow {
 /// decodes as *absent* proof (never a fatal error), so gat simply falls
 /// back to re-establishing identity by hash next time -- see
 /// [`crate::file_state::decode_stat_proof`].
-fn decode_row_raw(path: String, oid: Vec<u8>, proof: Option<Vec<u8>>) -> Result<MaterializedRow> {
+fn decode_row_raw(path: String, oid: &[u8], proof: Option<&[u8]>) -> Result<MaterializedRow> {
     let path = decode_path(path, "materialized-state row")?;
-    let oid: [u8; 32] = oid
-        .as_slice()
-        .try_into()
-        .map_err(|_| StateStoreError::InvalidRow {
-            detail: format!(
-                "materialized-state row {path:?}: invalid oid length {} (expected 32 bytes)",
-                oid.len()
-            ),
-        })?;
-    let proof = proof.as_deref().and_then(decode_stat_proof);
     Ok(MaterializedRow {
+        oid: decode_oid(oid, &path, "materialized-state row")?,
         path,
-        oid: Oid::from_bytes(oid),
-        proof,
+        proof: proof.and_then(decode_stat_proof),
     })
 }
 
@@ -423,19 +439,62 @@ pub(crate) fn decode_path(raw: String, context: &str) -> Result<GatPath> {
     })
 }
 
-fn decode_desired_row_raw(path: String, oid: Vec<u8>) -> Result<DesiredRow> {
-    let path = decode_path(path, "desired-state row")?;
-    let oid_arr: [u8; 32] = oid
-        .as_slice()
+fn decode_oid(bytes: &[u8], path: &GatPath, context: &str) -> Result<Oid> {
+    bytes
         .try_into()
+        .map(Oid::from_bytes)
         .map_err(|_| StateStoreError::InvalidRow {
             detail: format!(
-                "desired-state row {path:?}: invalid oid length {} (expected 32 bytes)",
-                oid.len()
+                "{context} {path:?}: invalid oid length {} (expected 32 bytes)",
+                bytes.len()
             ),
-        })?;
-    let oid = Oid::from_bytes(oid_arr);
-    Ok(DesiredRow { path, oid })
+        })
+}
+
+/// Borrow a BLOB while preserving the column-type error produced by `Row::get`.
+fn blob_column<'row>(row: &'row rusqlite::Row<'_>, index: usize) -> rusqlite::Result<&'row [u8]> {
+    let value = row.get_ref(index)?;
+    value.as_blob().map_err(|_| {
+        rusqlite::Error::InvalidColumnType(
+            index,
+            row.as_ref()
+                .column_name(index)
+                .expect("get_ref validated the column index")
+                .to_owned(),
+            value.data_type(),
+        )
+    })
+}
+
+fn optional_blob_column<'row>(
+    row: &'row rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<Option<&'row [u8]>> {
+    match row.get_ref(index)? {
+        rusqlite::types::ValueRef::Null => Ok(None),
+        _ => blob_column(row, index).map(Some),
+    }
+}
+
+fn decode_materialized_row(row: &rusqlite::Row<'_>) -> Result<MaterializedRow> {
+    let path = row.get(0).state_context("reading materialized-state row")?;
+    let oid = blob_column(row, 1).state_context("reading materialized-state row")?;
+    let proof = optional_blob_column(row, 2).state_context("reading materialized-state row")?;
+    decode_row_raw(path, oid, proof)
+}
+
+fn decode_desired_row(row: &rusqlite::Row<'_>) -> Result<DesiredRow> {
+    let path = row.get(0).state_context("reading desired-state row")?;
+    let oid = blob_column(row, 1).state_context("reading desired-state row")?;
+    decode_desired_row_raw(path, oid)
+}
+
+fn decode_desired_row_raw(path: String, oid: &[u8]) -> Result<DesiredRow> {
+    let path = decode_path(path, "desired-state row")?;
+    Ok(DesiredRow {
+        oid: decode_oid(oid, &path, "desired-state row")?,
+        path,
+    })
 }
 
 fn load_materialized_rows<P: rusqlite::Params>(
@@ -446,19 +505,15 @@ fn load_materialized_rows<P: rusqlite::Params>(
     let mut stmt = conn
         .prepare(sql)
         .state_context("preparing materialized-state load query")?;
-    let rows = stmt
-        .query_map(params, |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, Option<Vec<u8>>>(2)?,
-            ))
-        })
+    let mut rows = stmt
+        .query(params)
         .state_context("loading materialized state")?;
     let mut entries = Vec::new();
-    for row in rows {
-        let (path, oid, proof) = row.state_context("reading materialized-state row")?;
-        entries.push(decode_row_raw(path, oid, proof)?);
+    while let Some(row) = rows
+        .next()
+        .state_context("reading materialized-state row")?
+    {
+        entries.push(decode_materialized_row(row)?);
     }
     Ok(entries)
 }
@@ -549,13 +604,7 @@ impl MaterializedRows<'_> {
             .state_context("reading materialized-state row")?
         {
             None => Ok(None),
-            Some(row) => {
-                let path: String = row.get(0).state_context("reading materialized-state row")?;
-                let oid: Vec<u8> = row.get(1).state_context("reading materialized-state row")?;
-                let proof: Option<Vec<u8>> =
-                    row.get(2).state_context("reading materialized-state row")?;
-                Ok(Some(decode_row_raw(path, oid, proof)?))
-            }
+            Some(row) => decode_materialized_row(row).map(Some),
         }
     }
 }
@@ -1410,6 +1459,72 @@ mod tests {
     }
 
     #[test]
+    fn exact_cleanup_preserves_the_other_half_and_rolls_back_partial_failure() {
+        for clear_desired in [false, true] {
+            let tmp = git_repo();
+            let repo = Repo::at(tmp.path().to_path_buf());
+            let mut store = StateStore::open(&repo).unwrap();
+            let orphan = entry("a", 1, 1);
+            let shared = entry("b", 2, 1);
+            let opposite = entry("c", 3, 1);
+            let desired = if clear_desired {
+                vec![orphan.clone(), shared.clone()]
+            } else {
+                vec![shared.clone(), opposite.clone()]
+            };
+            let materialized = if clear_desired {
+                vec![shared.clone(), opposite.clone()]
+            } else {
+                vec![orphan, shared.clone()]
+            };
+            store
+                .upsert_desired_for_test(&desired, crate::lock::LockShardLevels::FLAT)
+                .unwrap();
+            store.upsert_many(&materialized).unwrap();
+            let before_desired = store.load_desired_as_lock().unwrap();
+            let before_materialized = store.load_all().unwrap();
+            let paths = [gp("a"), gp("b"), gp("a"), gp("missing"), gp("c")];
+            let clear = |store: &mut StateStore| -> Result<()> {
+                if clear_desired {
+                    store.desired_write(|desired| desired.remove_paths(&paths))
+                } else {
+                    store.remove_exact(&paths)
+                }
+            };
+            store
+                .conn
+                .execute_batch(
+                    "CREATE TRIGGER reject_cleanup BEFORE UPDATE ON state
+                 WHEN OLD.path = 'b' BEGIN SELECT RAISE(ABORT, 'cleanup failure'); END;",
+                )
+                .unwrap();
+            assert!(clear(&mut store).is_err());
+            assert_eq!(store.load_desired_as_lock().unwrap(), before_desired);
+            assert_eq!(store.load_all().unwrap(), before_materialized);
+            store
+                .conn
+                .execute_batch("DROP TRIGGER reject_cleanup")
+                .unwrap();
+            clear(&mut store).unwrap();
+            clear(&mut store).unwrap();
+            let after_desired = store.load_desired_as_lock().unwrap().entries;
+            let after_materialized = store.load_all().unwrap().entries;
+            if clear_desired {
+                assert!(after_desired.is_empty());
+                assert_eq!(after_materialized, before_materialized.entries);
+            } else {
+                assert_eq!(after_desired, before_desired.entries);
+                assert!(after_materialized.is_empty());
+            }
+            let empty: i64 = store.conn.query_row(
+                "SELECT count(*) FROM state WHERE desired_oid IS NULL AND materialized_oid IS NULL",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(empty, 0);
+        }
+    }
+
+    #[test]
     fn apply_batch_remove_exact_preserves_nested_paths() {
         let tmp = git_repo();
         let repo = Repo::at(tmp.path().to_path_buf());
@@ -1539,50 +1654,6 @@ mod tests {
     }
 
     #[test]
-    fn move_prefix_moves_exact_file() {
-        let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
-        let mut store = StateStore::open(&repo).unwrap();
-        store.upsert_many(&[entry("a.bin", 1, 1)]).unwrap();
-        store.move_prefix(&gp("a.bin"), &gp("b.bin")).unwrap();
-        let loaded = store.load_all().unwrap().entries;
-        assert_eq!(loaded, vec![entry("b.bin", 1, 0)]);
-    }
-
-    #[test]
-    fn move_prefix_moves_a_whole_directory() {
-        let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
-        let mut store = StateStore::open(&repo).unwrap();
-        store
-            .upsert_many(&[entry("data/a.bin", 1, 1), entry("data/nested/b.bin", 2, 2)])
-            .unwrap();
-        store.move_prefix(&gp("data"), &gp("moved")).unwrap();
-        let mut loaded = store.load_all().unwrap().entries;
-        loaded.sort_by(|a, b| a.path.cmp(&b.path));
-        assert_eq!(
-            loaded,
-            vec![
-                entry("moved/a.bin", 1, 0),
-                entry("moved/nested/b.bin", 2, 0),
-            ]
-        );
-    }
-
-    #[test]
-    fn move_prefix_overwrites_a_destination_collision() {
-        let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
-        let mut store = StateStore::open(&repo).unwrap();
-        store
-            .upsert_many(&[entry("a.bin", 1, 1), entry("b.bin", 9, 9)])
-            .unwrap();
-        store.move_prefix(&gp("a.bin"), &gp("b.bin")).unwrap();
-        let loaded = store.load_all().unwrap().entries;
-        assert_eq!(loaded, vec![entry("b.bin", 1, 0)]);
-    }
-
-    #[test]
     fn remove_desired_prefix_removes_exact_and_nested_but_not_siblings() {
         let tmp = git_repo();
         let repo = Repo::at(tmp.path().to_path_buf());
@@ -1605,44 +1676,6 @@ mod tests {
             store.load_desired_as_lock().unwrap().entries,
             vec![entry("data.bin", 4, 0)]
         );
-    }
-
-    #[test]
-    fn move_desired_prefix_moves_rows_and_recomputes_their_shard_ids() {
-        let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
-        let mut store = StateStore::open(&repo).unwrap();
-        seed_desired_shard(
-            &mut store,
-            sid("gat.lock/aa.tsv"),
-            1,
-            vec![entry("data/a.bin", 1, 1), entry("data/nested/b.bin", 2, 2)],
-        );
-
-        store
-            .move_desired_prefix(
-                &gp("data"),
-                &gp("moved"),
-                crate::lock::LockShardLevels::new(2).unwrap(),
-            )
-            .unwrap();
-
-        let mut loaded = store.load_desired_as_lock().unwrap().entries;
-        loaded.sort_by(|a, b| a.path.cmp(&b.path));
-        assert_eq!(
-            loaded,
-            vec![
-                entry("moved/a.bin", 1, 0),
-                entry("moved/nested/b.bin", 2, 0)
-            ]
-        );
-        let moved_paths: Vec<_> = loaded.iter().map(|e| e.path.clone()).collect();
-        let shard_ids = store.desired_shard_ids_for_paths(&moved_paths).unwrap();
-        let expected = moved_paths
-            .iter()
-            .map(|p| shard_id_for_path(p, LockShardLevels::new(2).unwrap()))
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(shard_ids, expected);
     }
 
     #[test]
@@ -1696,7 +1729,6 @@ mod tests {
                 .publish_desired_removals::<DesiredPublishTestError>(
                     &repo,
                     &shape_lock,
-                    &[gp("exact.bin"), gp("tree/a.bin"), gp("tree/b.bin")],
                     &[
                         DesiredRemoval::Exact(&exact),
                         DesiredRemoval::Prefix(&prefix),
@@ -2067,20 +2099,61 @@ mod tests {
     }
 
     #[test]
+    fn database_row_decoding_rejects_invalid_identity_but_tolerates_unknown_proofs() {
+        use rusqlite::types::Value;
+
+        let conn = Connection::open_in_memory().unwrap();
+        let sql = "SELECT 'a.bin', ?1, ?2";
+        for invalid in [
+            Value::Null,
+            Value::Integer(1),
+            Value::Real(1.0),
+            Value::Text("oid".into()),
+        ] {
+            assert!(matches!(
+                load_materialized_rows(&conn, sql, (&invalid, Value::Null)),
+                Err(StateStoreError::QueryFailed { .. })
+            ));
+            let mut stmt = conn.prepare(sql).unwrap();
+            let mut rows = stmt.query((&invalid, Value::Null)).unwrap();
+            assert!(matches!(
+                decode_desired_row(rows.next().unwrap().unwrap()),
+                Err(StateStoreError::QueryFailed { .. })
+            ));
+        }
+        for length in [0, 31, 33] {
+            let oid = vec![7u8; length];
+            assert!(matches!(
+                load_materialized_rows(&conn, sql, (&oid, Value::Null)),
+                Err(StateStoreError::InvalidRow { .. })
+            ));
+            let mut stmt = conn.prepare(sql).unwrap();
+            let mut rows = stmt.query((&oid, Value::Null)).unwrap();
+            assert!(matches!(
+                decode_desired_row(rows.next().unwrap().unwrap()),
+                Err(StateStoreError::InvalidRow { .. })
+            ));
+        }
+        let rows = load_materialized_rows(&conn, sql, ([7u8; 32], [0xFFu8, 0, 1])).unwrap();
+        assert_eq!(rows[0].oid, Oid::from_bytes([7; 32]));
+        assert!(rows[0].proof.is_none());
+        assert!(matches!(
+            load_materialized_rows(&conn, sql, ([7u8; 32], "not a blob")),
+            Err(StateStoreError::QueryFailed { .. })
+        ));
+    }
+
+    #[test]
     fn decode_row_rejects_wrong_oid_length() {
-        assert!(decode_row_raw("a.bin".to_string(), vec![0u8; 31], None).is_err());
+        assert!(decode_row_raw("a.bin".to_string(), &[0u8; 31], None).is_err());
     }
 
     #[test]
     fn decode_row_malformed_proof_decodes_as_absent() {
         // A malformed/unknown proof BLOB must decode as *absent* proof
         // (never a fatal DB error), so gat falls back to re-hashing.
-        let row = decode_row_raw(
-            "a.bin".to_string(),
-            vec![7u8; 32],
-            Some(vec![0xFF, 0x00, 0x01]),
-        )
-        .expect("malformed proof must not be fatal");
+        let row = decode_row_raw("a.bin".to_string(), &[7u8; 32], Some(&[0xFF, 0x00, 0x01]))
+            .expect("malformed proof must not be fatal");
         assert!(row.proof.is_none());
     }
 
@@ -2089,7 +2162,7 @@ mod tests {
         // A well-formed proof BLOB round-trips through the shared codec.
         let proof = crate::file_state::StatProof::for_test(4242, 1_700_000_000, 0);
         let blob = crate::file_state::encode_stat_proof(&proof).to_vec();
-        let row = decode_row_raw("a.bin".to_string(), vec![9u8; 32], Some(blob)).unwrap();
+        let row = decode_row_raw("a.bin".to_string(), &[9u8; 32], Some(&blob)).unwrap();
         assert_eq!(row.proof, Some(proof));
     }
 

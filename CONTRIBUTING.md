@@ -47,8 +47,9 @@ Pull requests targeting `main` use GitHub's merge queue. After the required
 checks pass, add the pull request to the queue with `gh pr merge --auto` or
 the GitHub merge button. The queue runs the required checks against the
 latest `main` before squash-merging, so branches do not need rebasing just
-to catch up with `main`. Dependabot patch and minor updates enter the queue
-automatically; major updates require a manual merge decision.
+to catch up with `main`. Dependabot updates, including major versions, enter the queue
+automatically once required checks and approvals pass. Version updates have a
+seven-day cooldown after upstream release; security updates bypass the cooldown.
 
 Workflows that provide required checks must handle both `pull_request` and
 `merge_group` (`checks_requested`) events. Keep their check names consistent
@@ -180,6 +181,17 @@ The [release workflow](.github/workflows/release.yml) defines validation,
 packaging, and publishing. Push a `vX.Y.Z` tag matching the package version
 in `Cargo.toml` to trigger a release. Leave the release-drafter draft unpublished;
 the workflow publishes it only after validation and asset uploads succeed.
+
+Release binaries use an exact stable compiler pin in
+[the release toolchain manifest](.github/release-toolchain/rust-toolchain.toml),
+independent of the source MSRV in `Cargo.toml`. Linux packaging tools are pinned
+in [the release requirements](.github/release-toolchain/requirements.txt).
+Dependabot checks both manifests weekly; changes exercise the complete release
+packaging and acceptance matrix before publishing. Keep these manifests as the
+shared source of release tool versions for any workflows that need them.
+Regular CI tracks stable, while the MSRV job checks and tests the workspace on
+the minimum supported compiler. Preserve the runtime platform baselines when
+updating release tools.
 
 ## Issues
 

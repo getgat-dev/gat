@@ -148,7 +148,7 @@ fn acquire(path: &Path) -> Result<Source, InfoExcludeError> {
             path: path.to_path_buf(),
         }),
         Ok(_) => {
-            let observation = crate::file_state::coherent_observation(path, || {
+            let observation = crate::file_state::coherent_observation(path, |_| {
                 #[cfg(any(test, feature = "test-support"))]
                 {
                     test_support::record_content_read();

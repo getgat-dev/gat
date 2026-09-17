@@ -26,6 +26,9 @@ use std::future::Future;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Semaphore;
+
+pub(crate) const LOCAL_CONCURRENCY: usize = 64;
+
 mod admission;
 mod cancellation;
 pub use cancellation::TransferCancellation;
@@ -219,7 +222,7 @@ impl RemoteExecutor {
             cancellation,
             presence: RemoteBudget::new(limits.presence),
             transfer: admission::Admission::new(limits.transfer),
-            local: Arc::new(Semaphore::new(8)),
+            local: Arc::new(Semaphore::new(LOCAL_CONCURRENCY)),
             #[cfg(test)]
             local_submissions: std::sync::atomic::AtomicUsize::new(0),
             request_budget: gat_io::RemoteRequestBudget::new(
@@ -707,14 +710,14 @@ mod tests {
                     assert_eq!(local_calls.load(Ordering::SeqCst), 1);
                     assert_eq!(
                         executor.local.available_permits(),
-                        if slow_local { 7 } else { 8 }
+                        LOCAL_CONCURRENCY - usize::from(slow_local)
                     );
                     let _ = local_release.send(());
                     let _ = remote_release.send(());
                     pipeline.await;
                     assert_eq!(network_calls.load(Ordering::SeqCst), 2);
                     assert_eq!(local_calls.load(Ordering::SeqCst), 2);
-                    assert_eq!(executor.local.available_permits(), 8);
+                    assert_eq!(executor.local.available_permits(), LOCAL_CONCURRENCY);
                 }
             });
         });
@@ -873,7 +876,7 @@ mod tests {
                 let mut active = futures::stream::FuturesUnordered::new();
                 let mut releases = Vec::new();
                 let mut arrivals = Vec::new();
-                for _ in 0..8 {
+                for _ in 0..LOCAL_CONCURRENCY {
                     let worker = &executor;
                     let (release, released) = std::sync::mpsc::channel();
                     let (started, arrived) = tokio::sync::oneshot::channel();
@@ -902,7 +905,7 @@ mod tests {
                 }
                 while active.next().await.is_some() {}
                 assert_eq!(queued.await.unwrap(), 9);
-                assert_eq!(executor.local.available_permits(), 8);
+                assert_eq!(executor.local.available_permits(), LOCAL_CONCURRENCY);
             });
         });
     }
@@ -982,7 +985,12 @@ mod tests {
         with_runtime(|| {
             let executor = executor(1, 1);
             tokio::runtime::Handle::current().block_on(async {
-                let held = executor.local.clone().acquire_many_owned(8).await.unwrap();
+                let held = executor
+                    .local
+                    .clone()
+                    .acquire_many_owned(u32::try_from(LOCAL_CONCURRENCY).unwrap())
+                    .await
+                    .unwrap();
                 let task = executor.local_transfer(|| panic!("cancelled local work must not run"));
                 tokio::pin!(task);
                 assert!(futures::poll!(&mut task).is_pending());
@@ -990,7 +998,7 @@ mod tests {
                 assert!(matches!(task.await, Err(LocalTransferError::Cancelled)));
                 assert_eq!(executor.local.available_permits(), 0);
                 drop(held);
-                assert_eq!(executor.local.available_permits(), 8);
+                assert_eq!(executor.local.available_permits(), LOCAL_CONCURRENCY);
             });
         });
     }
@@ -1013,12 +1021,12 @@ mod tests {
             let task = executor.local_transfer(|| panic!("queued payload work must not run"));
             tokio::pin!(task);
             assert!(futures::poll!(&mut task).is_pending());
-            assert_eq!(executor.local.available_permits(), 7);
+            assert_eq!(executor.local.available_permits(), LOCAL_CONCURRENCY - 1);
             executor.cancellation().cancel();
             release.send(()).unwrap();
             blocker.await.unwrap();
             assert!(matches!(task.await, Err(LocalTransferError::Cancelled)));
-            assert_eq!(executor.local.available_permits(), 8);
+            assert_eq!(executor.local.available_permits(), LOCAL_CONCURRENCY);
         });
     }
 
@@ -1039,10 +1047,10 @@ mod tests {
                 running.await.unwrap();
                 executor.cancellation().cancel();
                 assert!(futures::poll!(&mut task).is_pending());
-                assert_eq!(executor.local.available_permits(), 7);
+                assert_eq!(executor.local.available_permits(), LOCAL_CONCURRENCY - 1);
                 release.send(()).unwrap();
                 assert_eq!(task.await.unwrap(), 42);
-                assert_eq!(executor.local.available_permits(), 8);
+                assert_eq!(executor.local.available_permits(), LOCAL_CONCURRENCY);
             });
         });
     }

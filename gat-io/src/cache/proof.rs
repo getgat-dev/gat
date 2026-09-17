@@ -819,7 +819,7 @@ pub(super) fn verify_object_path_fs(
     // The stat cache couldn't prove identity on its own: perform exactly
     // one coherent hash of the object bytes. An observed pre/post change
     // fails closed immediately -- there is no retry.
-    let observation = coherent_observation(path, || {
+    let observation = coherent_observation(path, |_| {
         #[cfg(any(test, feature = "test-support"))]
         race_test_hooks::fire_before_hash(path);
         hash_file_oid(path).map_err(CacheStateError::from)

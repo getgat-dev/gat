@@ -383,8 +383,8 @@ thread_local! {
 /// Uses `flock(2)` (Unix) or `LockFileEx` (Windows) for true ownership
 /// semantics: a live process's lock cannot be stolen by an age heuristic,
 /// and a crashed/killed process's lock is released automatically by the OS
-/// when its file descriptors close. RAII: dropping this struct closes the
-/// final shared file handle, which releases the advisory lock. Reentrant
+/// when its file descriptors close. RAII: dropping the final reentrant
+/// guard explicitly releases the advisory lock before closing its handle. Reentrant
 /// guards share ownership only within the same thread and canonical repository.
 /// Guards cannot move to another thread because the registry is thread-local.
 ///
@@ -512,8 +512,13 @@ impl RepoLock {
 impl Drop for RepoLock {
     fn drop(&mut self) {
         if Rc::strong_count(&self.file) == 1 {
+            // Closing alone can leave the lock held by a descriptor inherited
+            // by a concurrent fork, until that child execs or exits. Unlock the
+            // shared open file description as soon as our final guard is done.
+            // If unlocking fails, closing the file remains the fallback.
+            let _ = fs2::FileExt::unlock(self.file.as_ref());
             // A guard may outlive the registry during thread-local teardown.
-            // Dropping its file still releases the OS lock in that case.
+            // The OS lock is still released in that case.
             let _ = HELD_LOCKS.try_with(|locks| locks.borrow_mut().remove(&self.identity));
         }
     }
@@ -662,6 +667,30 @@ mod tests {
         drop(inner);
         probe.try_lock_exclusive().unwrap();
         assert!(HELD_LOCKS.with(|locks| locks.borrow().is_empty()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn last_guard_releases_lock_while_a_duplicate_descriptor_remains_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let layout = crate::RepositoryLayout::at(temp.path().to_path_buf());
+        let outer = RepoLock::acquire_repository(&layout).unwrap();
+        let inner = RepoLock::acquire_repository(&layout).unwrap();
+        // A concurrent fork can retain this same open file description until
+        // exec closes it. Duplicate it directly to reproduce that deterministically.
+        let duplicate = outer.file.try_clone().unwrap();
+        let probe = std::fs::OpenOptions::new()
+            .write(true)
+            .open(layout.sync_lock_path())
+            .unwrap();
+        drop(outer);
+        assert_eq!(
+            probe.try_lock_exclusive().unwrap_err().kind(),
+            fs2::lock_contended_error().kind()
+        );
+        drop(inner);
+        probe.try_lock_exclusive().unwrap();
+        drop(duplicate);
     }
 
     #[cfg(unix)]

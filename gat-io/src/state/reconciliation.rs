@@ -119,7 +119,6 @@ fn shard_identities_query(
     conn: &Connection,
     shard_ids: Option<&std::collections::BTreeSet<LockShardId>>,
 ) -> Result<std::collections::HashMap<LockShardId, StoredShard>> {
-    type ShardIdentityRow = (String, Vec<u8>, Option<Vec<u8>>);
     let mut out = std::collections::HashMap::new();
     // Instrumentation distinguishes a touched-shard-scoped
     // catalog fetch from a whole-catalog one, so a test can prove a
@@ -152,15 +151,15 @@ fn shard_identities_query(
         let mut stmt = conn
             .prepare(sql)
             .state_context("preparing shard catalog query")?;
-        let rows: Vec<ShardIdentityRow> = stmt
-            .query_map(params, |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-            .state_context("querying shard catalog")?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .state_context("reading shard catalog")?;
-        for (shard_id, identity, proof) in rows {
+        let mut rows = stmt.query(params).state_context("querying shard catalog")?;
+        while let Some(row) = rows.next().state_context("reading shard catalog")? {
+            let shard_id: String = row.get(0).state_context("reading shard catalog")?;
+            let identity = super::blob_column(row, 1).state_context("reading shard catalog")?;
+            let proof =
+                super::optional_blob_column(row, 2).state_context("reading shard catalog")?;
             let shard_id = decode_shard_id(&shard_id, "stored shard id")?;
             let identity =
-                ShardIdentity::decode(&identity).map_err(|source| StateStoreError::InvalidRow {
+                ShardIdentity::decode(identity).map_err(|source| StateStoreError::InvalidRow {
                     detail: format!(
                         "decoding stored shard identity for shard {shard_id:?}: {source}"
                     ),
@@ -169,9 +168,7 @@ fn shard_identities_query(
             // state -- it decodes to `None`, exactly like a `NULL` row,
             // which just forces the next refresh to re-establish the
             // identity from bytes instead of reusing a stat-only match.
-            let proof = proof
-                .as_deref()
-                .and_then(crate::file_state::decode_stat_proof);
+            let proof = proof.and_then(crate::file_state::decode_stat_proof);
             out.insert(shard_id, StoredShard { identity, proof });
         }
         Ok(())
@@ -892,19 +889,7 @@ impl StateStore {
             .transaction()
             .state_context("beginning desired-state transaction")?;
 
-        for removed in removed_shards {
-            clear_shard_desired_tx(&tx, removed.shard_id)?;
-        }
-        for shard in changed_or_new {
-            apply_shard_entries_tx(&tx, shard.shard_id, &shard.entries)?;
-        }
-        // `apply_shard_catalog_tx` only records identity/stat metadata --
-        // it never consumes the row payload -- so this passes the
-        // metadata-only view rather than requiring the catalog updater to
-        // ignore an owned `Vec<Entry>` clone per shard.
-        let meta: Vec<ChangedShardMeta> =
-            changed_or_new.iter().map(ChangedShardMeta::from).collect();
-        apply_shard_catalog_tx(&tx, &meta, stat_only_updates, removed_shards)?;
+        apply_shard_refresh_tx(&tx, changed_or_new, stat_only_updates, removed_shards)?;
 
         tx.commit()
             .state_context("committing desired-state refresh")
@@ -928,36 +913,13 @@ impl StateStore {
         &mut self,
         evidence: crate::lock::FullLockEvidence,
     ) -> Result<()> {
-        let prior_catalog = self.all_shard_identities()?;
-        let changed_or_new: Vec<ChangedShard> = evidence
-            .into_shards()
-            .into_iter()
-            .map(|shard| {
-                let shard_id = shard.shard_id();
-                let identity = shard.identity();
-                let proof = shard.proof();
-                let prior_identity = prior_catalog.get(&shard_id).map(|s| s.identity);
-                ChangedShard {
-                    shard_id,
-                    prior_identity,
-                    identity,
-                    proof: Some(proof),
-                    entries: shard.into_entries(),
-                }
-            })
-            .collect();
-        let touched: std::collections::HashSet<LockShardId> =
-            changed_or_new.iter().map(|s| s.shard_id).collect();
-        let removed_shards: Vec<RemovedShard> = prior_catalog
-            .into_iter()
-            .filter(|(id, _)| !touched.contains(id))
-            .map(|(id, stored)| RemovedShard {
-                shard_id: id,
-                prior_identity: stored.identity,
-            })
-            .collect();
-
-        self.apply_shard_refresh(&changed_or_new, &[], &removed_shards)
+        let tx = self
+            .conn
+            .transaction()
+            .state_context("beginning desired-state transaction")?;
+        apply_full_lock_evidence_tx(&tx, evidence)?;
+        tx.commit()
+            .state_context("committing desired-state refresh")
     }
 
     /// The current whole-desired-lock-set [`crate::lock::CanonicalDesiredIdentity`]
@@ -967,20 +929,7 @@ impl StateStore {
     /// `.git/info/exclude` needs regenerating, without ever loading the
     /// full desired lock.
     pub fn desired_fingerprint(&self) -> Result<[u8; 32]> {
-        let bytes: Vec<u8> = self
-            .conn
-            .query_row(
-                "SELECT desired_fingerprint FROM reconciliation_meta WHERE id = 1",
-                [],
-                |row| row.get(0),
-            )
-            .state_context("reading desired fingerprint")?;
-        bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| StateStoreError::InvalidRow {
-                detail: "invalid desired fingerprint length".to_string(),
-            })
+        read_desired_fingerprint(&self.conn)
     }
 
     /// `.git/info/exclude`'s currently recorded generating-input
@@ -990,27 +939,26 @@ impl StateStore {
     /// coordinator uses this to decide, without ever reading the output
     /// file itself, whether a proof-only fast path can apply at all.
     pub fn exclude_record(&self) -> Result<ExcludeRecord> {
-        #[allow(clippy::type_complexity)]
-        let row: (Option<Vec<u8>>, i64, Option<Vec<u8>>, Option<Vec<u8>>) = self
-            .conn
+        self.conn
             .query_row(
                 "SELECT exclude_fingerprint, exclude_count, exclude_block_identity, exclude_proof
                  FROM reconciliation_meta WHERE id = 1",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    let fingerprint = super::optional_blob_column(row, 0)?;
+                    let count: i64 = row.get(1)?;
+                    let block_identity = super::optional_blob_column(row, 2)?;
+                    let proof = super::optional_blob_column(row, 3)?;
+                    Ok(ExcludeRecord {
+                        fingerprint: fingerprint.and_then(|bytes| bytes.try_into().ok()),
+                        count: usize::try_from(count).unwrap_or(0),
+                        block_identity: block_identity.and_then(|bytes| bytes.try_into().ok()),
+                        // Malformed proofs force identity verification from content.
+                        proof: proof.and_then(crate::file_state::decode_stat_proof),
+                    })
+                },
             )
-            .state_context("reading exclude output identity")?;
-        let (fingerprint, count, block_identity, proof) = row;
-        Ok(ExcludeRecord {
-            fingerprint: fingerprint.and_then(|b| b.as_slice().try_into().ok()),
-            count: usize::try_from(count).unwrap_or(0),
-            block_identity: block_identity.and_then(|b| b.as_slice().try_into().ok()),
-            // A malformed/unrecognized encoded proof is never trusted as
-            // state -- see `shard_identities_query`'s identical policy.
-            proof: proof
-                .as_deref()
-                .and_then(crate::file_state::decode_stat_proof),
-        })
+            .state_context("reading exclude output identity")
     }
 
     /// Refresh only `reconciliation_meta`'s exclude proof (not the
@@ -1029,7 +977,7 @@ impl StateStore {
         self.conn
             .execute(
                 "UPDATE reconciliation_meta SET exclude_proof = ?1 WHERE id = 1",
-                (crate::file_state::encode_stat_proof(&proof).to_vec(),),
+                (crate::file_state::encode_stat_proof(&proof),),
             )
             .state_context("refreshing exclude output proof")?;
         Ok(())
@@ -1057,12 +1005,12 @@ impl StateStore {
                      exclude_block_identity = ?3, exclude_proof = ?4
                  WHERE id = 1",
                 (
-                    fingerprint.to_vec(),
+                    fingerprint,
                     i64::try_from(count).unwrap_or(i64::MAX),
-                    block_identity.to_vec(),
+                    block_identity,
                     update
                         .proof()
-                        .map(|p| crate::file_state::encode_stat_proof(&p).to_vec()),
+                        .map(|p| crate::file_state::encode_stat_proof(&p)),
                 ),
             )
             .state_context("recording exclude output identity")?;
@@ -1106,8 +1054,7 @@ impl StateStore {
         &self,
         scope: Option<&gat_core::lexical_path::GatPath>,
     ) -> Result<Vec<DirtyRow>> {
-        let raw = query_dirty_rows(&self.conn, scope, None, -1)?;
-        raw_into_dirty_rows(raw)
+        query_dirty_rows(&self.conn, scope, None, -1)
     }
 
     /// Visit dirty rows in the exact-or-descendant scope using keyset pagination: only
@@ -1129,8 +1076,7 @@ impl StateStore {
         limit: usize,
     ) -> Result<Vec<DirtyRow>> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let raw = query_dirty_rows(&self.conn, scope, after, limit)?;
-        raw_into_dirty_rows(raw)
+        query_dirty_rows(&self.conn, scope, after, limit)
     }
 }
 
@@ -1226,20 +1172,22 @@ pub(crate) type ShardIdentity = crate::lock::ShardContentIdentity;
 fn read_desired_identity_tx(
     tx: &rusqlite::Transaction<'_>,
 ) -> Result<crate::lock::CanonicalDesiredIdentity> {
-    let bytes: Vec<u8> = tx
-        .query_row(
-            "SELECT desired_fingerprint FROM reconciliation_meta WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )
-        .state_context("reading desired fingerprint")?;
-    let bytes: [u8; 32] = bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| StateStoreError::InvalidRow {
-            detail: "invalid desired fingerprint length".to_string(),
-        })?;
-    Ok(crate::lock::CanonicalDesiredIdentity::from_bytes(bytes))
+    read_desired_fingerprint(tx).map(crate::lock::CanonicalDesiredIdentity::from_bytes)
+}
+
+fn read_desired_fingerprint(conn: &Connection) -> Result<[u8; 32]> {
+    conn.query_row(
+        "SELECT desired_fingerprint FROM reconciliation_meta WHERE id = 1",
+        [],
+        |row| {
+            Ok(super::blob_column(row, 0)?
+                .try_into()
+                .map_err(|_| StateStoreError::InvalidRow {
+                    detail: "invalid desired fingerprint length".to_string(),
+                }))
+        },
+    )
+    .state_context("reading desired fingerprint")?
 }
 
 fn write_desired_identity_tx(
@@ -1248,7 +1196,7 @@ fn write_desired_identity_tx(
 ) -> Result<()> {
     tx.execute(
         "UPDATE reconciliation_meta SET desired_fingerprint = ?1 WHERE id = 1",
-        (identity.as_bytes().to_vec(),),
+        (identity.as_bytes(),),
     )
     .state_context("updating desired fingerprint")?;
     Ok(())
@@ -1307,7 +1255,7 @@ pub(super) fn apply_shard_catalog_tx(
             "UPDATE lock_shards SET proof = ?2 WHERE shard_id = ?1",
             (
                 encoded.as_str(),
-                proof.map(|p| crate::file_state::encode_stat_proof(&p).to_vec()),
+                proof.map(|p| crate::file_state::encode_stat_proof(&p)),
             ),
         )
         .state_context("refreshing shard stat cache")?;
@@ -1334,8 +1282,8 @@ fn upsert_shard_identity_tx(
              proof = excluded.proof",
         (
             encoded.as_str(),
-            identity.as_bytes().to_vec(),
-            proof.map(|p| crate::file_state::encode_stat_proof(&p).to_vec()),
+            identity.as_bytes(),
+            proof.map(|p| crate::file_state::encode_stat_proof(&p)),
         ),
     )
     .state_context("upserting shard identity")?;
@@ -1355,14 +1303,25 @@ pub struct DirtyRow {
     pub materialized: Option<Oid>,
 }
 
-type RawDirtyRow = (String, Option<Vec<u8>>, Option<Vec<u8>>);
-
-fn dirty_row_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawDirtyRow> {
-    Ok((
-        row.get::<_, String>(0)?,
-        row.get::<_, Option<Vec<u8>>>(1)?,
-        row.get::<_, Option<Vec<u8>>>(2)?,
-    ))
+fn collect_dirty_rows(
+    stmt: &mut rusqlite::Statement<'_>,
+    params: impl rusqlite::Params,
+    query_context: &str,
+    read_context: &str,
+) -> Result<Vec<DirtyRow>> {
+    let mut rows = stmt.query(params).state_context(query_context)?;
+    let mut decoded = Vec::new();
+    while let Some(row) = rows.next().state_context(read_context)? {
+        let path = row.get(0).state_context(read_context)?;
+        let desired = super::optional_blob_column(row, 1).state_context(read_context)?;
+        let materialized = super::optional_blob_column(row, 2).state_context(read_context)?;
+        decoded.push(DirtyRow {
+            path: super::decode_path(path, "dirty-row join")?,
+            desired: decode_optional_oid(desired)?,
+            materialized: decode_optional_oid(materialized)?,
+        });
+    }
+    Ok(decoded)
 }
 
 /// Shared query behind [`StateStore::dirty_rows_in_scope`] and
@@ -1375,7 +1334,7 @@ fn query_dirty_rows(
     scope: Option<&gat_core::lexical_path::GatPath>,
     after: Option<&gat_core::lexical_path::GatPath>,
     limit: i64,
-) -> Result<Vec<RawDirtyRow>> {
+) -> Result<Vec<DirtyRow>> {
     match scope {
         Some(scope) => {
             let (lower, upper) = descendant_range(scope.as_str());
@@ -1390,13 +1349,12 @@ fn query_dirty_rows(
                          LIMIT ?5",
                     )
                     .state_context("preparing scoped dirty-rows page query")?;
-                stmt.query_map(
+                collect_dirty_rows(
+                    &mut stmt,
                     (scope.as_str(), &lower, &upper, after.as_str(), limit),
-                    dirty_row_from_row,
+                    "querying scoped dirty rows page",
+                    "reading scoped dirty rows page",
                 )
-                .state_context("querying scoped dirty rows page")?
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .state_context("reading scoped dirty rows page")
             } else {
                 let mut stmt = conn
                     .prepare(
@@ -1407,10 +1365,12 @@ fn query_dirty_rows(
                          LIMIT ?4",
                     )
                     .state_context("preparing scoped dirty-rows query")?;
-                stmt.query_map((scope.as_str(), &lower, &upper, limit), dirty_row_from_row)
-                    .state_context("querying scoped dirty rows")?
-                    .collect::<rusqlite::Result<Vec<_>>>()
-                    .state_context("reading scoped dirty rows")
+                collect_dirty_rows(
+                    &mut stmt,
+                    (scope.as_str(), &lower, &upper, limit),
+                    "querying scoped dirty rows",
+                    "reading scoped dirty rows",
+                )
             }
         }
         None => {
@@ -1423,10 +1383,12 @@ fn query_dirty_rows(
                      LIMIT ?2",
                     )
                     .state_context("preparing dirty-rows page query")?;
-                stmt.query_map((after.as_str(), limit), dirty_row_from_row)
-                    .state_context("querying dirty rows page")?
-                    .collect::<rusqlite::Result<Vec<_>>>()
-                    .state_context("reading dirty rows page")
+                collect_dirty_rows(
+                    &mut stmt,
+                    (after.as_str(), limit),
+                    "querying dirty rows page",
+                    "reading dirty rows page",
+                )
             } else {
                 let mut stmt = conn
                     .prepare(
@@ -1436,44 +1398,84 @@ fn query_dirty_rows(
                      LIMIT ?1",
                     )
                     .state_context("preparing dirty-rows query")?;
-                stmt.query_map((limit,), dirty_row_from_row)
-                    .state_context("querying dirty rows")?
-                    .collect::<rusqlite::Result<Vec<_>>>()
-                    .state_context("reading dirty rows")
+                collect_dirty_rows(
+                    &mut stmt,
+                    (limit,),
+                    "querying dirty rows",
+                    "reading dirty rows",
+                )
             }
         }
     }
 }
 
-fn raw_into_dirty_rows(raw: Vec<RawDirtyRow>) -> Result<Vec<DirtyRow>> {
-    raw.into_iter()
-        .map(|(path, d_oid, m_oid)| {
-            Ok(DirtyRow {
-                path: gat_core::lexical_path::GatPath::from_canonical_string(path).map_err(
-                    |source| StateStoreError::InvalidRow {
-                        detail: format!("dirty-row join has invalid path: {source}"),
-                    },
-                )?,
-                desired: decode_optional_oid(d_oid)?,
-                materialized: decode_optional_oid(m_oid)?,
-            })
-        })
-        .collect()
-}
-
-fn decode_optional_oid(oid: Option<Vec<u8>>) -> Result<Option<Oid>> {
+fn decode_optional_oid(oid: Option<&[u8]>) -> Result<Option<Oid>> {
     match oid {
         Some(oid) => {
-            let oid: [u8; 32] =
-                oid.as_slice()
-                    .try_into()
-                    .map_err(|_| StateStoreError::InvalidRow {
-                        detail: format!("invalid oid length {} in dirty-row join", oid.len()),
-                    })?;
+            let oid: [u8; 32] = oid.try_into().map_err(|_| StateStoreError::InvalidRow {
+                detail: format!("invalid oid length {} in dirty-row join", oid.len()),
+            })?;
             Ok(Some(Oid::from_bytes(oid)))
         }
         None => Ok(None),
     }
+}
+
+fn apply_shard_refresh_tx(
+    tx: &rusqlite::Transaction<'_>,
+    changed_or_new: &[ChangedShard],
+    stat_only_updates: &[(LockShardId, Option<StatProof>)],
+    removed_shards: &[RemovedShard],
+) -> Result<()> {
+    for removed in removed_shards {
+        clear_shard_desired_tx(tx, removed.shard_id)?;
+    }
+    for shard in changed_or_new {
+        apply_shard_entries_tx(tx, shard.shard_id, &shard.entries)?;
+    }
+    // `apply_shard_catalog_tx` only records identity/stat metadata --
+    // it never consumes the row payload -- so this passes the
+    // metadata-only view rather than requiring the catalog updater to
+    // ignore an owned `Vec<Entry>` clone per shard.
+    let meta: Vec<ChangedShardMeta> = changed_or_new.iter().map(ChangedShardMeta::from).collect();
+    apply_shard_catalog_tx(tx, &meta, stat_only_updates, removed_shards)?;
+    Ok(())
+}
+
+pub(super) fn apply_full_lock_evidence_tx(
+    tx: &rusqlite::Transaction<'_>,
+    evidence: crate::lock::FullLockEvidence,
+) -> Result<()> {
+    let prior_catalog = shard_identities_query(tx, None)?;
+    let changed_or_new: Vec<ChangedShard> = evidence
+        .into_shards()
+        .into_iter()
+        .map(|shard| {
+            let shard_id = shard.shard_id();
+            let identity = shard.identity();
+            let proof = shard.proof();
+            let prior_identity = prior_catalog.get(&shard_id).map(|s| s.identity);
+            ChangedShard {
+                shard_id,
+                prior_identity,
+                identity,
+                proof: Some(proof),
+                entries: shard.into_entries(),
+            }
+        })
+        .collect();
+    let touched: std::collections::HashSet<LockShardId> =
+        changed_or_new.iter().map(|s| s.shard_id).collect();
+    let removed_shards: Vec<RemovedShard> = prior_catalog
+        .into_iter()
+        .filter(|(id, _)| !touched.contains(id))
+        .map(|(id, stored)| RemovedShard {
+            shard_id: id,
+            prior_identity: stored.identity,
+        })
+        .collect();
+
+    apply_shard_refresh_tx(tx, &changed_or_new, &[], &removed_shards)
 }
 
 #[cfg(test)]

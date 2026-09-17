@@ -18,20 +18,11 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      # This privileged workflow only reads metadata; never check out PR code.
-      - name: Fetch Dependabot metadata
-        id: metadata
-        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
-        with:
-          github-token: ${{ github.token }}
-
+      # Never check out PR code in this privileged workflow.
       # The main branch requires a merge queue configured to squash. GitHub
       # queues the PR once required checks and approvals pass, then tests it
       # against the latest main before merging.
       - name: Enable automatic merge queue entry
-        if: >-
-          steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
-          steps.metadata.outputs.update-type == 'version-update:semver-minor'
         run: gh pr merge --auto --match-head-commit "$PR_HEAD" "$PR_URL"
         env:
           GH_TOKEN: ${{ github.token }}

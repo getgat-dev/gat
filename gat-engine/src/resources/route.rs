@@ -2,7 +2,7 @@
 
 use crate::Repository;
 use crate::RepositoryError;
-use gat_core::config::{Config, ConfigScope, RESERVED_DEFAULT_ROUTE_NAME, RouteConfig};
+use gat_core::config::{ConfigScope, RESERVED_DEFAULT_ROUTE_NAME, RouteConfig};
 use gat_core::lexical_path::GatPath;
 use gat_core::name::{RemoteName, RouteName};
 
@@ -144,7 +144,7 @@ pub fn route(repo: &Repository, request: RouteRequest) -> Result<RouteOutcome> {
             if name.as_str() == RESERVED_DEFAULT_ROUTE_NAME {
                 return Err(RouteError::ReservedName);
             }
-            validate_remote_exists(&layers.resource_view(), &remote)?;
+            validate_remote_exists(&layers, &remote)?;
             let mut cfg = layers.scoped(scope).clone();
             if cfg.routes.by_name.contains_key(&name) {
                 return Err(RouteError::AlreadyExists { name });
@@ -174,9 +174,8 @@ pub fn route(repo: &Repository, request: RouteRequest) -> Result<RouteOutcome> {
                 scope,
                 |c| c.routes.by_name.contains_key(&name),
             )?;
-            let effective = layers.resource_view();
             if let Some(remote) = &remote {
-                validate_remote_exists(&effective, remote)?;
+                validate_remote_exists(&layers, remote)?;
             }
             let mut cfg = layers.scoped(scope).clone();
             let existing = cfg
@@ -234,8 +233,8 @@ pub fn route(repo: &Repository, request: RouteRequest) -> Result<RouteOutcome> {
     }
 }
 
-fn validate_remote_exists(cfg: &Config, remote: &RemoteName) -> Result<()> {
-    if cfg.remotes.by_name.contains_key(remote) {
+fn validate_remote_exists(layers: &crate::ConfigLayers, remote: &RemoteName) -> Result<()> {
+    if super::resource::definition(layers, |c| c.remotes.by_name.get(remote)).is_some() {
         Ok(())
     } else {
         Err(RouteError::UnknownRemote {

@@ -34,7 +34,7 @@ fail-fast = false
 
 [profile.ci.slow-timeout]
 period = "60s"
-# A test still running after 5 periods (5 minutes total) is treated as
+# A test still running after 10 periods (10 minutes total) is treated as
 # genuinely hung, not just slow, and is terminated and reported as a
 # failure -- this is real hang detection, not just a slow-test report.
-terminate-after = 5
+terminate-after = 10

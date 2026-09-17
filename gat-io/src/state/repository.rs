@@ -567,7 +567,7 @@ impl<'repo> DesiredStateSession<'repo> {
             shape_lock,
             target,
             full_lock: None,
-            pending_materialized: None,
+            pending_materialized: Vec::new(),
         })
     }
 }
@@ -584,7 +584,7 @@ pub struct DesiredMutationSession<'repo> {
     shape_lock: LockWriteGuard,
     target: LockShardLevels,
     full_lock: Option<Lock>,
-    pending_materialized: Option<Vec<PreparedMaterialization>>,
+    pending_materialized: Vec<MaterializedRow>,
 }
 
 impl<'repo> DesiredMutationSession<'repo> {
@@ -604,7 +604,7 @@ impl<'repo> DesiredMutationSession<'repo> {
             shape_lock,
             target,
             full_lock: None,
-            pending_materialized: None,
+            pending_materialized: Vec::new(),
         })
     }
 
@@ -634,50 +634,24 @@ impl<'repo> DesiredMutationSession<'repo> {
                 )?;
             self.full_lock = Some(lock);
         }
-        if let Some(pending) = &mut self.pending_materialized {
-            pending.extend(entries);
-        } else {
-            self.pending_materialized = Some(entries);
-        }
+        self.pending_materialized
+            .extend(entries.into_iter().map(PreparedMaterialization::into_row));
         Ok(())
     }
 
     /// Record all pending publications. A failed write retains its window and
     /// the untouched tail for retry; previously committed windows stay settled.
     pub fn record_published_materialized(&mut self) -> Result<(), StateStoreError> {
-        let Some(entries) = self.pending_materialized.take() else {
-            return Ok(());
-        };
-        let mut entries = entries.into_iter();
-        loop {
-            let rows: Vec<_> = entries
-                .by_ref()
-                .take(4096)
-                .map(PreparedMaterialization::into_row)
-                .collect();
-            if rows.is_empty() {
-                return Ok(());
-            }
-            if let Err(error) = self.store.upsert_rows(&rows) {
-                // Keep the failed window and untouched tail retryable. Successful
-                // windows are already committed; ownership moves back only on error.
-                self.pending_materialized = Some(
-                    rows.into_iter()
-                        .map(|row| {
-                            PreparedMaterialization::new(
-                                Entry {
-                                    path: row.path,
-                                    oid: row.oid,
-                                },
-                                row.proof,
-                            )
-                        })
-                        .chain(entries)
-                        .collect(),
-                );
-                return Err(error);
-            }
-        }
+        let mut committed = 0;
+        let result = self.pending_materialized.chunks(4096).try_for_each(|rows| {
+            self.store.upsert_rows(rows)?;
+            committed += rows.len();
+            Ok(())
+        });
+        // Drop only committed rows. A failed transaction and its untouched tail
+        // retain their paths and proofs in the same buffer for the next attempt.
+        self.pending_materialized.drain(..committed);
+        result
     }
 
     pub fn resolve_move(
@@ -714,6 +688,9 @@ impl<'repo> DesiredMutationSession<'repo> {
         Ok((matches, collisions))
     }
 
+    /// Move desired and materialized state in one transaction. Stage ledger
+    /// changes before lock publication so a ledger failure leaves the old lock
+    /// intact and the caller can roll back its physical rename.
     pub fn publish_move(
         &mut self,
         src: &GatPath,
@@ -734,21 +711,19 @@ impl<'repo> DesiredMutationSession<'repo> {
                     Some(entry)
                 })
                 .collect();
-            return self
-                .store
-                .publish_desired_complete::<DesiredPublicationError>(
-                    self.layout,
-                    lock,
-                    self.target,
-                );
         }
 
-        self.store.publish_desired_move::<DesiredPublicationError>(
-            self.layout,
-            &self.shape_lock,
-            src,
-            dst,
-        )
+        self.store.desired_write(|desired| {
+            let touched = desired.move_repository_rows(src, dst, self.target)?;
+            if let Some(lock) = &self.full_lock {
+                let evidence =
+                    LockStore::publish_complete_with_evidence(self.layout, lock, self.target)?;
+                super::reconciliation::apply_full_lock_evidence_tx(&desired.tx, evidence)?;
+                Ok(())
+            } else {
+                desired.publish_touched(self.layout, &self.shape_lock, &touched)
+            }
+        })
     }
 
     pub fn resolve_removals(
@@ -803,21 +778,12 @@ impl<'repo> DesiredMutationSession<'repo> {
             .publish_desired_removals::<DesiredPublicationError>(
                 self.layout,
                 &self.shape_lock,
-                affected_paths,
                 &removals,
             )
     }
 
     pub fn forget_materialized(&mut self, paths: &[GatPath]) -> Result<(), StateStoreError> {
         self.store.remove_exact(paths)
-    }
-
-    pub fn move_materialized(
-        &mut self,
-        src: &GatPath,
-        dst: &GatPath,
-    ) -> Result<(), StateStoreError> {
-        self.store.move_prefix(src, dst)
     }
 
     /// Visit desired paths from the cheapest already-available semantic
@@ -961,7 +927,6 @@ impl<'repo> MountMutationSession<'repo> {
                     .publish_desired_removals::<DesiredPublicationError>(
                         self.layout,
                         &self.shape_lock,
-                        &window,
                         &[super::desired::DesiredRemoval::Exact(&window)],
                     )?;
                 self.store.remove_exact(&window)?;
@@ -1101,29 +1066,152 @@ mod tests {
 
     #[test]
     fn failed_recording_retains_the_failed_window_and_tail_for_retry() {
-        let (temp, layout) = layout();
-        let mut session = DesiredMutationSession::acquire(&layout, LockShardLevels::FLAT).unwrap();
-        let entries = (0..4100)
-            .map(|i| {
-                PreparedMaterialization::new(
-                    Entry {
-                        path: gp(&format!("file-{i:05}")),
-                        oid: Oid::from_bytes([1; 32]),
-                    },
-                    None,
-                )
-            })
-            .collect();
-        session.publish_upserts(entries).unwrap();
-        let db = rusqlite::Connection::open(temp.path().join(".gat/state/state.sqlite3")).unwrap();
-        db.execute_batch("CREATE TRIGGER reject_recording BEFORE UPDATE OF materialized_oid ON state WHEN NEW.path = 'file-04097' BEGIN SELECT RAISE(ABORT, 'injected recording failure'); END;").unwrap();
-        assert!(session.record_published_materialized().is_err());
-        assert_eq!(session.store.load_all().unwrap().entries.len(), 4096);
-        db.execute_batch("DROP TRIGGER reject_recording;").unwrap();
-        session.record_published_materialized().unwrap();
-        assert_eq!(session.store.load_all().unwrap().entries.len(), 4100);
-        session.record_published_materialized().unwrap();
-        assert_eq!(session.store.load_all().unwrap().entries.len(), 4100);
+        for fail_at in [0, 4097] {
+            let (temp, layout) = layout();
+            let mut session =
+                DesiredMutationSession::acquire(&layout, LockShardLevels::FLAT).unwrap();
+            let entries = (0..8200)
+                .map(|i| {
+                    PreparedMaterialization::new(
+                        Entry {
+                            path: gp(&format!("file-{i:05}")),
+                            oid: Oid::from_bytes([1; 32]),
+                        },
+                        None,
+                    )
+                })
+                .collect();
+            session.publish_upserts(entries).unwrap();
+            let db =
+                rusqlite::Connection::open(temp.path().join(".gat/state/state.sqlite3")).unwrap();
+            db.execute_batch(&format!(
+                "CREATE TRIGGER reject_recording BEFORE INSERT ON state
+                 WHEN NEW.path = 'file-{fail_at:05}'
+                 BEGIN SELECT RAISE(ABORT, 'injected recording failure'); END;"
+            ))
+            .unwrap();
+            assert!(session.record_published_materialized().is_err());
+            let committed = (fail_at / 4096) * 4096;
+            assert_eq!(session.store.load_all().unwrap().entries.len(), committed);
+            db.execute_batch(&format!(
+                "DROP TRIGGER reject_recording;
+                 CREATE TRIGGER reject_repeated_recording BEFORE INSERT ON state
+                 WHEN NEW.path < 'file-{committed:05}'
+                 BEGIN SELECT RAISE(ABORT, 'committed window was replayed'); END;"
+            ))
+            .unwrap();
+            session.record_published_materialized().unwrap();
+            assert_eq!(session.store.load_all().unwrap().entries.len(), 8200);
+            db.execute_batch(
+                "CREATE TRIGGER reject_any_recording BEFORE INSERT ON state
+                 BEGIN SELECT RAISE(ABORT, 'settled publication was replayed'); END;",
+            )
+            .unwrap();
+            session.record_published_materialized().unwrap();
+            assert_eq!(session.store.load_all().unwrap().entries.len(), 8200);
+        }
+    }
+
+    #[test]
+    fn move_records_both_halves_and_rolls_back_failed_materialization() {
+        for initial in [LockShardLevels::FLAT, LockShardLevels::new(1).unwrap()] {
+            for target in [LockShardLevels::FLAT, LockShardLevels::new(1).unwrap()] {
+                let (_temp, layout) = layout();
+                let original = Lock {
+                    entries: vec![
+                        Entry {
+                            path: gp("source/a"),
+                            oid: oid('1'),
+                        },
+                        Entry {
+                            path: gp("target/stale"),
+                            oid: oid('3'),
+                        },
+                    ],
+                };
+                publish_complete(&layout, &original, initial).unwrap();
+                let proof = crate::file_state::StatProof::for_test(42, -7, 123);
+                let mut rows = [
+                    ("source/a", '2'),
+                    ("source/untracked", '4'),
+                    ("target/stale", '5'),
+                    ("target/materialized-only", '6'),
+                ]
+                .map(|(path, value)| MaterializedRow {
+                    path: gp(path),
+                    oid: oid(value),
+                    proof: Some(proof),
+                });
+                rows.sort_by(|a, b| a.path.cmp(&b.path));
+                StateStore::open(&layout)
+                    .unwrap()
+                    .upsert_rows(&rows)
+                    .unwrap();
+                let src = gp("source");
+                let dst = gp("target");
+                let mut session = DesiredMutationSession::acquire(&layout, target).unwrap();
+                let (_, collisions) = session.resolve_move(&src, &dst).unwrap();
+                let collisions = collisions
+                    .into_iter()
+                    .map(|entry| entry.path)
+                    .collect::<Vec<_>>();
+                session
+                    .store
+                    .conn
+                    .execute_batch(
+                        "CREATE TEMP TRIGGER reject_move BEFORE INSERT ON state
+                     WHEN NEW.path = 'target/a' AND NEW.materialized_oid IS NOT NULL
+                     BEGIN SELECT RAISE(ABORT, 'injected materialized move failure'); END;",
+                    )
+                    .unwrap();
+                assert!(session.publish_move(&src, &dst, &collisions).is_err());
+                let mut on_disk = LockStore::load_repository(&layout).unwrap();
+                on_disk.entries.sort_by(|a, b| a.path.cmp(&b.path));
+                assert_eq!(on_disk.entries, original.entries);
+                assert_eq!(
+                    session.store.load_desired_as_lock().unwrap().entries,
+                    original.entries
+                );
+                let materialized = session.store.load_all_raw().unwrap();
+                assert_eq!(materialized.len(), rows.len());
+                for (actual, expected) in materialized.iter().zip(&rows) {
+                    assert_eq!(
+                        (&actual.path, actual.oid, actual.proof),
+                        (&expected.path, expected.oid, expected.proof)
+                    );
+                }
+                drop(session);
+
+                let mut session = DesiredMutationSession::acquire(&layout, target).unwrap();
+                session.resolve_move(&src, &dst).unwrap();
+                session.publish_move(&src, &dst, &collisions).unwrap();
+                let desired = LockStore::load_repository(&layout).unwrap();
+                assert_eq!(
+                    desired.entries,
+                    vec![Entry {
+                        path: gp("target/a"),
+                        oid: oid('1')
+                    }]
+                );
+                assert_eq!(
+                    session.store.load_desired_as_lock().unwrap().entries,
+                    desired.entries
+                );
+                let materialized = session.store.load_all_raw().unwrap();
+                assert_eq!(
+                    materialized
+                        .iter()
+                        .map(|row| (row.path.as_str(), row.oid))
+                        .collect::<Vec<_>>(),
+                    vec![
+                        ("target/a", oid('2')),
+                        ("target/materialized-only", oid('6')),
+                        ("target/untracked", oid('4'))
+                    ]
+                );
+                assert!(materialized.iter().all(|row| row.proof == Some(proof)));
+            }
+        }
     }
 
     #[derive(Debug, thiserror::Error)]

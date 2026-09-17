@@ -301,7 +301,7 @@ mod tests {
         let failure: Failure = MoveError::Published {
             src: path("original"),
             dst: path("destination"),
-            source: Box::new(RepositoryMutationError::MoveMaterialized {
+            source: Box::new(RepositoryMutationError::RegenerateExcludes {
                 source: Box::new(
                     gat_io::StateStoreError::InvalidRow {
                         detail: "SENTINEL_STATE".into(),

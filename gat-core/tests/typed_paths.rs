@@ -72,3 +72,44 @@ fn gat_path_rejects_non_utf8_input() {
         LexicalPathError::NonUtf8 { .. }
     ));
 }
+
+#[test]
+fn relative_paths_preserve_component_boundaries_and_typed_reparenting() {
+    use gat_core::lexical_path::GatSubpathRef;
+    use gat_core::path_scope::PathScope;
+    use gat_core::selection::Selection;
+
+    let prefix = GatPath::parse_canonical("données").unwrap();
+    let destination = GatPath::parse_canonical("archive").unwrap();
+    let selection = Selection::from_scope_patterns(PathScope::Path(prefix.clone()), vec![], vec![]);
+    for (raw, expected) in [
+        ("données", Some("")),
+        ("données/a/b", Some("a/b")),
+        ("données.bin", None),
+        ("données-autres/a", None),
+        ("autres/données", None),
+        ("donné", None),
+    ] {
+        let path = GatPath::parse_canonical(raw).unwrap();
+        let relative = path.strip_prefix(&prefix);
+        assert_eq!(
+            relative.map(|suffix| match suffix {
+                GatSubpathRef::Root => "",
+                GatSubpathRef::Path(path) => path.as_str(),
+            }),
+            expected,
+            "{raw}"
+        );
+        assert_eq!(path.is_or_under(&prefix), expected.is_some());
+        assert_eq!(selection.matches_str(raw), expected.is_some());
+        assert_eq!(selection.reparent_relative(&path), relative);
+        if let Some(relative) = relative {
+            let replaced = path.with_replaced_prefix(&prefix, &destination);
+            assert_eq!(replaced.strip_prefix(&destination), Some(relative));
+        }
+        assert_eq!(
+            Selection::root().reparent_relative(&path),
+            Some(GatSubpathRef::Path(path.as_borrowed()))
+        );
+    }
+}
