@@ -27,7 +27,7 @@
 
 use super::{
     Connection, DesiredRow, DesiredStateWrite, Entry, Result, StateResultExt, StateStore,
-    StateStoreError, decode_desired_row_raw, decode_shard_id, descendant_range, params_from_iter,
+    StateStoreError, decode_desired_row, decode_shard_id, descendant_range, params_from_iter,
     sql_chunk_size, sql_placeholders,
 };
 use gat_core::globs::GlobBound;
@@ -547,17 +547,14 @@ impl ExactCursor<'_> {
                 .conn
                 .prepare(&sql)
                 .state_context("preparing desired-state exact cursor")?;
-            let rows = stmt
-                .query_map(params_from_iter(params.iter()), |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })
+            let mut rows = stmt
+                .query(params_from_iter(params.iter()))
                 .state_context("querying desired-state exact rows")?;
             let mut decoded = Vec::with_capacity(chunk.len());
-            for row in rows {
-                let (path, oid) = row.state_context("reading desired-state row")?;
+            while let Some(row) = rows.next().state_context("reading desired-state row")? {
                 #[cfg(any(test, feature = "test-support"))]
                 test_support::record_candidate_row_visited();
-                decoded.push(decode_desired_row_raw(path, oid)?);
+                decoded.push(decode_desired_row(row)?);
             }
             self.buffer = decoded.into_iter();
         }
@@ -631,17 +628,14 @@ impl RangeStream<'_> {
                 .conn
                 .prepare(&sql)
                 .state_context("preparing desired-state union range cursor")?;
-            let rows = stmt
-                .query_map(params_from_iter(params.iter()), |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })
+            let mut rows = stmt
+                .query(params_from_iter(params.iter()))
                 .state_context("querying desired-state union range rows")?;
             let mut decoded = Vec::new();
-            for row in rows {
-                let (path, oid) = row.state_context("reading desired-state row")?;
+            while let Some(row) = rows.next().state_context("reading desired-state row")? {
                 #[cfg(any(test, feature = "test-support"))]
                 test_support::record_candidate_row_visited();
-                decoded.push(decode_desired_row_raw(path, oid)?);
+                decoded.push(decode_desired_row(row)?);
             }
             if decoded.is_empty() {
                 // This range is exhausted: move on to the next one
@@ -716,17 +710,14 @@ impl ExactStream<'_> {
                 .conn
                 .prepare(&sql)
                 .state_context("preparing desired-state union exact cursor")?;
-            let rows = stmt
-                .query_map(params_from_iter(params.iter()), |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-                })
+            let mut rows = stmt
+                .query(params_from_iter(params.iter()))
                 .state_context("querying desired-state union exact rows")?;
             let mut decoded = Vec::new();
-            for row in rows {
-                let (path, oid) = row.state_context("reading desired-state row")?;
+            while let Some(row) = rows.next().state_context("reading desired-state row")? {
                 #[cfg(any(test, feature = "test-support"))]
                 test_support::record_candidate_row_visited();
-                decoded.push(decode_desired_row_raw(path, oid)?);
+                decoded.push(decode_desired_row(row)?);
             }
             self.buffer = decoded.into_iter();
         }
@@ -849,13 +840,9 @@ impl DesiredRows<'_> {
                     match rows.next().state_context("reading desired-state row")? {
                         None => return Ok(None),
                         Some(row) => {
-                            let path: String =
-                                row.get(0).state_context("reading desired-state row")?;
-                            let oid: Vec<u8> =
-                                row.get(1).state_context("reading desired-state row")?;
                             #[cfg(any(test, feature = "test-support"))]
                             test_support::record_candidate_row_visited();
-                            decode_desired_row_raw(path, oid)?
+                            decode_desired_row(row)?
                         }
                     }
                 }
@@ -1251,11 +1238,13 @@ impl CurrentShardGroups<'_> {
             };
             let shard_value = row.get_ref(0).state_context("reading desired-state row")?;
             let path: String = row.get(1).state_context("reading desired-state row")?;
-            let oid: Vec<u8> = row.get(2).state_context("reading desired-state row")?;
             let shard_id = decode_or_reuse_shard_id(&mut self.last_shard, shard_value, &path)?;
             let row = ShardedDesiredRow {
                 shard_id,
-                row: decode_desired_row_raw(path, oid)?,
+                row: super::decode_desired_row_raw(
+                    path,
+                    super::blob_column(row, 2).state_context("reading desired-state row")?,
+                )?,
             };
             #[cfg(any(test, feature = "test-support"))]
             test_support::record_candidate_row_visited();

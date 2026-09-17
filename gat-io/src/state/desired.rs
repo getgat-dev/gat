@@ -534,7 +534,7 @@ fn desired_rows_by_shard_ids_inner(
                 }
             };
             let path: String = row.get(1).state_context("reading desired-shard row")?;
-            let oid: Vec<u8> = row.get(2).state_context("reading desired-shard row")?;
+            let oid = super::blob_column(row, 2).state_context("reading desired-shard row")?;
             rows_by_shard
                 .entry(shard_id)
                 .or_default()

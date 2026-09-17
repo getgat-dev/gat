@@ -401,22 +401,12 @@ impl std::fmt::Debug for MaterializedRow {
 /// decodes as *absent* proof (never a fatal error), so gat simply falls
 /// back to re-establishing identity by hash next time -- see
 /// [`crate::file_state::decode_stat_proof`].
-fn decode_row_raw(path: String, oid: Vec<u8>, proof: Option<Vec<u8>>) -> Result<MaterializedRow> {
+fn decode_row_raw(path: String, oid: &[u8], proof: Option<&[u8]>) -> Result<MaterializedRow> {
     let path = decode_path(path, "materialized-state row")?;
-    let oid: [u8; 32] = oid
-        .as_slice()
-        .try_into()
-        .map_err(|_| StateStoreError::InvalidRow {
-            detail: format!(
-                "materialized-state row {path:?}: invalid oid length {} (expected 32 bytes)",
-                oid.len()
-            ),
-        })?;
-    let proof = proof.as_deref().and_then(decode_stat_proof);
     Ok(MaterializedRow {
+        oid: decode_oid(oid, &path, "materialized-state row")?,
         path,
-        oid: Oid::from_bytes(oid),
-        proof,
+        proof: proof.and_then(decode_stat_proof),
     })
 }
 
@@ -449,19 +439,62 @@ pub(crate) fn decode_path(raw: String, context: &str) -> Result<GatPath> {
     })
 }
 
-fn decode_desired_row_raw(path: String, oid: Vec<u8>) -> Result<DesiredRow> {
-    let path = decode_path(path, "desired-state row")?;
-    let oid_arr: [u8; 32] = oid
-        .as_slice()
+fn decode_oid(bytes: &[u8], path: &GatPath, context: &str) -> Result<Oid> {
+    bytes
         .try_into()
+        .map(Oid::from_bytes)
         .map_err(|_| StateStoreError::InvalidRow {
             detail: format!(
-                "desired-state row {path:?}: invalid oid length {} (expected 32 bytes)",
-                oid.len()
+                "{context} {path:?}: invalid oid length {} (expected 32 bytes)",
+                bytes.len()
             ),
-        })?;
-    let oid = Oid::from_bytes(oid_arr);
-    Ok(DesiredRow { path, oid })
+        })
+}
+
+/// Borrow a BLOB while preserving the column-type error produced by `Row::get`.
+fn blob_column<'row>(row: &'row rusqlite::Row<'_>, index: usize) -> rusqlite::Result<&'row [u8]> {
+    let value = row.get_ref(index)?;
+    value.as_blob().map_err(|_| {
+        rusqlite::Error::InvalidColumnType(
+            index,
+            row.as_ref()
+                .column_name(index)
+                .expect("get_ref validated the column index")
+                .to_owned(),
+            value.data_type(),
+        )
+    })
+}
+
+fn optional_blob_column<'row>(
+    row: &'row rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<Option<&'row [u8]>> {
+    match row.get_ref(index)? {
+        rusqlite::types::ValueRef::Null => Ok(None),
+        _ => blob_column(row, index).map(Some),
+    }
+}
+
+fn decode_materialized_row(row: &rusqlite::Row<'_>) -> Result<MaterializedRow> {
+    let path = row.get(0).state_context("reading materialized-state row")?;
+    let oid = blob_column(row, 1).state_context("reading materialized-state row")?;
+    let proof = optional_blob_column(row, 2).state_context("reading materialized-state row")?;
+    decode_row_raw(path, oid, proof)
+}
+
+fn decode_desired_row(row: &rusqlite::Row<'_>) -> Result<DesiredRow> {
+    let path = row.get(0).state_context("reading desired-state row")?;
+    let oid = blob_column(row, 1).state_context("reading desired-state row")?;
+    decode_desired_row_raw(path, oid)
+}
+
+fn decode_desired_row_raw(path: String, oid: &[u8]) -> Result<DesiredRow> {
+    let path = decode_path(path, "desired-state row")?;
+    Ok(DesiredRow {
+        oid: decode_oid(oid, &path, "desired-state row")?,
+        path,
+    })
 }
 
 fn load_materialized_rows<P: rusqlite::Params>(
@@ -472,19 +505,15 @@ fn load_materialized_rows<P: rusqlite::Params>(
     let mut stmt = conn
         .prepare(sql)
         .state_context("preparing materialized-state load query")?;
-    let rows = stmt
-        .query_map(params, |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, Option<Vec<u8>>>(2)?,
-            ))
-        })
+    let mut rows = stmt
+        .query(params)
         .state_context("loading materialized state")?;
     let mut entries = Vec::new();
-    for row in rows {
-        let (path, oid, proof) = row.state_context("reading materialized-state row")?;
-        entries.push(decode_row_raw(path, oid, proof)?);
+    while let Some(row) = rows
+        .next()
+        .state_context("reading materialized-state row")?
+    {
+        entries.push(decode_materialized_row(row)?);
     }
     Ok(entries)
 }
@@ -575,13 +604,7 @@ impl MaterializedRows<'_> {
             .state_context("reading materialized-state row")?
         {
             None => Ok(None),
-            Some(row) => {
-                let path: String = row.get(0).state_context("reading materialized-state row")?;
-                let oid: Vec<u8> = row.get(1).state_context("reading materialized-state row")?;
-                let proof: Option<Vec<u8>> =
-                    row.get(2).state_context("reading materialized-state row")?;
-                Ok(Some(decode_row_raw(path, oid, proof)?))
-            }
+            Some(row) => decode_materialized_row(row).map(Some),
         }
     }
 }
@@ -2076,20 +2099,61 @@ mod tests {
     }
 
     #[test]
+    fn database_row_decoding_rejects_invalid_identity_but_tolerates_unknown_proofs() {
+        use rusqlite::types::Value;
+
+        let conn = Connection::open_in_memory().unwrap();
+        let sql = "SELECT 'a.bin', ?1, ?2";
+        for invalid in [
+            Value::Null,
+            Value::Integer(1),
+            Value::Real(1.0),
+            Value::Text("oid".into()),
+        ] {
+            assert!(matches!(
+                load_materialized_rows(&conn, sql, (&invalid, Value::Null)),
+                Err(StateStoreError::QueryFailed { .. })
+            ));
+            let mut stmt = conn.prepare(sql).unwrap();
+            let mut rows = stmt.query((&invalid, Value::Null)).unwrap();
+            assert!(matches!(
+                decode_desired_row(rows.next().unwrap().unwrap()),
+                Err(StateStoreError::QueryFailed { .. })
+            ));
+        }
+        for length in [0, 31, 33] {
+            let oid = vec![7u8; length];
+            assert!(matches!(
+                load_materialized_rows(&conn, sql, (&oid, Value::Null)),
+                Err(StateStoreError::InvalidRow { .. })
+            ));
+            let mut stmt = conn.prepare(sql).unwrap();
+            let mut rows = stmt.query((&oid, Value::Null)).unwrap();
+            assert!(matches!(
+                decode_desired_row(rows.next().unwrap().unwrap()),
+                Err(StateStoreError::InvalidRow { .. })
+            ));
+        }
+        let rows = load_materialized_rows(&conn, sql, ([7u8; 32], [0xFFu8, 0, 1])).unwrap();
+        assert_eq!(rows[0].oid, Oid::from_bytes([7; 32]));
+        assert!(rows[0].proof.is_none());
+        assert!(matches!(
+            load_materialized_rows(&conn, sql, ([7u8; 32], "not a blob")),
+            Err(StateStoreError::QueryFailed { .. })
+        ));
+    }
+
+    #[test]
     fn decode_row_rejects_wrong_oid_length() {
-        assert!(decode_row_raw("a.bin".to_string(), vec![0u8; 31], None).is_err());
+        assert!(decode_row_raw("a.bin".to_string(), &[0u8; 31], None).is_err());
     }
 
     #[test]
     fn decode_row_malformed_proof_decodes_as_absent() {
         // A malformed/unknown proof BLOB must decode as *absent* proof
         // (never a fatal DB error), so gat falls back to re-hashing.
-        let row = decode_row_raw(
-            "a.bin".to_string(),
-            vec![7u8; 32],
-            Some(vec![0xFF, 0x00, 0x01]),
-        )
-        .expect("malformed proof must not be fatal");
+        let row = decode_row_raw("a.bin".to_string(), &[7u8; 32], Some(&[0xFF, 0x00, 0x01]))
+            .expect("malformed proof must not be fatal");
         assert!(row.proof.is_none());
     }
 
@@ -2098,7 +2162,7 @@ mod tests {
         // A well-formed proof BLOB round-trips through the shared codec.
         let proof = crate::file_state::StatProof::for_test(4242, 1_700_000_000, 0);
         let blob = crate::file_state::encode_stat_proof(&proof).to_vec();
-        let row = decode_row_raw("a.bin".to_string(), vec![9u8; 32], Some(blob)).unwrap();
+        let row = decode_row_raw("a.bin".to_string(), &[9u8; 32], Some(&blob)).unwrap();
         assert_eq!(row.proof, Some(proof));
     }
 
