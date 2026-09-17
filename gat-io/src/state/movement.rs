@@ -40,7 +40,9 @@ impl DesiredStateWrite<'_> {
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<[u8; 32]>>(1)?,
                     row.get::<_, Option<[u8; 32]>>(2)?,
-                    row.get::<_, Option<Vec<u8>>>(3)?,
+                    row.get_ref(3)?
+                        .as_blob_or_null()?
+                        .and_then(decode_stat_proof),
                 ))
             })
             .state_context("reading repository move source")?;
@@ -52,7 +54,7 @@ impl DesiredStateWrite<'_> {
                 path: decode_path(path, "repository move row")?.with_replaced_prefix(src, dst),
                 desired: desired.map(Oid::from_bytes),
                 materialized: materialized.map(Oid::from_bytes),
-                proof: proof.as_deref().and_then(decode_stat_proof),
+                proof,
             });
         }
         drop(statement);
