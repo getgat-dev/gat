@@ -15,6 +15,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/release.yml
+      - .github/release-toolchain/**
       - tools/check/**
       - tests/cli_integration/release_artifact.rs
   workflow_dispatch:
@@ -27,14 +28,8 @@ permissions:
   contents: read
 
 env:
-  # Explicit, reproducible release toolchain. Kept in sync with
-  # `rust-version` in Cargo.toml so a release build never silently drifts
-  # onto a different compiler than a moving `stable` channel would give.
-  RELEASE_RUST_VERSION: "1.91.0"
   # Keep the GNU baseline aligned with docs/install.sh and the runtime image.
   GLIBC_VERSION: "2.28"
-  CARGO_ZIGBUILD_VERSION: "0.23.4"
-  ZIG_VERSION: "0.14.1"
   TARGETS: "x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-msvc aarch64-pc-windows-msvc"
 
 jobs:
@@ -44,8 +39,21 @@ jobs:
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       version: ${{ steps.tag.outputs.version }}
+      rust-version: ${{ steps.toolchain.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Read pinned release compiler
+        id: toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^channel = "\(.*\)"/\1/p' .github/release-toolchain/rust-toolchain.toml)"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::release compiler must be pinned to an exact stable version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Validate tag matches package version
         id: tag
@@ -63,11 +71,6 @@ jobs:
             echo "::error::tag $tag (version $version) does not match Cargo.toml version $pkg_version"
             exit 1
           fi
-          msrv="$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)"
-          if [ "$RELEASE_RUST_VERSION" != "$msrv" ] && [ "$RELEASE_RUST_VERSION" != "$msrv.0" ]; then
-            echo "::error::release toolchain $RELEASE_RUST_VERSION does not match MSRV $msrv"
-            exit 1
-          fi
           installer_glibc="$(sed -n 's/^MIN_GLIBC=//p' docs/install.sh)"
           if [ "$GLIBC_VERSION" != "$installer_glibc" ]; then
             echo "::error::release glibc baseline $GLIBC_VERSION differs from installer baseline $installer_glibc"
@@ -79,6 +82,8 @@ jobs:
   build:
     name: build (${{ matrix.target }})
     needs: prepare
+    env:
+      RELEASE_RUST_VERSION: ${{ needs.prepare.outputs.rust-version }}
     permissions:
       contents: read
     strategy:
@@ -125,7 +130,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           # Native dependencies must be rebuilt when Zig or the libc baseline changes.
-          key: release-${{ matrix.target }}-${{ env.CARGO_ZIGBUILD_VERSION }}-${{ env.ZIG_VERSION }}-${{ env.GLIBC_VERSION }}
+          key: release-${{ matrix.target }}-${{ hashFiles('.github/release-toolchain/requirements.txt') }}-${{ env.GLIBC_VERSION }}
 
       - name: Install pinned Linux build tools
         if: runner.os == 'Linux'
@@ -134,7 +139,7 @@ jobs:
           set -euo pipefail
           python3 -m venv "$RUNNER_TEMP/zigbuild"
           "$RUNNER_TEMP/zigbuild/bin/python" -m pip install \
-            "cargo-zigbuild==$CARGO_ZIGBUILD_VERSION" "ziglang==$ZIG_VERSION"
+            --requirement .github/release-toolchain/requirements.txt
           echo "$RUNNER_TEMP/zigbuild/bin" >> "$GITHUB_PATH"
 
       - name: Build Linux with a fixed libc baseline
@@ -294,9 +299,7 @@ jobs:
 
   attest:
     name: attest and verify provenance
-    # Fork PR tokens cannot write attestations. Never use pull_request_target
-    # to grant release permissions to builds of untrusted PR code.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs: [prepare, verify]
     runs-on: ubuntu-latest
     permissions:
