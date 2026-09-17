@@ -342,30 +342,16 @@ fn desired_shard_paths_tx(
         .collect()
 }
 
-/// Clear the desired half of exactly the rows named by `paths`, then
-/// prune any of those rows left entirely empty -- the desired-side
-/// counterpart of materialized-state exact-path removal.
+/// Clear the desired half of each exact path, preserving materialized state.
+/// Rows without a materialized half are deleted directly.
 fn clear_desired_exact_tx(tx: &rusqlite::Transaction<'_>, paths: &[GatPath]) -> Result<()> {
-    for chunk in paths.chunks(sql_chunk_size(1)) {
-        let placeholders = sql_placeholders("?", chunk.len());
-        tx.execute(
-            &format!(
-                "DELETE FROM state WHERE path IN ({placeholders})
-                 AND materialized_oid IS NULL"
-            ),
-            params_from_iter(chunk.iter().map(GatPath::as_str)),
-        )
-        .with_state_context(|| format!("pruning {} emptied state row(s)", chunk.len()))?;
-        tx.execute(
-            &format!(
-                "UPDATE state SET desired_oid = NULL, desired_shard_id = NULL
-                 WHERE path IN ({placeholders}) AND desired_oid IS NOT NULL"
-            ),
-            params_from_iter(chunk.iter().map(GatPath::as_str)),
-        )
-        .with_state_context(|| format!("clearing {} desired-state row(s)", chunk.len()))?;
-    }
-    Ok(())
+    super::clear_exact_paths_tx(
+        tx,
+        paths,
+        "DELETE FROM state WHERE path = ?1 AND materialized_oid IS NULL",
+        "UPDATE state SET desired_oid = NULL, desired_shard_id = NULL
+         WHERE path = ?1 AND desired_oid IS NOT NULL",
+    )
 }
 
 /// Clear the desired half of the row at `path` and every desired row nested

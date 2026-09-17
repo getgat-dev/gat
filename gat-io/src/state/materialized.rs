@@ -97,33 +97,19 @@ fn bulk_refresh_materialized_proofs(
     Ok(())
 }
 
-/// Clear the *materialized* half of exactly the rows named by `paths`
-/// (an `IN (...)` list). Delete rows without a desired half directly, avoiding
-/// an update immediately followed by deletion; retain the desired half of
-/// every other row.
-fn clear_materialized_exact_tx(tx: &rusqlite::Transaction<'_>, paths: &[&GatPath]) -> Result<()> {
-    for chunk in paths.chunks(sql_chunk_size(1)) {
-        let placeholders = sql_placeholders("?", chunk.len());
-        tx.execute(
-            &format!(
-                "DELETE FROM state WHERE path IN ({placeholders})
-                 AND desired_oid IS NULL"
-            ),
-            params_from_iter(chunk.iter().map(|p| p.as_str())),
-        )
-        .with_state_context(|| format!("pruning {} emptied state row(s)", chunk.len()))?;
-        tx.execute(
-            &format!(
-                "UPDATE state
-                 SET materialized_oid = NULL,
-                     materialized_proof = NULL
-                 WHERE path IN ({placeholders}) AND materialized_oid IS NOT NULL"
-            ),
-            params_from_iter(chunk.iter().map(|p| p.as_str())),
-        )
-        .with_state_context(|| format!("clearing {} materialized-state row(s)", chunk.len()))?;
-    }
-    Ok(())
+/// Clear the materialized half of each exact path, preserving desired state.
+/// Rows without a desired half are deleted directly.
+fn clear_materialized_exact_tx<'path>(
+    tx: &rusqlite::Transaction<'_>,
+    paths: impl IntoIterator<Item = &'path GatPath>,
+) -> Result<()> {
+    super::clear_exact_paths_tx(
+        tx,
+        paths,
+        "DELETE FROM state WHERE path = ?1 AND desired_oid IS NULL",
+        "UPDATE state SET materialized_oid = NULL, materialized_proof = NULL
+         WHERE path = ?1 AND materialized_oid IS NOT NULL",
+    )
 }
 
 /// Clear the materialized half of a lexical subtree without first
@@ -360,8 +346,8 @@ impl StateStore {
 
     /// Clear the materialized half of exactly the rows for `paths` (no
     /// prefix expansion -- callers resolve directory scopes against
-    /// `gat.lock` first and pass the concrete rows affected), via one or
-    /// more chunked statements inside one transaction. `dirty` updates
+    /// `gat.lock` first and pass the concrete rows affected), inside one
+    /// transaction. `dirty` updates
     /// (and, if a row's desired half was already `NULL` too, deletion of
     /// the now-empty row) happen in the same transaction.
     pub fn remove_exact(&mut self, paths: &[GatPath]) -> Result<()> {
@@ -372,8 +358,7 @@ impl StateStore {
             .conn
             .transaction()
             .state_context("beginning materialized-state transaction")?;
-        let refs: Vec<&GatPath> = paths.iter().collect();
-        clear_materialized_exact_tx(&tx, &refs)?;
+        clear_materialized_exact_tx(&tx, paths)?;
         tx.commit()
             .state_context("committing materialized-state removal")
     }
@@ -479,17 +464,13 @@ impl StateStore {
                     while i < ops.len() && matches!(ops[i].0, StateMutationKind::RemoveExact(_)) {
                         i += 1;
                     }
-                    let paths: Vec<&GatPath> = ops[start..i]
-                        .iter()
-                        .map(|op| match &op.0 {
-                            StateMutationKind::RemoveExact(path) => path,
-                            StateMutationKind::Upsert(_)
-                            | StateMutationKind::RefreshStat { .. } => {
-                                unreachable!()
-                            }
-                        })
-                        .collect();
-                    clear_materialized_exact_tx(&tx, &paths)?;
+                    let paths = ops[start..i].iter().map(|op| match &op.0 {
+                        StateMutationKind::RemoveExact(path) => path,
+                        StateMutationKind::Upsert(_) | StateMutationKind::RefreshStat { .. } => {
+                            unreachable!()
+                        }
+                    });
+                    clear_materialized_exact_tx(&tx, paths)?;
                 }
             }
         }

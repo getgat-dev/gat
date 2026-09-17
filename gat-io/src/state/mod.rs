@@ -181,6 +181,31 @@ pub fn record_materialized_unlocked_for_test(
     StateStore::open(layout)?.upsert_rows(&rows)
 }
 
+/// Reuse fixed statements for exact-path cleanup of either state half.
+/// Delete rows without an opposite half before clearing the requested half.
+fn clear_exact_paths_tx<'path>(
+    tx: &rusqlite::Transaction<'_>,
+    paths: impl IntoIterator<Item = &'path GatPath>,
+    prune_sql: &str,
+    clear_sql: &str,
+) -> Result<()> {
+    let mut prune = tx
+        .prepare(prune_sql)
+        .state_context("preparing empty state-row cleanup")?;
+    let mut clear = tx
+        .prepare(clear_sql)
+        .state_context("preparing state-half cleanup")?;
+    for path in paths {
+        prune
+            .execute([path.as_str()])
+            .state_context("pruning emptied state row")?;
+        clear
+            .execute([path.as_str()])
+            .state_context("clearing state half")?;
+    }
+    Ok(())
+}
+
 /// Total bound-variable budget a single chunked statement should stay
 /// under -- comfortably below `SQLite`'s default
 /// `SQLITE_LIMIT_VARIABLE_NUMBER` (32766 as of `SQLite` 3.32), with margin
@@ -1408,6 +1433,72 @@ mod tests {
         store.remove_exact(&[gp("a.bin")]).unwrap();
         let loaded = store.load_all().unwrap().entries;
         assert_eq!(loaded, vec![entry("dir/b.bin", 2, 0)]);
+    }
+
+    #[test]
+    fn exact_cleanup_preserves_the_other_half_and_rolls_back_partial_failure() {
+        for clear_desired in [false, true] {
+            let tmp = git_repo();
+            let repo = Repo::at(tmp.path().to_path_buf());
+            let mut store = StateStore::open(&repo).unwrap();
+            let orphan = entry("a", 1, 1);
+            let shared = entry("b", 2, 1);
+            let opposite = entry("c", 3, 1);
+            let desired = if clear_desired {
+                vec![orphan.clone(), shared.clone()]
+            } else {
+                vec![shared.clone(), opposite.clone()]
+            };
+            let materialized = if clear_desired {
+                vec![shared.clone(), opposite.clone()]
+            } else {
+                vec![orphan, shared.clone()]
+            };
+            store
+                .upsert_desired_for_test(&desired, crate::lock::LockShardLevels::FLAT)
+                .unwrap();
+            store.upsert_many(&materialized).unwrap();
+            let before_desired = store.load_desired_as_lock().unwrap();
+            let before_materialized = store.load_all().unwrap();
+            let paths = [gp("a"), gp("b"), gp("a"), gp("missing"), gp("c")];
+            let clear = |store: &mut StateStore| -> Result<()> {
+                if clear_desired {
+                    store.desired_write(|desired| desired.remove_paths(&paths))
+                } else {
+                    store.remove_exact(&paths)
+                }
+            };
+            store
+                .conn
+                .execute_batch(
+                    "CREATE TRIGGER reject_cleanup BEFORE UPDATE ON state
+                 WHEN OLD.path = 'b' BEGIN SELECT RAISE(ABORT, 'cleanup failure'); END;",
+                )
+                .unwrap();
+            assert!(clear(&mut store).is_err());
+            assert_eq!(store.load_desired_as_lock().unwrap(), before_desired);
+            assert_eq!(store.load_all().unwrap(), before_materialized);
+            store
+                .conn
+                .execute_batch("DROP TRIGGER reject_cleanup")
+                .unwrap();
+            clear(&mut store).unwrap();
+            clear(&mut store).unwrap();
+            let after_desired = store.load_desired_as_lock().unwrap().entries;
+            let after_materialized = store.load_all().unwrap().entries;
+            if clear_desired {
+                assert!(after_desired.is_empty());
+                assert_eq!(after_materialized, before_materialized.entries);
+            } else {
+                assert_eq!(after_desired, before_desired.entries);
+                assert!(after_materialized.is_empty());
+            }
+            let empty: i64 = store.conn.query_row(
+                "SELECT count(*) FROM state WHERE desired_oid IS NULL AND materialized_oid IS NULL",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(empty, 0);
+        }
     }
 
     #[test]
