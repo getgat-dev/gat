@@ -27,7 +27,7 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Semaphore;
 
-pub(crate) const LOCAL_CONCURRENCY: usize = 16;
+pub(crate) const LOCAL_CONCURRENCY: usize = 32;
 
 mod admission;
 mod cancellation;

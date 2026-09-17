@@ -60,7 +60,7 @@
 //! Every mutation is one short, explicit transaction with chunked,
 //! set-based SQL (`INSERT ... VALUES (...), (...) ON CONFLICT DO UPDATE`,
 //! `DELETE ... WHERE path IN (...)`), not a per-row loop of prepared
-//! statement calls. Prefix operations (`remove_prefix`, `move_prefix`)
+//! statement calls. Prefix removals and repository moves
 //! match a tracked path or anything nested under it using an explicit
 //! lexical byte-range (`path >= 'dir/' AND path < 'dir0'`) rather than
 //! `LIKE`/`GLOB`, so `%`, `_`, backslashes, and case are never
@@ -70,7 +70,7 @@
 //! [`gat_core::lexical_path::GatPath::is_or_under`] implements in memory.
 //!
 //! Because desired/materialized state share one row, every materialized
-//! mutation (`upsert_many`/`remove_exact`/`remove_prefix`/`move_prefix`)
+//! mutation (`upsert_rows`/`remove_exact`/`apply_batch`)
 //! and every desired-state mutation (`apply_shard_refresh`) updates
 //! `dirty` as a side effect of the very same `UPDATE`/`INSERT` that
 //! changes the half it touches, inside the very same transaction --
@@ -92,6 +92,7 @@ mod desired;
 mod error;
 mod maintenance;
 mod materialized;
+mod movement;
 mod query;
 mod reconciliation;
 mod repository;
@@ -1539,50 +1540,6 @@ mod tests {
     }
 
     #[test]
-    fn move_prefix_moves_exact_file() {
-        let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
-        let mut store = StateStore::open(&repo).unwrap();
-        store.upsert_many(&[entry("a.bin", 1, 1)]).unwrap();
-        store.move_prefix(&gp("a.bin"), &gp("b.bin")).unwrap();
-        let loaded = store.load_all().unwrap().entries;
-        assert_eq!(loaded, vec![entry("b.bin", 1, 0)]);
-    }
-
-    #[test]
-    fn move_prefix_moves_a_whole_directory() {
-        let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
-        let mut store = StateStore::open(&repo).unwrap();
-        store
-            .upsert_many(&[entry("data/a.bin", 1, 1), entry("data/nested/b.bin", 2, 2)])
-            .unwrap();
-        store.move_prefix(&gp("data"), &gp("moved")).unwrap();
-        let mut loaded = store.load_all().unwrap().entries;
-        loaded.sort_by(|a, b| a.path.cmp(&b.path));
-        assert_eq!(
-            loaded,
-            vec![
-                entry("moved/a.bin", 1, 0),
-                entry("moved/nested/b.bin", 2, 0),
-            ]
-        );
-    }
-
-    #[test]
-    fn move_prefix_overwrites_a_destination_collision() {
-        let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
-        let mut store = StateStore::open(&repo).unwrap();
-        store
-            .upsert_many(&[entry("a.bin", 1, 1), entry("b.bin", 9, 9)])
-            .unwrap();
-        store.move_prefix(&gp("a.bin"), &gp("b.bin")).unwrap();
-        let loaded = store.load_all().unwrap().entries;
-        assert_eq!(loaded, vec![entry("b.bin", 1, 0)]);
-    }
-
-    #[test]
     fn remove_desired_prefix_removes_exact_and_nested_but_not_siblings() {
         let tmp = git_repo();
         let repo = Repo::at(tmp.path().to_path_buf());
@@ -1605,44 +1562,6 @@ mod tests {
             store.load_desired_as_lock().unwrap().entries,
             vec![entry("data.bin", 4, 0)]
         );
-    }
-
-    #[test]
-    fn move_desired_prefix_moves_rows_and_recomputes_their_shard_ids() {
-        let tmp = git_repo();
-        let repo = Repo::at(tmp.path().to_path_buf());
-        let mut store = StateStore::open(&repo).unwrap();
-        seed_desired_shard(
-            &mut store,
-            sid("gat.lock/aa.tsv"),
-            1,
-            vec![entry("data/a.bin", 1, 1), entry("data/nested/b.bin", 2, 2)],
-        );
-
-        store
-            .move_desired_prefix(
-                &gp("data"),
-                &gp("moved"),
-                crate::lock::LockShardLevels::new(2).unwrap(),
-            )
-            .unwrap();
-
-        let mut loaded = store.load_desired_as_lock().unwrap().entries;
-        loaded.sort_by(|a, b| a.path.cmp(&b.path));
-        assert_eq!(
-            loaded,
-            vec![
-                entry("moved/a.bin", 1, 0),
-                entry("moved/nested/b.bin", 2, 0)
-            ]
-        );
-        let moved_paths: Vec<_> = loaded.iter().map(|e| e.path.clone()).collect();
-        let shard_ids = store.desired_shard_ids_for_paths(&moved_paths).unwrap();
-        let expected = moved_paths
-            .iter()
-            .map(|p| shard_id_for_path(p, LockShardLevels::new(2).unwrap()))
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(shard_ids, expected);
     }
 
     #[test]
@@ -1696,7 +1615,6 @@ mod tests {
                 .publish_desired_removals::<DesiredPublishTestError>(
                     &repo,
                     &shape_lock,
-                    &[gp("exact.bin"), gp("tree/a.bin"), gp("tree/b.bin")],
                     &[
                         DesiredRemoval::Exact(&exact),
                         DesiredRemoval::Prefix(&prefix),

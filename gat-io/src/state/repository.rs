@@ -688,6 +688,9 @@ impl<'repo> DesiredMutationSession<'repo> {
         Ok((matches, collisions))
     }
 
+    /// Move desired and materialized state in one transaction. Stage ledger
+    /// changes before lock publication so a ledger failure leaves the old lock
+    /// intact and the caller can roll back its physical rename.
     pub fn publish_move(
         &mut self,
         src: &GatPath,
@@ -708,21 +711,19 @@ impl<'repo> DesiredMutationSession<'repo> {
                     Some(entry)
                 })
                 .collect();
-            return self
-                .store
-                .publish_desired_complete::<DesiredPublicationError>(
-                    self.layout,
-                    lock,
-                    self.target,
-                );
         }
 
-        self.store.publish_desired_move::<DesiredPublicationError>(
-            self.layout,
-            &self.shape_lock,
-            src,
-            dst,
-        )
+        self.store.desired_write(|desired| {
+            let touched = desired.move_repository_rows(src, dst, self.target)?;
+            if let Some(lock) = &self.full_lock {
+                let evidence =
+                    LockStore::publish_complete_with_evidence(self.layout, lock, self.target)?;
+                super::reconciliation::apply_full_lock_evidence_tx(&desired.tx, evidence)?;
+                Ok(())
+            } else {
+                desired.publish_touched(self.layout, &self.shape_lock, &touched)
+            }
+        })
     }
 
     pub fn resolve_removals(
@@ -777,21 +778,12 @@ impl<'repo> DesiredMutationSession<'repo> {
             .publish_desired_removals::<DesiredPublicationError>(
                 self.layout,
                 &self.shape_lock,
-                affected_paths,
                 &removals,
             )
     }
 
     pub fn forget_materialized(&mut self, paths: &[GatPath]) -> Result<(), StateStoreError> {
         self.store.remove_exact(paths)
-    }
-
-    pub fn move_materialized(
-        &mut self,
-        src: &GatPath,
-        dst: &GatPath,
-    ) -> Result<(), StateStoreError> {
-        self.store.move_prefix(src, dst)
     }
 
     /// Visit desired paths from the cheapest already-available semantic
@@ -935,7 +927,6 @@ impl<'repo> MountMutationSession<'repo> {
                     .publish_desired_removals::<DesiredPublicationError>(
                         self.layout,
                         &self.shape_lock,
-                        &window,
                         &[super::desired::DesiredRemoval::Exact(&window)],
                     )?;
                 self.store.remove_exact(&window)?;
@@ -1118,6 +1109,108 @@ mod tests {
             .unwrap();
             session.record_published_materialized().unwrap();
             assert_eq!(session.store.load_all().unwrap().entries.len(), 8200);
+        }
+    }
+
+    #[test]
+    fn move_records_both_halves_and_rolls_back_failed_materialization() {
+        for initial in [LockShardLevels::FLAT, LockShardLevels::new(1).unwrap()] {
+            for target in [LockShardLevels::FLAT, LockShardLevels::new(1).unwrap()] {
+                let (_temp, layout) = layout();
+                let original = Lock {
+                    entries: vec![
+                        Entry {
+                            path: gp("source/a"),
+                            oid: oid('1'),
+                        },
+                        Entry {
+                            path: gp("target/stale"),
+                            oid: oid('3'),
+                        },
+                    ],
+                };
+                publish_complete(&layout, &original, initial).unwrap();
+                let proof = crate::file_state::StatProof::for_test(42, -7, 123);
+                let mut rows = [
+                    ("source/a", '2'),
+                    ("source/untracked", '4'),
+                    ("target/stale", '5'),
+                    ("target/materialized-only", '6'),
+                ]
+                .map(|(path, value)| MaterializedRow {
+                    path: gp(path),
+                    oid: oid(value),
+                    proof: Some(proof),
+                });
+                rows.sort_by(|a, b| a.path.cmp(&b.path));
+                StateStore::open(&layout)
+                    .unwrap()
+                    .upsert_rows(&rows)
+                    .unwrap();
+                let src = gp("source");
+                let dst = gp("target");
+                let mut session = DesiredMutationSession::acquire(&layout, target).unwrap();
+                let (_, collisions) = session.resolve_move(&src, &dst).unwrap();
+                let collisions = collisions
+                    .into_iter()
+                    .map(|entry| entry.path)
+                    .collect::<Vec<_>>();
+                session
+                    .store
+                    .conn
+                    .execute_batch(
+                        "CREATE TEMP TRIGGER reject_move BEFORE INSERT ON state
+                     WHEN NEW.path = 'target/a' AND NEW.materialized_oid IS NOT NULL
+                     BEGIN SELECT RAISE(ABORT, 'injected materialized move failure'); END;",
+                    )
+                    .unwrap();
+                assert!(session.publish_move(&src, &dst, &collisions).is_err());
+                let mut on_disk = LockStore::load_repository(&layout).unwrap();
+                on_disk.entries.sort_by(|a, b| a.path.cmp(&b.path));
+                assert_eq!(on_disk.entries, original.entries);
+                assert_eq!(
+                    session.store.load_desired_as_lock().unwrap().entries,
+                    original.entries
+                );
+                let materialized = session.store.load_all_raw().unwrap();
+                assert_eq!(materialized.len(), rows.len());
+                for (actual, expected) in materialized.iter().zip(&rows) {
+                    assert_eq!(
+                        (&actual.path, actual.oid, actual.proof),
+                        (&expected.path, expected.oid, expected.proof)
+                    );
+                }
+                drop(session);
+
+                let mut session = DesiredMutationSession::acquire(&layout, target).unwrap();
+                session.resolve_move(&src, &dst).unwrap();
+                session.publish_move(&src, &dst, &collisions).unwrap();
+                let desired = LockStore::load_repository(&layout).unwrap();
+                assert_eq!(
+                    desired.entries,
+                    vec![Entry {
+                        path: gp("target/a"),
+                        oid: oid('1')
+                    }]
+                );
+                assert_eq!(
+                    session.store.load_desired_as_lock().unwrap().entries,
+                    desired.entries
+                );
+                let materialized = session.store.load_all_raw().unwrap();
+                assert_eq!(
+                    materialized
+                        .iter()
+                        .map(|row| (row.path.as_str(), row.oid))
+                        .collect::<Vec<_>>(),
+                    vec![
+                        ("target/a", oid('2')),
+                        ("target/materialized-only", oid('6')),
+                        ("target/untracked", oid('4'))
+                    ]
+                );
+                assert!(materialized.iter().all(|row| row.proof == Some(proof)));
+            }
         }
     }
 

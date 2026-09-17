@@ -13,16 +13,8 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
 pub enum WorktreePathError {
-    #[error("path `{path}` must be relative")]
-    NotRelative { path: String },
-    #[error("path `{path}` escapes the worktree (contains `..`)")]
-    ParentTraversal { path: String },
     #[error("path `{path}` cannot be materialized on this host")]
     NotMaterializable { path: String },
-    #[error("path `{path}` contains non-UTF-8 characters")]
-    NonUtf8Component { path: String },
-    #[error("path `{path}` escapes the worktree after joining with the repository root")]
-    EscapesWorktree { path: String },
     #[error(
         "path `{path}` traverses symlinked ancestor `{ancestor}`; refusing to {verb} outside the repository"
     )]
@@ -178,31 +170,18 @@ pub struct RemovalReceipt {
 }
 
 fn resolve_worktree_path(root: &Path, rel: &GatPath) -> PathResult<PathBuf> {
-    use std::path::Component;
-
-    for component in Path::new(rel.as_str()).components() {
-        match component {
-            Component::Normal(_) | Component::CurDir => {}
-            Component::ParentDir => {
-                return Err(WorktreePathError::ParentTraversal {
-                    path: rel.to_string(),
-                });
-            }
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(WorktreePathError::NotMaterializable {
-                    path: rel.to_string(),
-                });
-            }
-        }
-    }
-
-    let dest = root.join(rel.as_str());
-    if !dest.starts_with(root) {
-        return Err(WorktreePathError::EscapesWorktree {
+    // GatPath has already excluded absolute paths, parent traversal and
+    // noncanonical separators. Only Windows adds native drive-prefix syntax.
+    if cfg!(windows)
+        && Path::new(rel.as_str())
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(WorktreePathError::NotMaterializable {
             path: rel.to_string(),
         });
     }
-    Ok(dest)
+    Ok(root.join(rel.as_str()))
 }
 
 fn ensure_no_symlink_ancestors(root: &Path, dest: &Path) -> PathResult<()> {
@@ -613,7 +592,7 @@ fn prune_touched_ancestor_dirs<'path>(
         }
     }
     let mut ordered: Vec<_> = candidates.into_iter().collect();
-    ordered.sort_by_key(|dir| std::cmp::Reverse(dir.components().count()));
+    ordered.sort_by_cached_key(|dir| std::cmp::Reverse(dir.components().count()));
 
     let mut blocked = HashSet::new();
     for dir in &ordered {
@@ -810,14 +789,8 @@ pub(crate) fn ingest_file(
     large_file_threshold: u64,
 ) -> Result<WorktreeIngested, WorktreeMutationError> {
     let full = confine_read(root, path)?;
-    let observation = crate::file_state::coherent_observation(&full, || {
-        let size = std::fs::metadata(&full)
-            .map(|metadata| metadata.len())
-            .map_err(|source| CacheError::PathUnreadable {
-                path: full.clone(),
-                source,
-            })
-            .map_err(WorktreeMutationError::from)?;
+    let observation = crate::file_state::coherent_observation(&full, |before| {
+        let size = before.size;
         if size > large_file_threshold {
             cache::object::ingest_file_delta(objects_dir, &full, strategy)
                 .map_err(WorktreeMutationError::from)

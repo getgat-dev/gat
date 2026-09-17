@@ -2710,7 +2710,7 @@ mod tests {
         protect(&dest).unwrap();
 
         let observed =
-            coherent_observation(&dest, || Ok::<(), crate::file_state::FileStateError>(()))
+            coherent_observation(&dest, |_| Ok::<(), crate::file_state::FileStateError>(()))
                 .unwrap();
         let proof = observed.proof;
         let state = CacheState::open_for_test(&objects_dir);

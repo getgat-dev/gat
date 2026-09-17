@@ -58,9 +58,6 @@ impl From<RepositoryMutationError> for Failure {
             RepositoryMutationError::ForgetMaterialized { source } => {
                 stage_diagnostic(source, "Gat couldn't relinquish the removed working files")
             }
-            RepositoryMutationError::MoveMaterialized { source } => {
-                stage_diagnostic(source, "Gat couldn't record the moved working files")
-            }
             RepositoryMutationError::RegenerateExcludes { source } => {
                 stage_diagnostic(source, "Gat couldn't update Git's managed exclusions")
             }
@@ -206,7 +203,7 @@ mod tests {
                 ),
             ]
         }
-        for stage in 0..7 {
+        for stage in 0..6 {
             for (cause, expected) in causes() {
                 let source = Box::new(cause);
                 let error = match stage {
@@ -215,7 +212,6 @@ mod tests {
                     2 => RepositoryMutationError::Publish { source },
                     3 => RepositoryMutationError::RecordMaterialized { source },
                     4 => RepositoryMutationError::ForgetMaterialized { source },
-                    5 => RepositoryMutationError::MoveMaterialized { source },
                     _ => RepositoryMutationError::RegenerateExcludes { source },
                 };
                 let failure: Failure = error.into();

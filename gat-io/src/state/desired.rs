@@ -54,21 +54,25 @@ impl DesiredStateWrite<'_> {
         &self,
         layout: &crate::RepositoryLayout,
         shape_lock: &LockWriteGuard,
-        affected_paths: &[GatPath],
         removals: &[DesiredRemoval<'_>],
     ) -> std::result::Result<(), E>
     where
         E: From<StateStoreError> + From<LockError>,
     {
-        let touched = self
-            .desired_shard_ids_for_paths(affected_paths.iter())
-            .map_err(E::from)?;
+        let mut touched = std::collections::BTreeSet::new();
         for removal in removals {
             match removal {
                 DesiredRemoval::Exact(paths) => {
+                    touched.extend(
+                        self.desired_shard_ids_for_paths(paths.iter())
+                            .map_err(E::from)?,
+                    );
                     self.remove_paths(paths).map_err(E::from)?;
                 }
                 DesiredRemoval::Prefix(path) => {
+                    touched.extend(
+                        desired_shard_ids_for_scope_inner(&self.tx, path).map_err(E::from)?,
+                    );
                     clear_desired_prefix_tx(&self.tx, path).map_err(E::from)?;
                 }
             }
@@ -76,35 +80,6 @@ impl DesiredStateWrite<'_> {
         if touched.is_empty() {
             return Ok(());
         }
-        self.publish_touched(layout, shape_lock, &touched)
-    }
-
-    fn move_and_publish<E>(
-        &self,
-        layout: &crate::RepositoryLayout,
-        shape_lock: &LockWriteGuard,
-        src: &GatPath,
-        dst: &GatPath,
-    ) -> std::result::Result<(), E>
-    where
-        E: From<StateStoreError> + From<LockError>,
-    {
-        let mut moved = self
-            .desired_rows(DesiredQuery::scope(src))
-            .map_err(E::from)?;
-        if moved.is_empty() {
-            return Ok(());
-        }
-        let mut touched = desired_shard_ids_for_scope_inner(&self.tx, src).map_err(E::from)?;
-        touched.extend(desired_shard_ids_for_scope_inner(&self.tx, dst).map_err(E::from)?);
-        let shard_levels = Self::incremental_shard_levels(shape_lock);
-        self.move_entries(&mut moved, src, dst, shard_levels)
-            .map_err(E::from)?;
-        touched.extend(
-            moved
-                .iter()
-                .map(|entry| shard_id_for_path(&entry.path, shard_levels)),
-        );
         self.publish_touched(layout, shape_lock, &touched)
     }
 
@@ -196,45 +171,6 @@ impl DesiredStateWrite<'_> {
         #[cfg(any(test, feature = "test-support"))]
         super::query::test_support::record_remove_paths_call();
         clear_desired_exact_tx(&self.tx, paths)
-    }
-
-    /// Move the desired half of every row at `src` (exact path) or nested
-    /// under it (`src/...`) to the equivalent `dst`-prefixed path, rewriting
-    /// `desired_shard_id` from the destination path and configured shard depth
-    /// instead of carrying the source shard provenance forward. Destination
-    /// rows at or under `dst` are cleared first, matching `gat mv`'s
-    /// overwrite-on-force semantics while still snapshotting the source rows
-    /// before any mutation so `dst` living inside `src` cannot erase the rows
-    /// being moved before they are remapped.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn move_prefix(
-        &self,
-        src: &GatPath,
-        dst: &GatPath,
-        shard_levels: crate::lock::LockShardLevels,
-    ) -> Result<()> {
-        let mut moved = self.desired_rows(DesiredQuery::scope(src))?;
-        self.move_entries(&mut moved, src, dst, shard_levels)
-    }
-
-    fn move_entries(
-        &self,
-        moved: &mut [Entry],
-        src: &GatPath,
-        dst: &GatPath,
-        shard_levels: crate::lock::LockShardLevels,
-    ) -> Result<()> {
-        if moved.is_empty() {
-            return Ok(());
-        }
-        // Clear both scopes before inserting anything: they may overlap, and
-        // the captured source rows must be remapped exactly once.
-        clear_desired_prefix_tx(&self.tx, dst)?;
-        clear_desired_prefix_tx(&self.tx, src)?;
-        for entry in moved.iter_mut() {
-            entry.path = entry.path.with_replaced_prefix(src, dst);
-        }
-        upsert_desired_entries_tx(&self.tx, moved, shard_levels, "moving")
     }
 
     /// Every distinct `desired_shard_id` currently attached to `paths` in
@@ -341,7 +277,7 @@ impl DesiredStateWrite<'_> {
 }
 
 /// Upsert desired rows inside `tx`, deriving shard IDs from `shard_levels`.
-/// Moves and additions share this writer. Paths and OIDs are borrowed;
+/// Paths and OIDs are borrowed;
 /// encoded shard IDs use a reusable chunk buffer. Parameters stream into
 /// `SQLite` without a second collection. `verb` identifies the operation
 /// in technical error context.
@@ -517,7 +453,7 @@ fn desired_shard_ids_for_paths_inner<'a>(
 }
 
 /// Discover destination publication work without materializing displaced rows.
-fn desired_shard_ids_for_scope_inner(
+pub(super) fn desired_shard_ids_for_scope_inner(
     conn: &Connection,
     scope: &GatPath,
 ) -> Result<std::collections::BTreeSet<LockShardId>> {
@@ -811,25 +747,22 @@ impl StateStore {
     }
 
     /// Apply exact and indexed-prefix desired removals, then publish the
-    /// shards belonging to the caller's already-resolved affected paths
-    /// once from the transaction's post-mutation view.
+    /// affected shards once from the transaction's post-mutation view.
     pub fn publish_desired_removals<E>(
         &mut self,
         layout: &crate::RepositoryLayout,
         shape_lock: &LockWriteGuard,
-        affected_paths: &[GatPath],
         removals: &[DesiredRemoval<'_>],
     ) -> std::result::Result<(), E>
     where
         E: From<StateStoreError> + From<LockError>,
     {
-        self.desired_write(|desired| {
-            desired.remove_and_publish(layout, shape_lock, affected_paths, removals)
-        })
+        self.desired_write(|desired| desired.remove_and_publish(layout, shape_lock, removals))
     }
 
     /// Move a desired prefix and publish the union of its prior source,
     /// overwritten destination, and resulting destination shards.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn publish_desired_move<E>(
         &mut self,
         layout: &crate::RepositoryLayout,
@@ -840,7 +773,16 @@ impl StateStore {
     where
         E: From<StateStoreError> + From<LockError>,
     {
-        self.desired_write(|desired| desired.move_and_publish(layout, shape_lock, src, dst))
+        self.desired_write(|desired| {
+            let touched = desired
+                .move_repository_rows(
+                    src,
+                    dst,
+                    DesiredStateWrite::incremental_shard_levels(shape_lock),
+                )
+                .map_err(E::from)?;
+            desired.publish_touched(layout, shape_lock, &touched)
+        })
     }
 
     /// Replay bounded desired-entry windows using the publication strategy
@@ -920,31 +862,6 @@ impl StateStore {
         tx.commit()
             .state_context("committing desired-state removal")?;
         Ok(removed)
-    }
-
-    /// Move the desired half of every row at `src` or nested under it to the
-    /// equivalent `dst`-prefixed path, rewriting `desired_shard_id` from the
-    /// destination path and configured shard depth. This is the desired-side
-    /// counterpart of [`Self::move_prefix`]: scoped, indexed, and confined to
-    /// rows actually under the moved prefix instead of a repo-wide
-    /// load/filter/rebucket cycle.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn move_desired_prefix(
-        &mut self,
-        src: &gat_core::lexical_path::GatPath,
-        dst: &gat_core::lexical_path::GatPath,
-        shard_levels: crate::lock::LockShardLevels,
-    ) -> Result<()> {
-        let tx = self
-            .conn
-            .transaction()
-            .state_context("beginning desired-state transaction")?;
-        let desired = DesiredStateWrite { tx };
-        desired.move_prefix(src, dst, shard_levels)?;
-        desired
-            .tx
-            .commit()
-            .state_context("committing desired-state move")
     }
 
     /// Every distinct `desired_shard_id` currently attached to `paths`,

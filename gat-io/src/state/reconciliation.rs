@@ -892,19 +892,7 @@ impl StateStore {
             .transaction()
             .state_context("beginning desired-state transaction")?;
 
-        for removed in removed_shards {
-            clear_shard_desired_tx(&tx, removed.shard_id)?;
-        }
-        for shard in changed_or_new {
-            apply_shard_entries_tx(&tx, shard.shard_id, &shard.entries)?;
-        }
-        // `apply_shard_catalog_tx` only records identity/stat metadata --
-        // it never consumes the row payload -- so this passes the
-        // metadata-only view rather than requiring the catalog updater to
-        // ignore an owned `Vec<Entry>` clone per shard.
-        let meta: Vec<ChangedShardMeta> =
-            changed_or_new.iter().map(ChangedShardMeta::from).collect();
-        apply_shard_catalog_tx(&tx, &meta, stat_only_updates, removed_shards)?;
+        apply_shard_refresh_tx(&tx, changed_or_new, stat_only_updates, removed_shards)?;
 
         tx.commit()
             .state_context("committing desired-state refresh")
@@ -928,36 +916,13 @@ impl StateStore {
         &mut self,
         evidence: crate::lock::FullLockEvidence,
     ) -> Result<()> {
-        let prior_catalog = self.all_shard_identities()?;
-        let changed_or_new: Vec<ChangedShard> = evidence
-            .into_shards()
-            .into_iter()
-            .map(|shard| {
-                let shard_id = shard.shard_id();
-                let identity = shard.identity();
-                let proof = shard.proof();
-                let prior_identity = prior_catalog.get(&shard_id).map(|s| s.identity);
-                ChangedShard {
-                    shard_id,
-                    prior_identity,
-                    identity,
-                    proof: Some(proof),
-                    entries: shard.into_entries(),
-                }
-            })
-            .collect();
-        let touched: std::collections::HashSet<LockShardId> =
-            changed_or_new.iter().map(|s| s.shard_id).collect();
-        let removed_shards: Vec<RemovedShard> = prior_catalog
-            .into_iter()
-            .filter(|(id, _)| !touched.contains(id))
-            .map(|(id, stored)| RemovedShard {
-                shard_id: id,
-                prior_identity: stored.identity,
-            })
-            .collect();
-
-        self.apply_shard_refresh(&changed_or_new, &[], &removed_shards)
+        let tx = self
+            .conn
+            .transaction()
+            .state_context("beginning desired-state transaction")?;
+        apply_full_lock_evidence_tx(&tx, evidence)?;
+        tx.commit()
+            .state_context("committing desired-state refresh")
     }
 
     /// The current whole-desired-lock-set [`crate::lock::CanonicalDesiredIdentity`]
@@ -1474,6 +1439,63 @@ fn decode_optional_oid(oid: Option<Vec<u8>>) -> Result<Option<Oid>> {
         }
         None => Ok(None),
     }
+}
+
+fn apply_shard_refresh_tx(
+    tx: &rusqlite::Transaction<'_>,
+    changed_or_new: &[ChangedShard],
+    stat_only_updates: &[(LockShardId, Option<StatProof>)],
+    removed_shards: &[RemovedShard],
+) -> Result<()> {
+    for removed in removed_shards {
+        clear_shard_desired_tx(tx, removed.shard_id)?;
+    }
+    for shard in changed_or_new {
+        apply_shard_entries_tx(tx, shard.shard_id, &shard.entries)?;
+    }
+    // `apply_shard_catalog_tx` only records identity/stat metadata --
+    // it never consumes the row payload -- so this passes the
+    // metadata-only view rather than requiring the catalog updater to
+    // ignore an owned `Vec<Entry>` clone per shard.
+    let meta: Vec<ChangedShardMeta> = changed_or_new.iter().map(ChangedShardMeta::from).collect();
+    apply_shard_catalog_tx(tx, &meta, stat_only_updates, removed_shards)?;
+    Ok(())
+}
+
+pub(super) fn apply_full_lock_evidence_tx(
+    tx: &rusqlite::Transaction<'_>,
+    evidence: crate::lock::FullLockEvidence,
+) -> Result<()> {
+    let prior_catalog = shard_identities_query(tx, None)?;
+    let changed_or_new: Vec<ChangedShard> = evidence
+        .into_shards()
+        .into_iter()
+        .map(|shard| {
+            let shard_id = shard.shard_id();
+            let identity = shard.identity();
+            let proof = shard.proof();
+            let prior_identity = prior_catalog.get(&shard_id).map(|s| s.identity);
+            ChangedShard {
+                shard_id,
+                prior_identity,
+                identity,
+                proof: Some(proof),
+                entries: shard.into_entries(),
+            }
+        })
+        .collect();
+    let touched: std::collections::HashSet<LockShardId> =
+        changed_or_new.iter().map(|s| s.shard_id).collect();
+    let removed_shards: Vec<RemovedShard> = prior_catalog
+        .into_iter()
+        .filter(|(id, _)| !touched.contains(id))
+        .map(|(id, stored)| RemovedShard {
+            shard_id: id,
+            prior_identity: stored.identity,
+        })
+        .collect();
+
+    apply_shard_refresh_tx(tx, &changed_or_new, &[], &removed_shards)
 }
 
 #[cfg(test)]

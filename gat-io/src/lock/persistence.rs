@@ -120,7 +120,7 @@ fn coherent_read_to_string(
     path: &Path,
     op: impl FnOnce() -> Result<String>,
 ) -> Result<crate::file_state::CoherentObservation<String>> {
-    crate::file_state::coherent_observation(path, op)
+    crate::file_state::coherent_observation(path, |_| op())
 }
 
 /// Bucketed shard entries plus the full set of shard-relative paths that

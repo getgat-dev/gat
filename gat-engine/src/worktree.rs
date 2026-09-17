@@ -1,177 +1,14 @@
-//! Semantic repository worktree access for command orchestration.
-//!
-//! Physical path resolution and filesystem operations remain in `gat-io`;
-//! callers see only repository-relative paths, semantic classifications, and
-//! engine-owned errors.
+//! Repository-bound worktree operations. The I/O layer owns physical access;
+//! its semantic results and opaque move receipt need no second representation.
 
 use crate::Repository;
 use gat_core::lexical_path::GatPath;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EntryKind {
-    Missing,
-    File,
-    Directory,
-    Symlink,
-    Other,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DestinationKind {
-    Missing,
-    Directory,
-    Other,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum WorktreePathError {
-    #[error("path `{path}` must be relative")]
-    NotRelative { path: String },
-    #[error("path `{path}` escapes the worktree (contains `..`)")]
-    ParentTraversal { path: String },
-    #[error("path `{path}` cannot be materialized on this host")]
-    NotMaterializable { path: String },
-    #[error("path `{path}` contains non-UTF-8 characters")]
-    NonUtf8Component { path: String },
-    #[error("path `{path}` escapes the worktree after joining with the repository root")]
-    EscapesWorktree { path: String },
-    #[error(
-        "path `{path}` traverses symlinked ancestor `{ancestor}`; refusing to {verb} outside the repository"
-    )]
-    SymlinkAncestor {
-        path: String,
-        ancestor: String,
-        verb: &'static str,
-    },
-    #[error("`{path}` is gat/git infrastructure and can never be added")]
-    ForbiddenInfrastructurePath { path: String },
-    #[error("`{path}` is a symlink; gat does not track symlinks")]
-    UnsupportedLeafSymlink { path: String },
-    #[error("{operation} `{}` failed", path.display())]
-    Io {
-        operation: &'static str,
-        path: std::path::PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("internal error: {detail}")]
-    Internal { detail: String },
-}
-
-impl From<gat_io::WorktreePathError> for WorktreePathError {
-    fn from(error: gat_io::WorktreePathError) -> Self {
-        use gat_io::WorktreePathError as IoError;
-
-        match error {
-            IoError::NotRelative { path } => Self::NotRelative { path },
-            IoError::ParentTraversal { path } => Self::ParentTraversal { path },
-            IoError::NotMaterializable { path } => Self::NotMaterializable { path },
-            IoError::NonUtf8Component { path } => Self::NonUtf8Component { path },
-            IoError::EscapesWorktree { path } => Self::EscapesWorktree { path },
-            IoError::SymlinkAncestor {
-                path,
-                ancestor,
-                verb,
-            } => Self::SymlinkAncestor {
-                path,
-                ancestor,
-                verb,
-            },
-            IoError::ForbiddenInfrastructurePath { path } => {
-                Self::ForbiddenInfrastructurePath { path }
-            }
-            IoError::UnsupportedLeafSymlink { path } => Self::UnsupportedLeafSymlink { path },
-            IoError::Io {
-                operation,
-                path,
-                source,
-            } => Self::Io {
-                operation,
-                path,
-                source,
-            },
-            IoError::Internal { detail } => Self::Internal { detail },
-        }
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum MoveError {
-    #[error(transparent)]
-    RestoreDestination(#[from] RestoreMoveDestinationError),
-    #[error(transparent)]
-    Path(#[from] WorktreePathError),
-    #[error("creating parent directory for {path}")]
-    CreateParent {
-        path: String,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("moving {src} to {dst}")]
-    Rename {
-        src: String,
-        dst: String,
-        #[source]
-        source: std::io::Error,
-    },
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum RollbackError {
-    #[error(transparent)]
-    RestoreDestination(#[from] RestoreMoveDestinationError),
-    #[error(transparent)]
-    Path(#[from] WorktreePathError),
-    #[error("moving {dst} back to {src}")]
-    Rename {
-        src: String,
-        dst: String,
-        #[source]
-        source: std::io::Error,
-    },
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("restoring the move destination from {}", backup.display())]
-pub struct RestoreMoveDestinationError {
-    pub backup: std::path::PathBuf,
-    #[source]
-    pub source: std::io::Error,
-}
-
-impl From<gat_io::RestoreMoveDestinationError> for RestoreMoveDestinationError {
-    fn from(error: gat_io::RestoreMoveDestinationError) -> Self {
-        Self {
-            backup: error.backup,
-            source: error.source,
-        }
-    }
-}
-
-/// A completed worktree move awaiting tracking-state publication.
-/// Dropping it without resolution preserves any destination backup for recovery.
-#[must_use = "commit after publication or roll back the move"]
-pub struct PendingMove(gat_io::PendingMove);
-
-impl PendingMove {
-    /// Accept publication and clean up the destination backup on a best-effort basis.
-    pub fn commit(self) {
-        self.0.commit();
-    }
-
-    /// Restore the source and any replaced destination; failed recovery retains the backup.
-    pub fn rollback(self) -> Result<(), RollbackError> {
-        self.0.rollback().map_err(|error| match error {
-            gat_io::RollbackMoveError::Path(source) => RollbackError::Path(source.into()),
-            gat_io::RollbackMoveError::RestoreDestination(source) => {
-                RollbackError::RestoreDestination(source.into())
-            }
-            gat_io::RollbackMoveError::Rename { src, dst, source } => {
-                RollbackError::Rename { src, dst, source }
-            }
-        })
-    }
-}
+pub use gat_io::{
+    MovePathError as MoveError, PendingMove, RestoreMoveDestinationError,
+    RollbackMoveError as RollbackError, WorktreeDestinationKind as DestinationKind,
+    WorktreeEntryKind as EntryKind, WorktreePathError,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RemoveError {
@@ -195,50 +32,29 @@ pub fn inspect_read_path(
     repo: &Repository,
     path: &GatPath,
 ) -> Result<EntryKind, WorktreePathError> {
-    let kind = repo
-        .worktree_client()
-        .inspect(path)
-        .map_err(WorktreePathError::from)?;
-    Ok(match kind {
-        gat_io::WorktreeEntryKind::Missing => EntryKind::Missing,
-        gat_io::WorktreeEntryKind::File => EntryKind::File,
-        gat_io::WorktreeEntryKind::Directory => EntryKind::Directory,
-        gat_io::WorktreeEntryKind::Symlink => EntryKind::Symlink,
-        gat_io::WorktreeEntryKind::Other => EntryKind::Other,
-    })
+    repo.worktree_client().inspect(path)
 }
 
 pub fn validate_mutation_path(repo: &Repository, path: &GatPath) -> Result<(), WorktreePathError> {
-    repo.worktree_client()
-        .validate_mutation(path)
-        .map_err(WorktreePathError::from)
+    repo.worktree_client().validate_mutation(path)
 }
 
 pub fn validate_mutation_paths(
     repo: &Repository,
     paths: &[GatPath],
 ) -> Result<(), WorktreePathError> {
-    repo.worktree_client()
-        .validate_mutations(paths)
-        .map_err(WorktreePathError::from)
+    repo.worktree_client().validate_mutations(paths)
 }
 
 pub fn reject_infrastructure_path(path: &GatPath) -> Result<(), WorktreePathError> {
-    gat_io::WorktreeClient::reject_infrastructure(path).map_err(WorktreePathError::from)
+    gat_io::WorktreeClient::reject_infrastructure(path)
 }
 
 pub fn inspect_move_destination(
     repo: &Repository,
     path: &GatPath,
 ) -> Result<DestinationKind, WorktreePathError> {
-    repo.worktree_client()
-        .inspect_destination(path)
-        .map(|kind| match kind {
-            gat_io::WorktreeDestinationKind::Missing => DestinationKind::Missing,
-            gat_io::WorktreeDestinationKind::Directory => DestinationKind::Directory,
-            gat_io::WorktreeDestinationKind::Other => DestinationKind::Other,
-        })
-        .map_err(WorktreePathError::from)
+    repo.worktree_client().inspect_destination(path)
 }
 
 pub fn move_path(
@@ -246,30 +62,14 @@ pub fn move_path(
     src: &GatPath,
     dst: &GatPath,
 ) -> Result<PendingMove, MoveError> {
-    repo.worktree_client()
-        .move_path(src, dst)
-        .map(PendingMove)
-        .map_err(|error| match error {
-            gat_io::MovePathError::RestoreDestination(source) => {
-                MoveError::RestoreDestination(source.into())
-            }
-            gat_io::MovePathError::Path(source) => MoveError::Path(WorktreePathError::from(source)),
-            gat_io::MovePathError::CreateParent { path, source } => {
-                MoveError::CreateParent { path, source }
-            }
-            gat_io::MovePathError::Rename { src, dst, source } => {
-                MoveError::Rename { src, dst, source }
-            }
-        })
+    repo.worktree_client().move_path(src, dst)
 }
 
 pub fn remove_and_prune(repo: &Repository, paths: &[GatPath]) -> Result<(), RemoveError> {
     repo.worktree_client()
         .remove_and_prune(paths)
         .map_err(|error| match error {
-            gat_io::RemovePathError::Path(source) => {
-                RemoveError::Path(WorktreePathError::from(source))
-            }
+            gat_io::RemovePathError::Path(source) => RemoveError::Path(source),
             gat_io::RemovePathError::Delete { path, source } => {
                 RemoveError::Delete { path, source }
             }
