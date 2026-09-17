@@ -173,11 +173,20 @@ impl GatPath {
     /// include `data.bin`.
     #[must_use]
     pub fn is_or_under(&self, prefix: &Self) -> bool {
-        self.0 == prefix.0
-            || self
-                .0
-                .strip_prefix(prefix.0.as_str())
-                .is_some_and(|rest| rest.starts_with('/'))
+        self.strip_prefix(prefix).is_some()
+    }
+
+    /// Borrows the component-relative suffix, or `Root` for an exact match.
+    /// Returns `None` for unrelated paths, including sibling prefixes.
+    #[must_use]
+    pub fn strip_prefix<'a>(&'a self, prefix: &Self) -> Option<GatSubpathRef<'a>> {
+        relative_path(self.as_str(), prefix.as_str()).map(|relative| {
+            if relative.is_empty() {
+                GatSubpathRef::Root
+            } else {
+                GatSubpathRef::Path(GatPathRef::from_validated(relative))
+            }
+        })
     }
 
     /// Rewrites the leading `old_prefix` component of `self` to
@@ -192,24 +201,16 @@ impl GatPath {
     /// path-editing API.
     #[must_use]
     pub fn with_replaced_prefix(&self, old_prefix: &Self, new_prefix: &Self) -> Self {
+        let relative = self.strip_prefix(old_prefix);
         debug_assert!(
-            self.is_or_under(old_prefix),
+            relative.is_some(),
             "with_replaced_prefix requires self to be old_prefix or nested under it"
         );
-        let rest = match self.0.strip_prefix(old_prefix.0.as_str()) {
-            Some("") => "",
-            Some(rest) if rest.starts_with('/') => rest,
-            _ => {
-                // Release-build guard for the debug_assert above: refuse to
-                // slice a path that isn't actually old_prefix or nested
-                // under it, rather than producing a corrupted path.
-                return self.clone();
-            }
-        };
-        let mut joined = String::with_capacity(new_prefix.0.len() + rest.len());
-        joined.push_str(&new_prefix.0);
-        joined.push_str(rest);
-        Self(joined)
+        match relative {
+            Some(GatSubpathRef::Root) => new_prefix.clone(),
+            Some(GatSubpathRef::Path(relative)) => new_prefix.join_rel(relative),
+            None => self.clone(),
+        }
     }
 
     /// Joins `self` with an already-canonical, non-empty relative path
@@ -230,6 +231,16 @@ impl GatPath {
         joined.push('/');
         joined.push_str(rel);
         Self(joined)
+    }
+}
+
+/// Component-aware stripping shared with selection's unparsed row predicate.
+pub(crate) fn relative_path<'a>(candidate: &'a str, prefix: &str) -> Option<&'a str> {
+    let rest = candidate.strip_prefix(prefix)?;
+    if rest.is_empty() {
+        Some(rest)
+    } else {
+        rest.strip_prefix('/')
     }
 }
 

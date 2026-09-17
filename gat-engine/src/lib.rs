@@ -254,7 +254,7 @@ pub use worktree::{
     RemoveError as WorktreeRemoveError, RestoreMoveDestinationError,
     RollbackError as WorktreeRollbackError, WorktreePathError, inspect_move_destination,
     inspect_read_path, move_path as move_worktree_path, reject_infrastructure_path,
-    remove_and_prune, validate_mutation_path,
+    remove_and_prune, validate_mutation_path, validate_mutation_paths,
 };
 
 /// Initializes the remote backends once during process bootstrap.

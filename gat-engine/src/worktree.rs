@@ -214,6 +214,15 @@ pub fn validate_mutation_path(repo: &Repository, path: &GatPath) -> Result<(), W
         .map_err(WorktreePathError::from)
 }
 
+pub fn validate_mutation_paths(
+    repo: &Repository,
+    paths: &[GatPath],
+) -> Result<(), WorktreePathError> {
+    repo.worktree_client()
+        .validate_mutations(paths)
+        .map_err(WorktreePathError::from)
+}
+
 pub fn reject_infrastructure_path(path: &GatPath) -> Result<(), WorktreePathError> {
     gat_io::WorktreeClient::reject_infrastructure(path).map_err(WorktreePathError::from)
 }

@@ -67,7 +67,7 @@ fn local_storage_writers_ignore_their_first_files_without_exclude_sync() {
                 .unwrap(),
             "state-repair" => gat_io::rebuild_atomically(&layout).unwrap(),
             "cache-sweep" => {
-                seed_unprotected_cache_object(&layout);
+                seed_unprotected_cache_object(temp.path());
                 layout
                     .resolve_cache_root(None)
                     .maintenance()
@@ -154,10 +154,9 @@ fn read_only_access_and_external_cache_writes_do_not_create_local_storage() {
     assert!(!external.path().join(".gitignore").exists());
 }
 
-fn seed_unprotected_cache_object(layout: &RepositoryLayout) -> std::path::PathBuf {
-    let cache = layout.resolve_cache_root(None);
+fn seed_unprotected_cache_object(root: &std::path::Path) -> std::path::PathBuf {
     let oid = Oid::from_hex(&"aa".repeat(32)).unwrap();
-    let object = cache.object_path_for_test(&oid);
+    let object = root.join(".gat/objects").join(gat_io::object_key_oid(&oid));
     std::fs::create_dir_all(object.parent().unwrap()).unwrap();
     std::fs::write(&object, b"legacy object").unwrap();
     object
@@ -171,7 +170,7 @@ fn cache_sweep_prepares_only_existing_storage_and_never_writes_in_dry_run() {
     let keep = |_| Ok::<_, std::convert::Infallible>(gat_io::CacheSweepDecision::Keep);
     cache.maintenance().sweep(false, keep).unwrap().unwrap();
     assert!(!temp.path().join(".gat").exists());
-    let object = seed_unprotected_cache_object(&layout);
+    let object = seed_unprotected_cache_object(temp.path());
     cache.maintenance().sweep(false, keep).unwrap().unwrap();
     let uncertain = cache
         .maintenance()
@@ -353,16 +352,20 @@ fn layout_binds_reusable_reader_revision_and_snapshot_access() {
 
     let reader = GitReader::open(&layout).unwrap();
     assert_eq!(
-        reader.staged_lock_snapshot().unwrap().to_lock().unwrap(),
-        lock
+        reader
+            .staged_lock_snapshot()
+            .unwrap()
+            .rows_sorted(&gat_core::selection::Selection::root())
+            .unwrap(),
+        lock.entries
     );
     assert_eq!(
         reader
             .lock_snapshot_at(&GitRevisionSpec::from("HEAD"))
             .unwrap()
-            .to_lock()
+            .rows_sorted(&gat_core::selection::Selection::root())
             .unwrap(),
-        lock
+        lock.entries
     );
     let expected = test_support_git::GitCommand::new(temp.path(), &["rev-parse", "HEAD"]).run();
     let expected =

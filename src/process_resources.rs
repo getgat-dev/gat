@@ -7,8 +7,7 @@
 
 use std::num::NonZeroUsize;
 
-// Cache work is admitted eight tasks at a time; leave room for backend-local
-// filesystem tasks and unrelated short process work.
+// Blocking file work has its own bounded pool; async workers only drive I/O.
 const TOKIO_BLOCKING_THREADS: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,8 +21,9 @@ impl ProcessResourcePolicy {
     fn from_parallelism(parallelism: Option<NonZeroUsize>) -> Self {
         let cpu_threads = parallelism.unwrap_or_else(|| NonZeroUsize::new(1).unwrap());
         Self {
-            cpu: cpu_threads,
-            tokio_worker: cpu_threads,
+            // This pool also performs synchronous file I/O; overlap its waits.
+            cpu: NonZeroUsize::new(cpu_threads.get().saturating_mul(2)).unwrap(),
+            tokio_worker: NonZeroUsize::new(cpu_threads.get().min(2)).unwrap(),
             tokio_blocking: NonZeroUsize::new(TOKIO_BLOCKING_THREADS)
                 .expect("Tokio blocking thread policy must be positive"),
         }
@@ -68,18 +68,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn policy_uses_one_thread_when_parallelism_detection_fails() {
+    fn policy_uses_minimal_workers_when_parallelism_detection_fails() {
         let policy = ProcessResourcePolicy::from_parallelism(None);
-        assert_eq!(policy.cpu.get(), 1);
+        assert_eq!(policy.cpu.get(), 2);
         assert_eq!(policy.tokio_worker.get(), 1);
         assert_eq!(policy.tokio_blocking.get(), TOKIO_BLOCKING_THREADS);
     }
 
     #[test]
-    fn policy_reuses_detected_parallelism_for_cpu_and_async_workers() {
+    fn policy_bounds_async_workers_independently_of_cpu_workers() {
         let policy = ProcessResourcePolicy::from_parallelism(Some(NonZeroUsize::new(7).unwrap()));
-        assert_eq!(policy.cpu.get(), 7);
-        assert_eq!(policy.tokio_worker.get(), 7);
+        assert_eq!(policy.cpu.get(), 14);
+        assert_eq!(policy.tokio_worker.get(), 2);
         assert_eq!(policy.tokio_blocking.get(), TOKIO_BLOCKING_THREADS);
     }
 }

@@ -36,15 +36,17 @@ impl DesiredStateWrite<'_> {
         if entries.is_empty() {
             return Ok(());
         }
-        let old_touched = self
-            .desired_shard_ids_for_paths(entries.iter().map(|entry| &entry.path))
-            .map_err(E::from)?;
-        self.upsert_entries(entries, Self::incremental_shard_levels(shape_lock))
-            .map_err(E::from)?;
         let mut touched = self
             .desired_shard_ids_for_paths(entries.iter().map(|entry| &entry.path))
             .map_err(E::from)?;
-        touched.extend(old_touched);
+        let shard_levels = Self::incremental_shard_levels(shape_lock);
+        self.upsert_entries(entries, shard_levels)
+            .map_err(E::from)?;
+        touched.extend(
+            entries
+                .iter()
+                .map(|entry| shard_id_for_path(&entry.path, shard_levels)),
+        );
         self.publish_touched(layout, shape_lock, &touched)
     }
 
@@ -93,20 +95,15 @@ impl DesiredStateWrite<'_> {
         if moved.is_empty() {
             return Ok(());
         }
-        let mut touched = self
-            .desired_shard_ids_for_paths(moved.iter().map(|entry| &entry.path))
-            .map_err(E::from)?;
+        let mut touched = desired_shard_ids_for_scope_inner(&self.tx, src).map_err(E::from)?;
         touched.extend(desired_shard_ids_for_scope_inner(&self.tx, dst).map_err(E::from)?);
-        self.move_entries(
-            &mut moved,
-            src,
-            dst,
-            Self::incremental_shard_levels(shape_lock),
-        )
-        .map_err(E::from)?;
+        let shard_levels = Self::incremental_shard_levels(shape_lock);
+        self.move_entries(&mut moved, src, dst, shard_levels)
+            .map_err(E::from)?;
         touched.extend(
-            self.desired_shard_ids_for_paths(moved.iter().map(|entry| &entry.path))
-                .map_err(E::from)?,
+            moved
+                .iter()
+                .map(|entry| shard_id_for_path(&entry.path, shard_levels)),
         );
         self.publish_touched(layout, shape_lock, &touched)
     }
@@ -417,20 +414,20 @@ fn clear_desired_exact_tx(tx: &rusqlite::Transaction<'_>, paths: &[GatPath]) -> 
         let placeholders = sql_placeholders("?", chunk.len());
         tx.execute(
             &format!(
-                "UPDATE state SET desired_oid = NULL, desired_shard_id = NULL
-                 WHERE path IN ({placeholders})"
-            ),
-            params_from_iter(chunk.iter().map(GatPath::as_str)),
-        )
-        .with_state_context(|| format!("clearing {} desired-state row(s)", chunk.len()))?;
-        tx.execute(
-            &format!(
                 "DELETE FROM state WHERE path IN ({placeholders})
-                 AND desired_oid IS NULL AND materialized_oid IS NULL"
+                 AND materialized_oid IS NULL"
             ),
             params_from_iter(chunk.iter().map(GatPath::as_str)),
         )
         .with_state_context(|| format!("pruning {} emptied state row(s)", chunk.len()))?;
+        tx.execute(
+            &format!(
+                "UPDATE state SET desired_oid = NULL, desired_shard_id = NULL
+                 WHERE path IN ({placeholders}) AND desired_oid IS NOT NULL"
+            ),
+            params_from_iter(chunk.iter().map(GatPath::as_str)),
+        )
+        .with_state_context(|| format!("clearing {} desired-state row(s)", chunk.len()))?;
     }
     Ok(())
 }
@@ -472,19 +469,20 @@ fn clear_desired_prefix_tx(tx: &rusqlite::Transaction<'_>, path: &GatPath) -> Re
     let path = path.as_str();
     let (lower, upper) = descendant_range(path);
     tx.execute(
-        "UPDATE state
-         SET desired_oid = NULL,
-             desired_shard_id = NULL
-         WHERE path = ?1 OR (path >= ?2 AND path < ?3)",
-        (path, &lower, &upper),
-    )
-    .state_context("clearing desired-state rows")?;
-    tx.execute(
         "DELETE FROM state WHERE (path = ?1 OR (path >= ?2 AND path < ?3))
-         AND desired_oid IS NULL AND materialized_oid IS NULL",
+         AND materialized_oid IS NULL",
         (path, &lower, &upper),
     )
     .state_context("pruning emptied state rows")?;
+    tx.execute(
+        "UPDATE state
+         SET desired_oid = NULL,
+             desired_shard_id = NULL
+         WHERE desired_oid IS NOT NULL
+           AND (path = ?1 OR (path >= ?2 AND path < ?3))",
+        (path, &lower, &upper),
+    )
+    .state_context("clearing desired-state rows")?;
     Ok(())
 }
 

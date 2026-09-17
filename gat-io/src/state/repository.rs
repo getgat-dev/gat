@@ -567,7 +567,7 @@ impl<'repo> DesiredStateSession<'repo> {
             shape_lock,
             target,
             full_lock: None,
-            pending_materialized: None,
+            pending_materialized: Vec::new(),
         })
     }
 }
@@ -584,7 +584,7 @@ pub struct DesiredMutationSession<'repo> {
     shape_lock: LockWriteGuard,
     target: LockShardLevels,
     full_lock: Option<Lock>,
-    pending_materialized: Option<Vec<PreparedMaterialization>>,
+    pending_materialized: Vec<MaterializedRow>,
 }
 
 impl<'repo> DesiredMutationSession<'repo> {
@@ -604,7 +604,7 @@ impl<'repo> DesiredMutationSession<'repo> {
             shape_lock,
             target,
             full_lock: None,
-            pending_materialized: None,
+            pending_materialized: Vec::new(),
         })
     }
 
@@ -634,50 +634,24 @@ impl<'repo> DesiredMutationSession<'repo> {
                 )?;
             self.full_lock = Some(lock);
         }
-        if let Some(pending) = &mut self.pending_materialized {
-            pending.extend(entries);
-        } else {
-            self.pending_materialized = Some(entries);
-        }
+        self.pending_materialized
+            .extend(entries.into_iter().map(PreparedMaterialization::into_row));
         Ok(())
     }
 
     /// Record all pending publications. A failed write retains its window and
     /// the untouched tail for retry; previously committed windows stay settled.
     pub fn record_published_materialized(&mut self) -> Result<(), StateStoreError> {
-        let Some(entries) = self.pending_materialized.take() else {
-            return Ok(());
-        };
-        let mut entries = entries.into_iter();
-        loop {
-            let rows: Vec<_> = entries
-                .by_ref()
-                .take(4096)
-                .map(PreparedMaterialization::into_row)
-                .collect();
-            if rows.is_empty() {
-                return Ok(());
-            }
-            if let Err(error) = self.store.upsert_rows(&rows) {
-                // Keep the failed window and untouched tail retryable. Successful
-                // windows are already committed; ownership moves back only on error.
-                self.pending_materialized = Some(
-                    rows.into_iter()
-                        .map(|row| {
-                            PreparedMaterialization::new(
-                                Entry {
-                                    path: row.path,
-                                    oid: row.oid,
-                                },
-                                row.proof,
-                            )
-                        })
-                        .chain(entries)
-                        .collect(),
-                );
-                return Err(error);
-            }
-        }
+        let mut committed = 0;
+        let result = self.pending_materialized.chunks(4096).try_for_each(|rows| {
+            self.store.upsert_rows(rows)?;
+            committed += rows.len();
+            Ok(())
+        });
+        // Drop only committed rows. A failed transaction and its untouched tail
+        // retain their paths and proofs in the same buffer for the next attempt.
+        self.pending_materialized.drain(..committed);
+        result
     }
 
     pub fn resolve_move(
@@ -1101,29 +1075,50 @@ mod tests {
 
     #[test]
     fn failed_recording_retains_the_failed_window_and_tail_for_retry() {
-        let (temp, layout) = layout();
-        let mut session = DesiredMutationSession::acquire(&layout, LockShardLevels::FLAT).unwrap();
-        let entries = (0..4100)
-            .map(|i| {
-                PreparedMaterialization::new(
-                    Entry {
-                        path: gp(&format!("file-{i:05}")),
-                        oid: Oid::from_bytes([1; 32]),
-                    },
-                    None,
-                )
-            })
-            .collect();
-        session.publish_upserts(entries).unwrap();
-        let db = rusqlite::Connection::open(temp.path().join(".gat/state/state.sqlite3")).unwrap();
-        db.execute_batch("CREATE TRIGGER reject_recording BEFORE UPDATE OF materialized_oid ON state WHEN NEW.path = 'file-04097' BEGIN SELECT RAISE(ABORT, 'injected recording failure'); END;").unwrap();
-        assert!(session.record_published_materialized().is_err());
-        assert_eq!(session.store.load_all().unwrap().entries.len(), 4096);
-        db.execute_batch("DROP TRIGGER reject_recording;").unwrap();
-        session.record_published_materialized().unwrap();
-        assert_eq!(session.store.load_all().unwrap().entries.len(), 4100);
-        session.record_published_materialized().unwrap();
-        assert_eq!(session.store.load_all().unwrap().entries.len(), 4100);
+        for fail_at in [0, 4097] {
+            let (temp, layout) = layout();
+            let mut session =
+                DesiredMutationSession::acquire(&layout, LockShardLevels::FLAT).unwrap();
+            let entries = (0..8200)
+                .map(|i| {
+                    PreparedMaterialization::new(
+                        Entry {
+                            path: gp(&format!("file-{i:05}")),
+                            oid: Oid::from_bytes([1; 32]),
+                        },
+                        None,
+                    )
+                })
+                .collect();
+            session.publish_upserts(entries).unwrap();
+            let db =
+                rusqlite::Connection::open(temp.path().join(".gat/state/state.sqlite3")).unwrap();
+            db.execute_batch(&format!(
+                "CREATE TRIGGER reject_recording BEFORE INSERT ON state
+                 WHEN NEW.path = 'file-{fail_at:05}'
+                 BEGIN SELECT RAISE(ABORT, 'injected recording failure'); END;"
+            ))
+            .unwrap();
+            assert!(session.record_published_materialized().is_err());
+            let committed = (fail_at / 4096) * 4096;
+            assert_eq!(session.store.load_all().unwrap().entries.len(), committed);
+            db.execute_batch(&format!(
+                "DROP TRIGGER reject_recording;
+                 CREATE TRIGGER reject_repeated_recording BEFORE INSERT ON state
+                 WHEN NEW.path < 'file-{committed:05}'
+                 BEGIN SELECT RAISE(ABORT, 'committed window was replayed'); END;"
+            ))
+            .unwrap();
+            session.record_published_materialized().unwrap();
+            assert_eq!(session.store.load_all().unwrap().entries.len(), 8200);
+            db.execute_batch(
+                "CREATE TRIGGER reject_any_recording BEFORE INSERT ON state
+                 BEGIN SELECT RAISE(ABORT, 'settled publication was replayed'); END;",
+            )
+            .unwrap();
+            session.record_published_materialized().unwrap();
+            assert_eq!(session.store.load_all().unwrap().entries.len(), 8200);
+        }
     }
 
     #[derive(Debug, thiserror::Error)]

@@ -109,6 +109,9 @@ mod tests {
                 .execute_batch(
                     "CREATE TRIGGER reject_forget BEFORE UPDATE OF materialized_oid ON state
                  WHEN OLD.materialized_oid IS NOT NULL AND NEW.materialized_oid IS NULL
+                 BEGIN SELECT RAISE(FAIL, 'injected ownership failure'); END;
+                 CREATE TRIGGER reject_forget_delete BEFORE DELETE ON state
+                 WHEN OLD.materialized_oid IS NOT NULL
                  BEGIN SELECT RAISE(FAIL, 'injected ownership failure'); END;",
                 )
                 .unwrap();
@@ -132,7 +135,7 @@ mod tests {
                 1
             );
             connection
-                .execute_batch("DROP TRIGGER reject_forget;")
+                .execute_batch("DROP TRIGGER reject_forget; DROP TRIGGER reject_forget_delete;")
                 .unwrap();
             assert!(
                 rm(&repo, &[PathBuf::from("a.bin")], cached)

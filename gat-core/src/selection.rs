@@ -106,12 +106,9 @@ impl Selection {
         self.matches_str(candidate.as_str())
     }
 
-    /// The row-scanning variant of [`Self::matches`], for the one
-    /// accepted exception to the "always pass typed `GatPath`" rule:
-    /// filtering raw `gat.lock` row text *while it is being parsed*,
-    /// before a [`GatPath`](crate::lexical_path::GatPath)/[`crate::lock::Entry`]
-    /// exists yet (e.g. `crate::lock::Lock::visit_filtered`/
-    /// `parse_filtered`'s `keep` predicate).
+    /// Match certified lock-row text before allocating an owned
+    /// [`GatPath`](crate::lexical_path::GatPath) or [`crate::lock::Entry`],
+    /// as in [`crate::lock::validated::visit_filtered_matching`].
     #[must_use]
     pub fn matches_str(&self, candidate: &str) -> bool {
         match self.relative(candidate) {
@@ -132,15 +129,12 @@ impl Selection {
         &self,
         candidate: &'a crate::lexical_path::GatPath,
     ) -> Option<crate::lexical_path::GatSubpathRef<'a>> {
-        self.relative(candidate.as_str()).map(|relative| {
-            if relative.is_empty() {
-                crate::lexical_path::GatSubpathRef::Root
-            } else {
-                crate::lexical_path::GatSubpathRef::Path(
-                    crate::lexical_path::GatPathRef::from_validated(relative),
-                )
-            }
-        })
+        match &self.scope {
+            PathScope::Root => Some(crate::lexical_path::GatSubpathRef::Path(
+                candidate.as_borrowed(),
+            )),
+            PathScope::Path(scope) => candidate.strip_prefix(scope),
+        }
     }
 
     /// The portion of `candidate` relative to the scope, if `candidate` is
@@ -150,15 +144,7 @@ impl Selection {
     fn relative<'a>(&self, candidate: &'a str) -> Option<&'a str> {
         match &self.scope {
             PathScope::Root => Some(candidate),
-            PathScope::Path(s) => {
-                if candidate == s.as_str() {
-                    Some("")
-                } else {
-                    candidate
-                        .strip_prefix(s.as_str())
-                        .and_then(|rest| rest.strip_prefix('/'))
-                }
-            }
+            PathScope::Path(scope) => crate::lexical_path::relative_path(candidate, scope.as_str()),
         }
     }
 }

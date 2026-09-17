@@ -8,7 +8,7 @@ use gat_core::progress::{
 };
 use gat_engine::{
     DesiredScope, MountOwnership, PathPolicyError, Repository, RepositoryMutationError,
-    WorktreePathError, WorktreeRemoveError, remove_and_prune, validate_mutation_path,
+    WorktreePathError, WorktreeRemoveError, remove_and_prune, validate_mutation_paths,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -176,16 +176,7 @@ pub fn remove_with_progress(
 }
 
 fn validate_deletion_paths(repo: &Repository, entries: &[GatPath]) -> Result<()> {
-    use rayon::prelude::*;
-
-    // Preserve input-order error selection even when checks finish out of order.
-    match entries
-        .par_iter()
-        .find_map_first(|path| validate_mutation_path(repo, path).err())
-    {
-        Some(error) => Err(error.into()),
-        None => Ok(()),
-    }
+    validate_mutation_paths(repo, entries).map_err(Into::into)
 }
 
 enum RemoveSelector {
@@ -238,37 +229,29 @@ mod tests {
         let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
             .unwrap()
             .repository_at(temp.path().to_path_buf());
-        for threads in [1, 4] {
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(threads)
-                .build()
-                .unwrap();
-            pool.install(|| {
-                assert!(validate_deletion_paths(&repo, &[]).is_ok());
-                for count in [16, 8192] {
-                    let mut paths = (0..count)
-                        .map(|i| GatPath::normalize(format!("file-{i}")).unwrap())
-                        .collect::<Vec<_>>();
-                    assert!(validate_deletion_paths(&repo, &paths).is_ok());
-                    for [first, second] in [invalid, [invalid[1], invalid[0]]] {
-                        paths[count / 2 + 1] = GatPath::parse_canonical(first).unwrap();
-                        paths[count - 1] = GatPath::parse_canonical(second).unwrap();
-                        let error = validate_deletion_paths(&repo, &paths).unwrap_err();
-                        #[cfg(windows)]
-                        assert!(matches!(
-                            error,
-                            RemoveError::Path(WorktreePathError::NotMaterializable { path })
-                                if path == first
-                        ));
-                        #[cfg(not(windows))]
-                        assert!(matches!(
-                            error,
-                            RemoveError::Path(WorktreePathError::Io { path, .. })
-                                if path == temp.path().join(first).parent().unwrap()
-                        ));
-                    }
-                }
-            });
+        assert!(validate_deletion_paths(&repo, &[]).is_ok());
+        for count in [16, 8192] {
+            let mut paths = (0..count)
+                .map(|i| GatPath::normalize(format!("file-{i}")).unwrap())
+                .collect::<Vec<_>>();
+            assert!(validate_deletion_paths(&repo, &paths).is_ok());
+            for [first, second] in [invalid, [invalid[1], invalid[0]]] {
+                paths[count / 2 + 1] = GatPath::parse_canonical(first).unwrap();
+                paths[count - 1] = GatPath::parse_canonical(second).unwrap();
+                let error = validate_deletion_paths(&repo, &paths).unwrap_err();
+                #[cfg(windows)]
+                assert!(matches!(
+                    error,
+                    RemoveError::Path(WorktreePathError::NotMaterializable { path })
+                        if path == first
+                ));
+                #[cfg(not(windows))]
+                assert!(matches!(
+                    error,
+                    RemoveError::Path(WorktreePathError::Io { path, .. })
+                        if path == temp.path().join(first).parent().unwrap()
+                ));
+            }
         }
     }
 }

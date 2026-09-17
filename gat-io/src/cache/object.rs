@@ -1610,14 +1610,8 @@ pub fn publish_tmp(
     let dest = cache_path_oid(objects_dir, &oid);
 
     ensure_cache_directory(dest.parent().unwrap())?;
-    // The existing file (if any) is untrusted -- clear its read-only bit
-    // first so the overwrite below can't be blocked by `protect`'s
-    // permissions on platforms that check them on replace. Deliberately
-    // best-effort: if `dest` doesn't exist yet there's nothing to
-    // unprotect, and if it does but this fails, the persist below will
-    // itself fail and surface a real error -- this is never the last
-    // line of defense.
-    let _ = unprotect(&dest);
+    // Unix rename replaces read-only files without changing their permissions.
+    // Leave the old inode protected, including any materialized hardlinks to it.
     let published = crate::atomic::persist_finalized_with_proof(tmp, &dest)?;
     protect(&dest)?;
 
@@ -2668,12 +2662,26 @@ mod tests {
         std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
         std::fs::write(&dest, b"corrupted but protected bytes").unwrap();
         protect(&dest).unwrap();
+        #[cfg(unix)]
+        let linked = {
+            let linked = tmp.path().join("materialized-link");
+            std::fs::hard_link(&dest, &linked).unwrap();
+            linked
+        };
 
         let ingested = ingest(&objects_dir, Cursor::new(content)).unwrap();
         assert_eq!(ingested.oid, oid);
         // Replaced -- `protect`'s permission bit alone proves nothing
         // about this destination's identity without a recorded proof.
         assert_eq!(std::fs::read(&dest).unwrap(), content);
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                std::fs::read(&linked).unwrap(),
+                b"corrupted but protected bytes"
+            );
+            assert!(std::fs::metadata(&linked).unwrap().permissions().readonly());
+        }
     }
 
     /// The proof-based counterpart of the test above: an existing

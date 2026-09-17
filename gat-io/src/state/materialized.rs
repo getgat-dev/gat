@@ -27,7 +27,9 @@ fn bulk_upsert_materialized(
              ) VALUES {placeholders}
              ON CONFLICT(path) DO UPDATE SET
                  materialized_oid = excluded.materialized_oid,
-                 materialized_proof = excluded.materialized_proof"
+                 materialized_proof = excluded.materialized_proof
+             WHERE state.materialized_oid IS NOT excluded.materialized_oid
+                OR state.materialized_proof IS NOT excluded.materialized_proof"
         );
         // Borrow paths and OIDs; only encoded proofs need temporary storage.
         // Keep those fixed-size values together instead of allocating per row.
@@ -96,31 +98,30 @@ fn bulk_refresh_materialized_proofs(
 }
 
 /// Clear the *materialized* half of exactly the rows named by `paths`
-/// (an `IN (...)` list), then delete any of those rows that are now
-/// entirely empty (`desired_oid`/`materialized_oid` both `NULL`) -- a row
-/// only exists to record a non-`NULL` desired or materialized half, never
-/// as a bare tombstone.
+/// (an `IN (...)` list). Delete rows without a desired half directly, avoiding
+/// an update immediately followed by deletion; retain the desired half of
+/// every other row.
 fn clear_materialized_exact_tx(tx: &rusqlite::Transaction<'_>, paths: &[&GatPath]) -> Result<()> {
     for chunk in paths.chunks(sql_chunk_size(1)) {
         let placeholders = sql_placeholders("?", chunk.len());
         tx.execute(
             &format!(
-                "UPDATE state
-                 SET materialized_oid = NULL,
-                     materialized_proof = NULL
-                 WHERE path IN ({placeholders})"
-            ),
-            params_from_iter(chunk.iter().map(|p| p.as_str())),
-        )
-        .with_state_context(|| format!("clearing {} materialized-state row(s)", chunk.len()))?;
-        tx.execute(
-            &format!(
                 "DELETE FROM state WHERE path IN ({placeholders})
-                 AND desired_oid IS NULL AND materialized_oid IS NULL"
+                 AND desired_oid IS NULL"
             ),
             params_from_iter(chunk.iter().map(|p| p.as_str())),
         )
         .with_state_context(|| format!("pruning {} emptied state row(s)", chunk.len()))?;
+        tx.execute(
+            &format!(
+                "UPDATE state
+                 SET materialized_oid = NULL,
+                     materialized_proof = NULL
+                 WHERE path IN ({placeholders}) AND materialized_oid IS NOT NULL"
+            ),
+            params_from_iter(chunk.iter().map(|p| p.as_str())),
+        )
+        .with_state_context(|| format!("clearing {} materialized-state row(s)", chunk.len()))?;
     }
     Ok(())
 }
@@ -134,6 +135,12 @@ fn clear_materialized_prefix_tx(tx: &rusqlite::Transaction<'_>, path: &GatPath) 
     let path = path.as_str();
     let (lower, upper) = descendant_range(path);
     tx.execute(
+        "DELETE FROM state WHERE (path = ?1 OR (path >= ?2 AND path < ?3))
+         AND desired_oid IS NULL",
+        (path, &lower, &upper),
+    )
+    .state_context("pruning emptied state rows")?;
+    tx.execute(
         "UPDATE state
          SET materialized_oid = NULL,
              materialized_proof = NULL
@@ -142,12 +149,6 @@ fn clear_materialized_prefix_tx(tx: &rusqlite::Transaction<'_>, path: &GatPath) 
         (path, &lower, &upper),
     )
     .state_context("clearing materialized-state rows")?;
-    tx.execute(
-        "DELETE FROM state WHERE (path = ?1 OR (path >= ?2 AND path < ?3))
-         AND desired_oid IS NULL AND materialized_oid IS NULL",
-        (path, &lower, &upper),
-    )
-    .state_context("pruning emptied state rows")?;
     Ok(())
 }
 

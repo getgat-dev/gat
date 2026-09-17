@@ -70,6 +70,22 @@ impl<'root> WorktreeClient<'root> {
         confine_mutation(self.root, path).map(|_| ())
     }
 
+    /// Preflight paths in input order, checking shared parents once. This is
+    /// not a mutation receipt: each physical mutation still checks its ancestors.
+    pub fn validate_mutations(&self, paths: &[GatPath]) -> PathResult<()> {
+        let mut parents = HashSet::new();
+        for path in paths {
+            let dest = resolve_worktree_path(self.root, path)?;
+            if let Some(parent) = dest.parent()
+                && !parents.contains(parent)
+            {
+                ensure_no_symlink_ancestors(self.root, &dest)?;
+                parents.insert(parent.to_path_buf());
+            }
+        }
+        Ok(())
+    }
+
     pub fn reject_infrastructure(path: &GatPath) -> PathResult<()> {
         reject_infrastructure_path(path.as_str())
     }
@@ -82,6 +98,9 @@ impl<'root> WorktreeClient<'root> {
         move_path(self.root, src, dst)
     }
 
+    /// Remove files concurrently, then prune empty touched ancestors. All file
+    /// removals finish before returning the first input-order error, if any;
+    /// a failure skips pruning and may leave a partially removed worktree.
     pub fn remove_and_prune(&self, paths: &[GatPath]) -> Result<(), RemovePathError> {
         remove_and_prune(self.root, paths)
     }
@@ -521,19 +540,26 @@ pub enum RemovePathError {
 }
 
 fn remove_and_prune(root: &Path, paths: &[GatPath]) -> Result<(), RemovePathError> {
-    let mut deleted = Vec::new();
-    for path in paths {
-        let full = confine_mutation(root, path)?;
-        match std::fs::remove_file(&full) {
-            Ok(()) => deleted.push(full),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(RemovePathError::Delete {
+    use rayon::prelude::*;
+
+    // Complete physical work before pruning; retain input-order error selection.
+    let results: Vec<_> = paths
+        .par_iter()
+        .map(|path| {
+            let full = confine_mutation(root, path)?;
+            match std::fs::remove_file(&full) {
+                Ok(()) => Ok(Some(full)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(source) => Err(RemovePathError::Delete {
                     path: path.to_string(),
                     source,
-                });
+                }),
             }
-        }
+        })
+        .collect();
+    let mut deleted = Vec::new();
+    for result in results {
+        deleted.extend(result?);
     }
     prune_touched_ancestor_dirs(root, deleted.iter().map(PathBuf::as_path))?;
     Ok(())
@@ -579,9 +605,10 @@ fn prune_touched_ancestor_dirs<'path>(
             if parent == root || !parent.starts_with(root) {
                 break;
             }
-            if !candidates.insert(parent.to_path_buf()) {
+            if candidates.contains(parent) {
                 break;
             }
+            candidates.insert(parent.to_path_buf());
             current = parent;
         }
     }
@@ -799,7 +826,8 @@ pub(crate) fn ingest_file(
                 path: full.clone(),
                 source,
             })?;
-            cache::object::ingest_delta(objects_dir, file).map_err(WorktreeMutationError::from)
+            cache::object::ingest_sized_delta(objects_dir, file, size)
+                .map_err(WorktreeMutationError::from)
         }
     })?;
     let (ingested, receipt) = observation.value;

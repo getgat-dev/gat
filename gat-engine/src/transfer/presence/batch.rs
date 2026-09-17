@@ -375,6 +375,8 @@ mod tests {
 
     #[test]
     fn two_remotes_share_local_capacity_and_cancel_queued_batches_without_work() {
+        use crate::remote_executor::LOCAL_CONCURRENCY;
+
         for cancel in [false, true] {
             let runtime = tokio::runtime::Runtime::new().unwrap();
             let _entered = runtime.enter();
@@ -389,7 +391,7 @@ mod tests {
                 let mut active = futures::stream::FuturesUnordered::new();
                 let mut releases = Vec::new();
                 let mut arrivals = Vec::new();
-                for _ in 0..8 {
+                for _ in 0..LOCAL_CONCURRENCY {
                     let (release, released) = std::sync::mpsc::channel();
                     let (started, arrived) = tokio::sync::oneshot::channel();
                     releases.push(release);
@@ -403,7 +405,7 @@ mod tests {
                 for arrived in arrivals {
                     arrived.await.unwrap();
                 }
-                assert_eq!(executor.local_submissions(), 8);
+                assert_eq!(executor.local_submissions(), LOCAL_CONCURRENCY);
 
                 let calls = Arc::new(AtomicUsize::new(0));
                 let mut batches = futures::stream::SelectAll::new();
@@ -416,7 +418,7 @@ mod tests {
                     }));
                 }
                 assert!(futures::poll!(batches.next()).is_pending());
-                assert_eq!(executor.local_submissions(), 8);
+                assert_eq!(executor.local_submissions(), LOCAL_CONCURRENCY);
                 assert_eq!(calls.load(Ordering::Relaxed), 0);
                 for handle in &handles {
                     assert!(executor.try_presence(handle.id()).is_none());
@@ -431,7 +433,7 @@ mod tests {
                             Err(PresenceProbeError::Cancelled)
                         ))
                     );
-                    assert_eq!(executor.local_submissions(), 8);
+                    assert_eq!(executor.local_submissions(), LOCAL_CONCURRENCY);
                     assert_eq!(calls.load(Ordering::Relaxed), 0);
                 }
                 for release in releases {
@@ -448,7 +450,7 @@ mod tests {
                             .iter()
                             .all(|(_, result)| matches!(result, Ok(false)))
                     );
-                    assert_eq!(executor.local_submissions(), 10);
+                    assert_eq!(executor.local_submissions(), LOCAL_CONCURRENCY + 2);
                     assert_eq!(calls.load(Ordering::Relaxed), 256);
                 }
                 for handle in &handles {
