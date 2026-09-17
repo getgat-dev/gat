@@ -8,7 +8,7 @@
 use std::num::NonZeroUsize;
 
 // Blocking file work has its own bounded pool; async workers only drive I/O.
-const TOKIO_BLOCKING_THREADS: usize = 32;
+const TOKIO_BLOCKING_THREADS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ProcessResourcePolicy {
