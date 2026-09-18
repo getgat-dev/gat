@@ -374,12 +374,24 @@ fn try_open(db_path: &Path) -> Result<Connection> {
     if version == 0 {
         // A fresh/empty database file: initialize it in place.
         try_set_wal(&conn);
-        create_schema(&conn)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+        // Keep table creation and its version stamp in one durable commit;
+        // journal-mode selection cannot run inside this transaction.
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|source| CacheStateError::QueryFailed {
+                operation: "beginning cache schema initialization",
+                source,
+            })?;
+        create_schema(&tx)?;
+        tx.pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(|source| CacheStateError::QueryFailed {
                 operation: "stamping cache database schema version",
                 source,
             })?;
+        tx.commit().map_err(|source| CacheStateError::QueryFailed {
+            operation: "committing cache schema initialization",
+            source,
+        })?;
     } else if version != SCHEMA_VERSION {
         // Either newer than this build understands, or an older schema
         // version this build does not support -- either way,
@@ -1091,6 +1103,10 @@ mod tests {
         assert!(sql.contains("oid    BLOB PRIMARY KEY"));
         assert!(sql.contains("proof  BLOB NOT NULL"));
         assert!(sql.contains("WITHOUT ROWID"));
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     #[test]

@@ -82,25 +82,21 @@ impl CacheRootInner {
         })
     }
 
-    /// Before ownership is established, an absent or inaccessible cache must not
-    /// fall through to a writable `SQLite` open. Once prepared, handles assume
-    /// stable directory ownership for their lifetime and skip repeated probes.
+    /// An absent or inaccessible cache must not fall through to a writable
+    /// `SQLite` open, even if its repository protection was already prepared.
     pub(crate) fn prepare_existing_directory(
         &self,
     ) -> Result<Option<PreparedCacheDirectory<'_>>, PreparationError> {
-        if self.local_membership.get().is_some_and(|local| {
-            !local
-                || self
-                    .local_directory
-                    .as_ref()
-                    .is_some_and(|directory| directory.is_initialized())
-        }) {
-            return Ok(Some(PreparedCacheDirectory {
-                path: &self.objects_dir,
-            }));
-        }
-        if !self.objects_dir.is_dir() {
-            return Ok(None);
+        match std::fs::metadata(&self.objects_dir) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                return Err(PreparationError::at(
+                    &self.objects_dir,
+                    std::io::ErrorKind::NotADirectory.into(),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(PreparationError::at(&self.objects_dir, error)),
         }
         self.ensure_local_directory(false)?;
         Ok(Some(PreparedCacheDirectory {
@@ -378,6 +374,18 @@ mod tests {
         let _ = root.open_client();
         assert!(temp.path().join(".gat/.gitignore").is_file());
         assert!(root.display_path().join("cache.sqlite3").is_file());
+    }
+
+    #[test]
+    fn existing_cache_gate_distinguishes_an_obstruction_from_absent_storage() {
+        let temp = tempfile::tempdir().unwrap();
+        let layout = crate::RepositoryLayout::at(temp.path().to_path_buf());
+        let root = layout.resolve_cache_root(None);
+        std::fs::create_dir(temp.path().join(".gat")).unwrap();
+        std::fs::write(root.display_path(), b"obstruction").unwrap();
+        let error = root.inner.prepare_existing_directory().unwrap_err();
+        assert_eq!(error.path, root.display_path());
+        assert_eq!(error.source.kind(), std::io::ErrorKind::NotADirectory);
     }
 
     #[test]

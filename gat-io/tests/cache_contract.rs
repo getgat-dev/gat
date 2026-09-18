@@ -157,3 +157,91 @@ fn cache_verification_uses_the_typed_client_and_reuses_warm_proofs() {
     });
     assert_eq!(warm_hashes, 0);
 }
+
+#[cfg(feature = "test-support")]
+#[test]
+fn first_publication_persists_proofs_after_opening_an_absent_cache() {
+    for external in [false, true] {
+        let repo = tempfile::tempdir().unwrap();
+        let shared = tempfile::tempdir().unwrap();
+        let layout = RepositoryLayout::at(repo.path().to_path_buf());
+        let location = CacheLocation::try_from_path(shared.path().join("objects")).unwrap();
+        let root = layout.resolve_cache_root(external.then_some(&location));
+        let before = gat_io::cache_proof_test_support::snapshot().cache_db_opens;
+        let client = root.open_client();
+        let missing = Oid::from_bytes([0; 32]);
+        assert_eq!(
+            client.verify(&missing).unwrap(),
+            ObjectVerification::Missing
+        );
+        assert!(!root.display_path().exists());
+        assert!(!repo.path().join(".gat").exists());
+        assert_eq!(
+            gat_io::cache_proof_test_support::snapshot().cache_db_opens,
+            before
+        );
+
+        let (ingested, receipt) = root.writer().ingest(&b"first payload"[..]).unwrap();
+        client.apply_publications(&[receipt.unwrap()]).unwrap();
+        assert!(root.display_path().join("cache.sqlite3").is_file());
+        assert_eq!(
+            gat_io::cache_proof_test_support::snapshot().cache_db_opens - before,
+            1
+        );
+        drop(client);
+
+        let hashes = with_exclusive_hash_file_call_count(|| {
+            assert_eq!(
+                root.open_client().verify(&ingested.oid).unwrap(),
+                ObjectVerification::Valid
+            );
+            hash_file_call_count()
+        });
+        assert_eq!(hashes, 0, "external cache: {external}");
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn deferred_index_open_failure_stays_disabled_for_the_session() {
+    let repo = tempfile::tempdir().unwrap();
+    let layout = RepositoryLayout::at(repo.path().to_path_buf());
+    let root = layout.resolve_cache_root(None);
+    let client = root.open_client();
+    let (ingested, receipt) = root.writer().ingest(&b"payload"[..]).unwrap();
+    let database = root.display_path().join("cache.sqlite3");
+    std::fs::write(&database, b"not a database").unwrap();
+    let before = gat_io::cache_proof_test_support::snapshot().cache_db_opens;
+    let receipts = [receipt.unwrap()];
+    client.apply_publications(&receipts).unwrap();
+    client.apply_publications(&receipts).unwrap();
+    assert_eq!(
+        client.verify(&ingested.oid).unwrap(),
+        ObjectVerification::Valid
+    );
+    assert_eq!(
+        gat_io::cache_proof_test_support::snapshot().cache_db_opens - before,
+        1
+    );
+    assert_eq!(std::fs::read(database).unwrap(), b"not a database");
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn empty_proof_batches_do_not_initialize_a_deferred_index() {
+    let repo = tempfile::tempdir().unwrap();
+    let layout = RepositoryLayout::at(repo.path().to_path_buf());
+    let root = layout.resolve_cache_root(None);
+    let client = root.open_client();
+    let (_, receipt) = root.writer().ingest(&b"payload"[..]).unwrap();
+    let database = root.display_path().join("cache.sqlite3");
+
+    client.apply_publications(&[]).unwrap();
+    client.remove_proofs(&[]).unwrap();
+    let completed = client.prepare_verification(&[]).verify().unwrap();
+    assert!(client.commit_verification(completed).unwrap().is_empty());
+    assert!(!database.exists());
+
+    client.apply_publications(&[receipt.unwrap()]).unwrap();
+    assert!(database.exists());
+}

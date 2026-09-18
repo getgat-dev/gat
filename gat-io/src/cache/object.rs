@@ -619,7 +619,9 @@ fn read_uninterrupted(reader: &mut impl Read, buf: &mut [u8]) -> std::io::Result
 ///   verification in between.
 pub struct CacheClient {
     root: Arc<crate::cache::root::CacheRootInner>,
-    index: CacheState,
+    // Unset only while storage is absent. A failed open is retained as a
+    // disabled CacheState so failures are not retried per object or batch.
+    index: std::cell::OnceCell<CacheState>,
     verification_generation: std::cell::RefCell<Arc<()>>,
     memo: std::cell::RefCell<std::collections::HashMap<Oid, CacheObservation>>,
 }
@@ -725,15 +727,29 @@ impl CacheClient {
     }
 
     pub(crate) fn open_shared(root: Arc<crate::cache::root::CacheRootInner>) -> Self {
-        let index = match root.prepare_existing_directory() {
-            Ok(Some(directory)) => CacheState::open_prepared(&directory),
-            Ok(None) | Err(_) => CacheState::disabled(),
-        };
-        Self {
+        let client = Self {
             root,
-            index,
+            index: std::cell::OnceCell::new(),
             verification_generation: std::cell::RefCell::new(Arc::new(())),
             memo: std::cell::RefCell::new(std::collections::HashMap::new()),
+        };
+        let _ = client.index();
+        client
+    }
+
+    fn index(&self) -> Option<&CacheState> {
+        if let Some(index) = self.index.get() {
+            return Some(index);
+        }
+        match self.root.prepare_existing_directory() {
+            Ok(Some(directory)) => Some(
+                self.index
+                    .get_or_init(|| CacheState::open_prepared(&directory)),
+            ),
+            // A writer may create the directory later in this same session.
+            // Defer opening so its first publications can persist their proofs.
+            Ok(None) => None,
+            Err(_) => Some(self.index.get_or_init(CacheState::disabled)),
         }
     }
 
@@ -744,7 +760,9 @@ impl CacheClient {
     /// session's verification memo for the affected oids.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn break_database_for_test(&self) {
-        self.index.break_for_test();
+        if let Some(index) = self.index() {
+            index.break_for_test();
+        }
     }
 
     pub(crate) fn prepare_write(&self) -> Result<()> {
@@ -807,14 +825,30 @@ impl CacheClient {
     /// proof persistence fails: the filesystem mutation has already happened.
     pub fn apply_publications(&self, receipts: &[CachePublication]) -> Result<()> {
         self.forget_memo(receipts.iter().map(CachePublication::oid));
-        self.index.apply_many(receipts)?;
+        self.persist_proofs(receipts)
+    }
+
+    // Verification has already updated the memo, whereas publication must
+    // invalidate it first. Share only persistence, including its empty fast path.
+    fn persist_proofs(&self, receipts: &[CachePublication]) -> Result<()> {
+        if receipts.is_empty() {
+            return Ok(());
+        }
+        if let Some(index) = self.index() {
+            index.apply_many(receipts)?;
+        }
         Ok(())
     }
 
     /// Remove proof rows for objects that have been swept from disk.
     pub fn remove_proofs(&self, oids: &[Oid]) -> Result<()> {
+        if oids.is_empty() {
+            return Ok(());
+        }
         self.forget_memo(oids.iter().copied());
-        self.index.remove_many(oids)?;
+        if let Some(index) = self.index() {
+            index.remove_many(oids)?;
+        }
         Ok(())
     }
 
@@ -829,7 +863,9 @@ impl CacheClient {
         }
         #[cfg(any(test, feature = "test-support"))]
         crate::cache::proof::test_support::record_fs_verification();
-        let prior = self.index.lookup(oid).ok().flatten();
+        let prior = self
+            .index()
+            .and_then(|index| index.lookup(oid).ok().flatten());
         let (observation, delta) =
             crate::cache::proof::verify_object_fs(&self.root.objects_dir, oid, prior.as_ref())?;
         if let Some(delta) = delta {
@@ -837,7 +873,7 @@ impl CacheClient {
             // the just-completed filesystem verification: a failure to
             // persist this proof only costs a later call an extra hash,
             // never this call's correctness.
-            let _ = self.index.apply_many(std::slice::from_ref(&delta));
+            let _ = self.persist_proofs(std::slice::from_ref(&delta));
         }
         let mut memo = self.memo.borrow_mut();
         memo.insert(*oid, observation);
@@ -869,7 +905,9 @@ impl CacheClient {
         let mut priors = if pending_oids.is_empty() {
             std::collections::HashMap::new()
         } else {
-            self.index.exact_many(&pending_oids).unwrap_or_default()
+            self.index()
+                .and_then(|index| index.exact_many(&pending_oids).ok())
+                .unwrap_or_default()
         };
         #[cfg(any(test, feature = "test-support"))]
         for _ in &pending_oids {
@@ -971,7 +1009,7 @@ impl CacheClient {
             })
             .collect();
         drop(memo);
-        let _ = self.index.apply_many(&deltas);
+        let _ = self.persist_proofs(&deltas);
         Ok(statuses)
     }
 
@@ -1059,7 +1097,10 @@ impl CacheClient {
             // A failed bulk proof lookup degrades to "no known priors"
             // for this window rather than aborting verification, same
             // reasoning as `verify_windows` above.
-            let priors = self.index.exact_many(window).unwrap_or_default();
+            let priors = self
+                .index()
+                .and_then(|index| index.exact_many(window).ok())
+                .unwrap_or_default();
             #[cfg(any(test, feature = "test-support"))]
             for _ in window {
                 crate::cache::proof::test_support::record_fs_verification();
@@ -1093,7 +1134,7 @@ impl CacheClient {
                 }
             }
             // Best-effort, same reasoning as `verify` above.
-            let _ = self.index.apply_many(&deltas);
+            let _ = self.persist_proofs(&deltas);
 
             on_window(window, &statuses)?;
         }
