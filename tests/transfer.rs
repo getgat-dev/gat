@@ -1242,22 +1242,30 @@ fn push_uses_verified_cache_state_without_rehashing_when_remote_is_missing() {
     let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
         .unwrap()
         .repository_at(tmp.path().to_path_buf());
+    assert!(!cache_path(&repo).exists());
     std::fs::write(tmp.path().join("big.bin"), b"payload").unwrap();
     add(&repo, &[PathBuf::from("big.bin")], &NoopProgress).unwrap();
+    assert!(cache_path(&repo).join("cache.sqlite3").is_file());
 
     let remote_dir = tempfile::tempdir().unwrap();
     let url = gat_io::remote_file_url_for_test(remote_dir.path());
     remote_add_with_default(&repo, "origin", url).unwrap();
-    push(&repo, None, None, &NoopProgress).unwrap();
+    let handle = rt.handle().clone();
+    let (outcome, hashes) = with_exclusive_hash_file_call_count(|| {
+        let _enter = handle.enter();
+        let outcome = push(&repo, None, None, &NoopProgress).unwrap();
+        (outcome, hash_file_call_count())
+    });
+    assert_eq!(outcome.total, 1);
+    assert!(outcome.skipped.is_empty());
+    assert_eq!(hashes, 0, "the first push must reuse the first add's proof");
 
     let oid = gat_io::LockStore::load_repository(&layout(tmp.path()))
         .unwrap()
         .entries[0]
         .oid;
     std::fs::remove_file(remote_dir.path().join(storage::object_key_oid(&oid))).unwrap();
-    let handle = rt.handle().clone();
-
-    // The first push established a persisted cache proof. Removing only the
+    // The first add established a persisted cache proof. Removing only the
     // remote object makes this second push need the local bytes again while
     // proving it can reuse that verification across operation boundaries.
     let (outcome, hashes) = with_exclusive_hash_file_call_count(|| {

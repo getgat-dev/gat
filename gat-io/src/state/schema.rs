@@ -205,16 +205,30 @@ pub(super) fn check_schema_version(conn: &Connection, db_path: &Path) -> Result<
         // An empty database file with no schema yet (e.g. created but
         // never populated) -- initialize it in place.
         set_journal_mode_wal(conn, db_path)?;
-        create_schema(conn)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+        // Publish the entire schema and its version in one durable commit.
+        // WAL selection must happen before entering the transaction.
+        let tx = conn
+            .unchecked_transaction()
+            .state_context("beginning materialized-state schema initialization")?;
+        create_schema(&tx)?;
+        ensure_desired_path_index(&tx)?;
+        tx.pragma_update(None, "user_version", SCHEMA_VERSION)
             .state_context("stamping materialized-state schema version")?;
+        tx.commit()
+            .state_context("committing materialized-state schema initialization")?;
     } else if version != SCHEMA_VERSION {
         return Err(StateStoreError::UnsupportedSchemaVersion {
             path: db_path.to_path_buf(),
             found: version,
             expected: SCHEMA_VERSION,
         });
+    } else {
+        ensure_desired_path_index(conn)?;
     }
+    Ok(())
+}
+
+fn ensure_desired_path_index(conn: &Connection) -> Result<()> {
     // An additive query accelerator, not a change to persisted row semantics.
     // Existing version-1 stores build it once; subsequent opens reuse it.
     conn.execute_batch(
@@ -226,6 +240,83 @@ pub(super) fn check_schema_version(conn: &Connection, db_path: &Path) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_schema_initialization_rolls_back_and_can_retry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state.sqlite3");
+        let conn = Connection::open(&path).unwrap();
+        configure(&conn).unwrap();
+        // Force a failure at the final index, after the other schema objects
+        // and initial metadata row have been created.
+        conn.execute_batch("CREATE TABLE state_desired_path (sentinel TEXT);")
+            .unwrap();
+
+        assert!(check_schema_version(&conn, &path).is_err());
+        assert!(conn.is_autocommit());
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 0);
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(tables, ["state_desired_path"]);
+
+        conn.execute_batch("DROP TABLE state_desired_path;")
+            .unwrap();
+        check_schema_version(&conn, &path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM reconciliation_meta", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+        let synchronous: i64 = conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(synchronous, 2);
+    }
+
+    #[test]
+    fn existing_schema_adds_missing_index_without_reinitializing_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state.sqlite3");
+        let conn = Connection::open(&path).unwrap();
+        configure(&conn).unwrap();
+        check_schema_version(&conn, &path).unwrap();
+        conn.execute_batch(
+            "DROP INDEX state_desired_path;
+             INSERT INTO state(path, materialized_oid) VALUES('kept.bin', zeroblob(32));",
+        )
+        .unwrap();
+
+        check_schema_version(&conn, &path).unwrap();
+        let paths: Vec<String> = conn
+            .prepare("SELECT path FROM state")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(paths, ["kept.bin"]);
+        assert!(
+            conn.prepare(
+                "SELECT 1 FROM sqlite_schema WHERE type = 'index' AND name = 'state_desired_path'"
+            )
+            .unwrap()
+            .exists([])
+            .unwrap()
+        );
+    }
 
     fn database() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
