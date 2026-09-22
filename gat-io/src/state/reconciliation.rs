@@ -487,6 +487,18 @@ impl StateStore {
         crate::lock::validate_no_path_directory_conflicts(&same_refresh_paths)
             .map_err(crate::lock::LockError::from)?;
 
+        let has_existing_desired: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM state WHERE desired_shard_id IS NOT NULL)",
+                [],
+                |row| row.get(0),
+            )
+            .state_context("checking existing desired rows")?;
+        if !has_existing_desired {
+            return Ok(());
+        }
+
         let mut exclude: std::collections::HashSet<LockShardId> =
             changed_or_new.iter().map(|shard| shard.shard_id).collect();
         exclude.extend(removed_ids.iter().map(|removed| removed.shard_id));

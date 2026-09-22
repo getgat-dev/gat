@@ -356,21 +356,29 @@ fn add_infrastructure_is_unconditional_but_nested_basenames_are_allowed() {
 #[cfg(feature = "test-support")]
 #[test]
 fn tiny_windows_bound_explicit_and_directory_preparation() {
-    for explicit in [false, true] {
+    for selection in ["files", "directory", "directories", "globs"] {
         let tmp = test_support_git::empty_git_repo();
         std::fs::create_dir(tmp.path().join("data")).unwrap();
         let paths: Vec<_> = (0..13)
             .map(|index| {
-                let path = format!("data/{index:02}.bin");
+                let directory = format!("data/{index:02}");
+                std::fs::create_dir(tmp.path().join(&directory)).unwrap();
+                let path = format!("{directory}/file.bin");
                 std::fs::write(tmp.path().join(&path), path.as_bytes()).unwrap();
                 normalize_path_scope(path).unwrap()
             })
             .collect();
         let request = AddRequest {
-            paths: if explicit {
-                paths
-            } else {
-                vec![normalize_path_scope("data").unwrap()]
+            paths: match selection {
+                "files" => paths,
+                "directory" => vec![normalize_path_scope("data").unwrap()],
+                "directories" => (0..13)
+                    .map(|index| normalize_path_scope(format!("data/{index:02}")).unwrap())
+                    .collect(),
+                "globs" => (0..13)
+                    .map(|index| normalize_path_scope(format!("data/{index:02}/*.bin")).unwrap())
+                    .collect(),
+                _ => unreachable!(),
             },
             force: false,
         };
@@ -571,5 +579,68 @@ fn tracked_descendants_do_not_hide_an_unsearched_ignored_scope() {
         assert_eq!(ignored.files, 0);
         assert_eq!(ignored.directories, 1);
         assert_eq!(ignored.samples, vec![GatPath::normalize("data").unwrap()]);
+    }
+}
+
+#[test]
+fn remove_mixed_selectors_preserves_argument_order_and_unselected_files() {
+    for cached in [false, true] {
+        let (tmp, repo) = repository();
+        std::fs::create_dir(tmp.path().join("branch")).unwrap();
+        let paths = [
+            "single",
+            "branch/a",
+            "branch/b",
+            "branch/c",
+            "match.log",
+            "keep",
+        ];
+        for path in paths {
+            std::fs::write(tmp.path().join(path), path.as_bytes()).unwrap();
+        }
+        gat_command::add(
+            &repo,
+            AddRequest {
+                paths: paths
+                    .iter()
+                    .map(|path| normalize_path_scope(path).unwrap())
+                    .collect(),
+                force: false,
+            },
+            &NoopProgress,
+        )
+        .unwrap();
+        let removed = gat_command::remove(
+            &repo,
+            RemoveRequest {
+                paths: ["single", "branch/a", "branch", "*.log", "single", "absent"]
+                    .iter()
+                    .map(|path| normalize_path_scope(path).unwrap())
+                    .collect(),
+                cached,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            removed
+                .paths
+                .iter()
+                .map(GatPath::as_str)
+                .collect::<Vec<_>>(),
+            ["single", "branch/a", "branch/b", "branch/c", "match.log"]
+        );
+        for path in &paths[..5] {
+            assert_eq!(tmp.path().join(path).exists(), cached);
+        }
+        assert_eq!(std::fs::read(tmp.path().join("keep")).unwrap(), b"keep");
+        let remaining = gat_command::remove(
+            &repo,
+            RemoveRequest {
+                paths: vec![normalize_path_scope(".").unwrap()],
+                cached: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(remaining.paths, vec![GatPath::normalize("keep").unwrap()]);
     }
 }

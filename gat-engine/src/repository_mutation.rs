@@ -490,25 +490,15 @@ impl<'repo, 'config> DesiredMutation<'repo, 'config> {
             })
     }
 
-    pub fn resolve_move(
+    pub fn prepare_move(
         &mut self,
         src: &GatPath,
         dst: &GatPath,
-    ) -> Result<(Vec<Entry>, Vec<Entry>), RepositoryMutationError> {
+    ) -> Result<Option<PreparedMove<'_, 'repo>>, RepositoryMutationError> {
         self.session
-            .resolve_move(src, dst)
+            .prepare_move(src, dst)
+            .map(|plan| plan.map(|plan| PreparedMove { plan }))
             .map_err(RepositoryMutationError::read)
-    }
-
-    pub fn publish_move(
-        &mut self,
-        src: &GatPath,
-        dst: &GatPath,
-        collision_paths: &[GatPath],
-    ) -> Result<(), RepositoryMutationError> {
-        self.session
-            .publish_move(src, dst, collision_paths)
-            .map_err(RepositoryMutationError::publish)
     }
 
     pub fn resolve_removals(
@@ -527,12 +517,11 @@ impl<'repo, 'config> DesiredMutation<'repo, 'config> {
 
     pub fn publish_removals(
         &mut self,
-        affected_paths: &[GatPath],
+        exact_paths: &[GatPath],
         prefixes: &[GatPath],
-        include_exact: bool,
     ) -> Result<(), RepositoryMutationError> {
         self.session
-            .publish_removals(affected_paths, prefixes, include_exact)
+            .publish_removals(exact_paths, prefixes)
             .map_err(RepositoryMutationError::publish)
     }
 
@@ -575,4 +564,24 @@ pub fn record_materialized_for_test(
             source: Box::new(publication_failure(source)),
         }
     })
+}
+
+/// A repository-locked move, consumed when its prepared state is published.
+pub struct PreparedMove<'session, 'repo> {
+    plan: gat_io::PreparedRepositoryMove<'session, 'repo>,
+}
+
+impl PreparedMove<'_, '_> {
+    pub fn source_paths(&self) -> impl Iterator<Item = &GatPath> {
+        self.plan.source_paths()
+    }
+    #[must_use]
+    pub fn collisions(&self) -> &[Entry] {
+        self.plan.collisions()
+    }
+    pub fn publish(self) -> Result<(), RepositoryMutationError> {
+        self.plan
+            .publish()
+            .map_err(RepositoryMutationError::publish)
+    }
 }

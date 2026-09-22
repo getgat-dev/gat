@@ -4,7 +4,7 @@ use crate::cache::{self, CacheError};
 use crate::file_state::{
     IdentityCheck, StatProof, check_known_oid, observe_regular_file_no_follow,
 };
-use gat_core::config::MaterializationStrategy;
+use gat_core::config::{MaterializationMode, MaterializationStrategy};
 use gat_core::lexical_path::GatPath;
 use gat_core::lock::Entry;
 use gat_core::oid::Oid;
@@ -778,7 +778,7 @@ pub(crate) fn check_regular_file(
 pub(crate) struct WorktreeIngested {
     pub(crate) ingested: cache::Ingested,
     pub(crate) proof: StatProof,
-    pub(crate) receipt: Option<cache::CachePublication>,
+    pub(crate) receipt: cache::CachePublication,
 }
 
 pub(crate) fn ingest_file(
@@ -846,22 +846,44 @@ fn materialize(
         path: path.to_string(),
         source,
     })?;
-    let staging = tempfile::Builder::new()
-        .prefix(".gat-materialize-")
-        .tempdir_in(parent)
-        .map_err(|source| WorktreeMutationError::Io {
-            operation: "preparing materialization for",
-            path: path.to_string(),
-            source,
-        })?;
-    let staged = staging.path().join("object");
-    let object = cache::object::cache_path_oid(objects_dir, oid);
-    cache::object::materialize(&object, &staged, strategy)?;
-    std::fs::rename(&staged, &dest).map_err(|source| WorktreeMutationError::Io {
-        operation: "publishing",
+    let preparation_error = |source| WorktreeMutationError::Io {
+        operation: "preparing materialization for",
         path: path.to_string(),
         source,
-    })?;
+    };
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".gat-materialize-");
+    // Copy can fill a reserved file. Link strategies need an absent path, so
+    // reserve their namespace with a private directory instead.
+    let staging = if strategy.modes() == [MaterializationMode::Copy] {
+        None
+    } else {
+        Some(builder.tempdir_in(parent).map_err(preparation_error)?)
+    };
+    let staged = match &staging {
+        Some(directory) => tempfile::TempPath::try_from_path(directory.path().join("object"))
+            .map_err(preparation_error)?,
+        None => builder
+            .tempfile_in(parent)
+            .map_err(preparation_error)?
+            .into_temp_path(),
+    };
+    let object = cache::object::cache_path_oid(objects_dir, oid);
+    cache::object::materialize(&object, &staged, strategy)?;
+    staged
+        .persist(&dest)
+        .map_err(|error| WorktreeMutationError::Io {
+            operation: "publishing",
+            path: path.to_string(),
+            source: error.error,
+        })?;
+    // Publication leaves the private directory empty. Remove it directly rather
+    // than recursively inspecting it; retain TempDir's cleanup if that fails.
+    if let Some(staging) = staging
+        && std::fs::remove_dir(staging.path()).is_ok()
+    {
+        let _ = staging.keep();
+    }
     Ok(observe_regular_file_no_follow(&dest))
 }
 
@@ -1122,7 +1144,13 @@ mod tests {
 
     #[test]
     fn materialization_preserves_user_backup_names_on_success_and_failure() {
-        for strategy in ["copy", "hardlink"] {
+        for modes in [
+            vec![MaterializationMode::Copy],
+            vec![MaterializationMode::Hardlink],
+            vec![MaterializationMode::Reflink, MaterializationMode::Copy],
+            vec![MaterializationMode::Copy, MaterializationMode::Hardlink],
+        ] {
+            let strategy = MaterializationStrategy::try_from(modes).unwrap();
             for available in [false, true] {
                 let root = tempfile::tempdir().unwrap();
                 let cache = tempfile::tempdir().unwrap();
@@ -1140,7 +1168,7 @@ mod tests {
                     cache.path(),
                     &path("file.bin"),
                     &oid,
-                    &strategy.parse().unwrap(),
+                    &strategy,
                 );
                 if available {
                     assert!(result.unwrap().is_some());

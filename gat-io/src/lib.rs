@@ -532,10 +532,10 @@ pub use state::{
     DesiredMutationSession, DesiredPathExclusions, DesiredPublicationError, DesiredQuery,
     DesiredRefresh, DesiredRefreshError, DesiredRemoval, DesiredRow, DesiredStateOpenError,
     DesiredStateSession, DirtyRow, MaterializationPreparationError, MaterializedRow,
-    MountMutationSession, MountReplayResult, PreparedMaterialization, StateDatabaseHealth,
-    StateDatabaseUnreadable, StateMaintenanceError, StateMutation, StateSqlError,
-    StateSqlErrorKind, StateStore, StateStoreError, count_stale_sidecars, inspect_database,
-    rebuild_atomically, remove_stale_sidecars,
+    MountMutationSession, MountReplayResult, PreparedMaterialization, PreparedRepositoryMove,
+    StateDatabaseHealth, StateDatabaseUnreadable, StateMaintenanceError, StateMutation,
+    StateSqlError, StateSqlErrorKind, StateStore, StateStoreError, count_stale_sidecars,
+    inspect_database, rebuild_atomically, remove_stale_sidecars,
 };
 pub use worktree::{
     DestinationKind as WorktreeDestinationKind, EntryKind as WorktreeEntryKind, MovePathError,

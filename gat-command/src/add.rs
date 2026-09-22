@@ -152,6 +152,7 @@ fn add_with_limits(
                 materialization: desired.materialization_session(),
                 seen: HashSet::new(),
                 directories: Vec::new(),
+                pending: Vec::new(),
                 exclusions: &mut exclusions,
                 discovering: None,
                 hashing: None,
@@ -159,12 +160,11 @@ fn add_with_limits(
             let mut added = Vec::new();
             let mut rows = Vec::new();
             let mut added_count = 0;
-            let mut pending_unique_files = Vec::new();
             let flush = flush_pending_files;
 
             // Opening the Git index/ignore lookup can itself be expensive.
             context.discovery_activity(ProgressActivity::ClassifyingSelectors);
-            desired.with_git_path_status_lookup(|lookup| -> Result<()> {
+            let selection = desired.with_git_path_status_lookup(|lookup| -> Result<()> {
                 let mut selectors = HashSet::new();
                 for scope in &request.paths {
                     if !selectors.insert(match scope {
@@ -174,7 +174,6 @@ fn add_with_limits(
                         continue;
                     }
                     if matches!(scope, PathScope::Root) {
-                        flush(&mut context, &mut pending_unique_files, &mut added)?;
                         let count =
                             add_dir(&mut context, &policy, None, &mut added, request.force)?;
                         added_count += count;
@@ -187,17 +186,10 @@ fn add_with_limits(
                     let PathScope::Path(path) = scope else {
                         unreachable!()
                     };
-                    flush_before_error(
-                        reject_infrastructure_path(path).map_err(AddError::from),
-                        || flush(&mut context, &mut pending_unique_files, &mut added),
-                    )?;
-                    let kind = flush_before_error(
-                        inspect_read_path(repo, path).map_err(AddError::from),
-                        || flush(&mut context, &mut pending_unique_files, &mut added),
-                    )?;
+                    reject_infrastructure_path(path)?;
+                    let kind = inspect_read_path(repo, path)?;
                     match kind {
                         EntryKind::Symlink => {
-                            flush(&mut context, &mut pending_unique_files, &mut added)?;
                             return Err(AddError::Path(
                                 WorktreePathError::UnsupportedLeafSymlink {
                                     path: path.to_string(),
@@ -205,7 +197,6 @@ fn add_with_limits(
                             ));
                         }
                         EntryKind::Directory => {
-                            flush(&mut context, &mut pending_unique_files, &mut added)?;
                             let count = add_dir(
                                 &mut context,
                                 &policy,
@@ -220,46 +211,38 @@ fn add_with_limits(
                             });
                         }
                         EntryKind::File => {
-                            flush_before_error(
-                                assert_addable(&context, &policy, path, request.force),
-                                || flush(&mut context, &mut pending_unique_files, &mut added),
-                            )?;
-                            let status = flush_before_error(lookup(path.as_str()), || {
-                                flush(&mut context, &mut pending_unique_files, &mut added)
-                            })?;
+                            assert_addable(&context, &policy, path, request.force)?;
+                            let status = lookup(path.as_str())?;
                             if status.tracked {
-                                flush(&mut context, &mut pending_unique_files, &mut added)?;
                                 return Err(AddError::AlreadyGitTracked { path: path.clone() });
                             }
                             if !request.force
                                 && status.gitignored
                                 && !desired.desired_any_exact(path).map_err(Box::new)?
                             {
-                                flush(&mut context, &mut pending_unique_files, &mut added)?;
                                 return Err(AddError::IgnoredByGit { path: path.clone() });
                             }
                             if context.seen.insert(path.clone()) {
-                                pending_unique_files.push(path.clone());
+                                context.pending.push(AddCandidate {
+                                    path: path.clone(),
+                                    desired_oid: None,
+                                });
                                 rows.push(AddedRow {
                                     path: PathScope::Path(path.clone()),
                                     file_count: None,
                                 });
                                 added_count += 1;
-                                if pending_unique_files.len() == context.limits.candidates {
-                                    flush(&mut context, &mut pending_unique_files, &mut added)?;
+                                if context.pending.len() == context.limits.candidates {
+                                    flush(&mut context, &mut added)?;
                                 }
                             }
                         }
                         EntryKind::Other => {
-                            flush(&mut context, &mut pending_unique_files, &mut added)?;
                             return Err(AddError::UnsupportedFileType { path: path.clone() });
                         }
                         EntryKind::Missing => {
-                            flush(&mut context, &mut pending_unique_files, &mut added)?;
-                            let matched = flush_before_error(
-                                add_glob(&mut context, &policy, path, &mut added, request.force),
-                                || flush(&mut context, &mut pending_unique_files, &mut added),
-                            )?;
+                            let matched =
+                                add_glob(&mut context, &policy, path, &mut added, request.force)?;
                             added_count += matched.len();
                             rows.extend(matched.into_iter().map(|path| AddedRow {
                                 path: PathScope::Path(path),
@@ -268,8 +251,11 @@ fn add_with_limits(
                         }
                     }
                 }
-                flush(&mut context, &mut pending_unique_files, &mut added)
-            })?;
+                Ok(())
+            });
+            // Earlier candidates must finish before reporting a later selector error.
+            flush(&mut context, &mut added)?;
+            selection?;
             context.exclusions.sort_unstable_by_key(|item| item.reason);
             (added, rows, added_count)
         };
@@ -312,6 +298,7 @@ struct AddContext<'a, 'repo, 'config, 'materialization> {
     limits: &'a AddLimits,
     seen: HashSet<GatPath>,
     directories: Vec<Option<GatPath>>,
+    pending: Vec<AddCandidate>,
     progress: &'a dyn ProgressReporter,
     discovering: Option<ProgressTask>,
     hashing: Option<HashingProgress>,
@@ -335,33 +322,16 @@ impl AddContext<'_, '_, '_, '_> {
     }
 }
 
-fn flush_before_error<T>(result: Result<T>, flush: impl FnOnce() -> Result<()>) -> Result<T> {
-    match result {
-        Ok(value) => Ok(value),
-        Err(error) => {
-            flush()?;
-            Err(error)
-        }
-    }
-}
-
 fn flush_pending_files(
     context: &mut AddContext<'_, '_, '_, '_>,
-    pending: &mut Vec<GatPath>,
     added: &mut AddedEntries,
 ) -> Result<()> {
-    if pending.is_empty() {
+    if context.pending.is_empty() {
         return Ok(());
     }
-    context.limits.observe(pending.len());
+    context.limits.observe(context.pending.len());
     context.discovery_activity(ProgressActivity::CheckingReuseStatus);
-    let candidates = pending
-        .drain(..)
-        .map(|path| AddCandidate {
-            path,
-            desired_oid: None,
-        })
-        .collect();
+    let candidates = std::mem::take(&mut context.pending);
     let (reused, to_hash) = context.materialization.partition_reusable(candidates)?;
     added.extend(reused);
     added.extend(ingest_files(context, &to_hash)?);
@@ -492,25 +462,18 @@ fn process_candidates(
     }
     let mut paths = Vec::new();
     let mut count = 0;
-    let mut candidates = candidates.into_iter();
-    loop {
-        let window: Vec<_> = candidates
-            .by_ref()
-            .filter(|candidate| context.seen.insert(candidate.path.clone()))
-            .take(context.limits.candidates)
-            .collect();
-        if window.is_empty() {
-            break;
+    for candidate in candidates {
+        if !context.seen.insert(candidate.path.clone()) {
+            continue;
         }
-        context.limits.observe(window.len());
-        count += window.len();
+        count += 1;
         if retain_paths {
-            paths.extend(window.iter().map(|candidate| candidate.path.clone()));
+            paths.push(candidate.path.clone());
         }
-        context.discovery_activity(ProgressActivity::CheckingReuseStatus);
-        let (reused, to_hash) = context.materialization.partition_reusable(window)?;
-        added.extend(reused);
-        added.extend(ingest_files(context, &to_hash)?);
+        context.pending.push(candidate);
+        if context.pending.len() == context.limits.candidates {
+            flush_pending_files(context, added)?;
+        }
     }
     Ok((count, paths))
 }

@@ -39,7 +39,7 @@ fn resident_validation_matches_pairwise_tree_invariants_in_any_order() {
 }
 
 #[test]
-fn indexed_directory_validation_matches_pairwise_conflicts() {
+fn ordered_directory_validation_matches_pairwise_conflicts() {
     use gat_core::lock::{
         LockDomainError, LockError, validated::validate_no_path_directory_conflicts,
     };
@@ -70,9 +70,15 @@ fn indexed_directory_validation_matches_pairwise_conflicts() {
                     ancestor,
                     descendant,
                 })),
-                Some(expected),
+                Some(_),
             ) => {
-                assert_eq!((ancestor.as_str(), descendant.as_str()), expected);
+                assert!(paths.contains(ancestor.as_str()));
+                assert!(paths.contains(descendant.as_str()));
+                assert!(
+                    descendant
+                        .strip_prefix(&ancestor)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+                );
             }
             (actual, expected) => {
                 panic!("mismatched validation for {paths:?}: {actual:?}, {expected:?}")

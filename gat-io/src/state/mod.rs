@@ -124,7 +124,7 @@ pub use self::repository::{
     AddCandidateDiscoveryError, DesiredCandidateScope, DesiredMutationOpenError,
     DesiredMutationSession, DesiredPublicationError, DesiredStateOpenError, DesiredStateSession,
     MaterializationPreparationError, MountMutationSession, MountReplayResult,
-    PreparedMaterialization,
+    PreparedMaterialization, PreparedRepositoryMove,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use self::repository::{load_materialized_for_test, record_materialized_for_test};
@@ -182,7 +182,7 @@ pub fn record_materialized_unlocked_for_test(
 }
 
 /// Reuse fixed statements for exact-path cleanup of either state half.
-/// Delete rows without an opposite half before clearing the requested half.
+/// Delete rows without an opposite half; otherwise clear the requested half.
 fn clear_exact_paths_tx<'path>(
     tx: &rusqlite::Transaction<'_>,
     paths: impl IntoIterator<Item = &'path GatPath>,
@@ -196,12 +196,14 @@ fn clear_exact_paths_tx<'path>(
         .prepare(clear_sql)
         .state_context("preparing state-half cleanup")?;
     for path in paths {
-        prune
+        let removed = prune
             .execute([path.as_str()])
             .state_context("pruning emptied state row")?;
-        clear
-            .execute([path.as_str()])
-            .state_context("clearing state half")?;
+        if removed == 0 {
+            clear
+                .execute([path.as_str()])
+                .state_context("clearing state half")?;
+        }
     }
     Ok(())
 }

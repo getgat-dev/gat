@@ -149,7 +149,10 @@ pub const TEMP_PREFIX: &str = "tmp-";
 /// classification.
 pub type Result<T> = std::result::Result<T, CacheError>;
 
+// Exclusive creation handles concurrent ingests; dropping an unpublished file
+// cleans it up on ordinary error returns. A process crash can leave staging behind.
 fn create_tmp_file(objects_dir: &Path) -> Result<NamedTempFile> {
+    ensure_cache_directory(objects_dir)?;
     tempfile::Builder::new()
         .prefix(TEMP_PREFIX)
         .tempfile_in(objects_dir)
@@ -164,6 +167,9 @@ fn create_tmp_file(objects_dir: &Path) -> Result<NamedTempFile> {
 /// [`std::io::Error`] -- shared by every `ingest*_to_tmp`/`publish_tmp`
 /// call site that must prepare a cache directory before writing into it.
 fn ensure_cache_directory(dir: &Path) -> Result<()> {
+    if dir.is_dir() {
+        return Ok(());
+    }
     std::fs::create_dir_all(dir).map_err(|source| CacheError::DirectoryUnavailable {
         path: dir.to_path_buf(),
         source,
@@ -450,7 +456,6 @@ impl CacheWriter {
     /// Starts an unpublished object. Dropping the handle discards its temporary file.
     pub fn begin_ingest(&self) -> Result<CacheIngest> {
         self.root.prepare_write()?;
-        ensure_cache_directory(&self.root.objects_dir)?;
         Ok(CacheIngest {
             root: Arc::clone(&self.root),
             tmp: create_tmp_file(&self.root.objects_dir)?,
@@ -463,10 +468,7 @@ impl CacheWriter {
         Self { root }
     }
 
-    pub fn ingest<R: std::io::Read>(
-        &self,
-        reader: R,
-    ) -> Result<(Ingested, Option<CachePublication>)> {
+    pub fn ingest<R: std::io::Read>(&self, reader: R) -> Result<(Ingested, CachePublication)> {
         self.root.prepare_write()?;
         ingest_delta(&self.root.objects_dir, reader)
     }
@@ -482,7 +484,7 @@ impl CacheWriter {
         &self,
         reader: R,
         size: u64,
-    ) -> Result<(Ingested, Option<CachePublication>)> {
+    ) -> Result<(Ingested, CachePublication)> {
         self.root.prepare_write()?;
         ingest_sized_delta(&self.root.objects_dir, reader, size)
     }
@@ -1182,12 +1184,8 @@ pub struct Ingested {
 /// repair attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExpectedIngest {
-    Published {
-        publication: Option<CachePublication>,
-    },
-    HashMismatch {
-        actual: Oid,
-    },
+    Published { publication: CachePublication },
+    HashMismatch { actual: Oid },
 }
 
 /// Stream `reader` into the local cache, hashing as it goes. Dedups by
@@ -1215,7 +1213,7 @@ pub fn ingest<R: std::io::Read>(objects_dir: &Path, reader: R) -> Result<Ingeste
 pub fn ingest_delta<R: std::io::Read>(
     objects_dir: &Path,
     reader: R,
-) -> Result<(Ingested, Option<CachePublication>)> {
+) -> Result<(Ingested, CachePublication)> {
     let (tmp, oid, size) = ingest_to_tmp(objects_dir, reader, None)?;
     publish_tmp(objects_dir, tmp, oid, size)
 }
@@ -1228,7 +1226,7 @@ pub fn ingest_sized_delta<R: std::io::Read>(
     objects_dir: &Path,
     reader: R,
     size_hint: u64,
-) -> Result<(Ingested, Option<CachePublication>)> {
+) -> Result<(Ingested, CachePublication)> {
     let (tmp, oid, size) = ingest_to_tmp(objects_dir, reader, Some(size_hint))?;
     publish_tmp(objects_dir, tmp, oid, size)
 }
@@ -1265,13 +1263,6 @@ fn ingest_to_tmp<R: std::io::Read>(
     mut reader: R,
     size_hint: Option<u64>,
 ) -> Result<(NamedTempFile, Oid, u64)> {
-    ensure_cache_directory(objects_dir)?;
-    // `NamedTempFile` opens with `O_EXCL`-equivalent exclusive creation and
-    // retries on name collision, so concurrent ingests can never clobber
-    // each other's temp file; its `Drop` also removes the file on any early
-    // return (error, panic, or simply falling out of scope without an
-    // explicit `persist`), so a crash or `?`-propagated failure never
-    // leaves an orphaned temp file behind.
     let mut tmp = create_tmp_file(objects_dir)?;
     let tmp_path = tmp.path().to_path_buf();
     let entry_unwritable = |source: std::io::Error| CacheError::EntryUnwritable {
@@ -1326,7 +1317,7 @@ pub fn ingest_file_delta(
     objects_dir: &Path,
     path: &Path,
     strategy: IngestStrategy,
-) -> Result<(Ingested, Option<CachePublication>)> {
+) -> Result<(Ingested, CachePublication)> {
     let (tmp, oid, size) = ingest_file_to_tmp(objects_dir, path, strategy)?;
     publish_tmp(objects_dir, tmp, oid, size)
 }
@@ -1364,7 +1355,6 @@ fn ingest_file_to_tmp(
 /// source modification -- see their own doc comments.
 ///
 fn ingest_file_safe_to_tmp(objects_dir: &Path, path: &Path) -> Result<(NamedTempFile, Oid, u64)> {
-    ensure_cache_directory(objects_dir)?;
     let mut tmp = create_tmp_file(objects_dir)?;
     let tmp_path = tmp.path().to_path_buf();
     std::fs::copy(path, &tmp_path).map_err(|source| CacheError::PathUnreadable {
@@ -1405,7 +1395,6 @@ fn ingest_file_safe_to_tmp(objects_dir: &Path, path: &Path) -> Result<(NamedTemp
 /// the file" case cheaply, but choosing `Hybrid` over `Safe` is an
 /// explicit trade of that narrow correctness gap for speed.
 fn ingest_file_hybrid_to_tmp(objects_dir: &Path, path: &Path) -> Result<(NamedTempFile, Oid, u64)> {
-    ensure_cache_directory(objects_dir)?;
     let mut tmp = create_tmp_file(objects_dir)?;
     let tmp_path = tmp.path().to_path_buf();
     let before = source_fingerprint(path);
@@ -1470,7 +1459,6 @@ pub fn source_fingerprint(path: &Path) -> Option<(u64, std::time::SystemTime)> {
 /// avoided. Choose `Safe` instead when source-file stability cannot be
 /// guaranteed.
 fn ingest_file_mmap_to_tmp(objects_dir: &Path, path: &Path) -> Result<(NamedTempFile, Oid, u64)> {
-    ensure_cache_directory(objects_dir)?;
     let mut tmp = create_tmp_file(objects_dir)?;
     let tmp_path = tmp.path().to_path_buf();
     let src = std::fs::File::open(path).map_err(|source| CacheError::PathUnreadable {
@@ -1607,18 +1595,15 @@ pub fn finalize_tmp_in(
     }
 
     let (ingested, delta) = publish_tmp(objects_dir, tmp, oid, size)?;
-    if let Some(delta) = delta {
-        // Best-effort: a failure here never turns into a failure to
-        // access these now-verified/published bytes.
-        let _ = session.apply_many(std::slice::from_ref(&delta));
-    }
+    // A proof-index failure only costs a later verification an extra hash.
+    let _ = session.apply_many(std::slice::from_ref(&delta));
     Ok(ingested)
 }
 
 /// The DB-free core of publication: atomically publish a fully-written,
 /// flushed temp file into its content-addressed home and return the
-/// [`CachePublication`] the operation thread should later persist for it, if
-/// any -- performing no `SQLite` I/O itself.
+/// [`CachePublication`] the operation thread should later persist for it,
+/// performing no `SQLite` I/O itself.
 ///
 /// `tmp` was already hashed to `oid` by the caller as part of producing
 /// it, and this path does not read any prior proof (a parallel worker
@@ -1647,7 +1632,7 @@ pub fn publish_tmp(
     tmp: NamedTempFile,
     oid: Oid,
     size: u64,
-) -> Result<(Ingested, Option<CachePublication>)> {
+) -> Result<(Ingested, CachePublication)> {
     let dest = cache_path_oid(objects_dir, &oid);
 
     ensure_cache_directory(dest.parent().unwrap())?;
@@ -1656,15 +1641,13 @@ pub fn publish_tmp(
     let published = crate::atomic::persist_finalized_with_proof(tmp, &dest)?;
     protect(&dest)?;
 
-    // Any stale proof for this oid is invalid once the bytes are
-    // replaced the bytes, so the delta either replaces it with a fresh
-    // proof describing exactly the bytes just published, or clears it
-    // outright if a proof cannot be observed. The proof was
+    // Replace any stale proof with one describing exactly the published bytes.
+    // The proof was
     // already minted from the temp file itself, before the rename
     // (`persist_finalized_with_proof`), so `protect`'s mode-only change afterward
     // cannot invalidate it -- no destination stat or content re-read is
     // needed to establish it.
-    let delta = Some(CachePublication::upsert(oid, published.proof));
+    let delta = CachePublication::upsert(oid, published.proof);
 
     Ok((Ingested { oid, size }, delta))
 }
@@ -2180,10 +2163,19 @@ mod tests {
             crate::cache::proof::test_support::snapshot().cache_db_opens,
             before
         );
-        assert_eq!(
-            format!("{:?}", publication.expect("new object has a proof receipt")),
-            "CachePublication(..)"
-        );
+        assert_eq!(format!("{publication:?}"), "CachePublication(..)");
+    }
+
+    #[test]
+    fn temporary_creation_recovers_when_cache_directories_are_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let objects = tmp.path().join("cache/objects");
+        for _ in 0..2 {
+            let file = create_tmp_file(&objects).unwrap();
+            assert!(file.path().is_file());
+            file.close().unwrap();
+            std::fs::remove_dir_all(tmp.path().join("cache")).unwrap();
+        }
     }
 
     #[test]
@@ -2223,9 +2215,8 @@ mod tests {
 
     #[test]
     fn ingested_objects_never_land_at_the_old_root_level_fan_out_path() {
-        // Before the blake3/ namespace, a finalized object lived directly
-        // at `<objects_dir>/xx/yy/oid`. That bare path must never be used
-        // any more -- only `<objects_dir>/blake3/xx/yy/oid`.
+        // Removing the hash namespace must never identify another path
+        // written by ingestion.
         let tmp = tempfile::tempdir().unwrap();
         let objects_dir = tmp.path().join("objects");
         let pointer = ingest(&objects_dir, Cursor::new(b"hello world")).unwrap();
@@ -2401,10 +2392,7 @@ mod tests {
         let expected_oid = Oid::from_bytes(*(blake3::hash(content)).as_bytes());
         assert_eq!(ingested.oid, expected_oid);
         assert_eq!(ingested.size, content.len() as u64);
-        assert!(
-            publication.is_some(),
-            "a freshly ingested object must have a proof receipt to publish"
-        );
+        assert_eq!(publication.oid(), expected_oid);
         let stored = std::fs::read(cache_path_oid(&objects_dir, &ingested.oid)).unwrap();
         assert_eq!(stored, content);
     }
@@ -3481,6 +3469,55 @@ mod tests {
 
             assert_eq!(window_calls, 2, "expected one callback per bounded window");
             assert_eq!(seen, count);
+        }
+
+        #[test]
+        fn unmemoized_verification_observes_cache_created_by_prior_window() {
+            let tmp = tempfile::tempdir().unwrap();
+            let objects = tmp.path().join("objects");
+            let cache = CacheClient::open(objects.clone());
+            let _window = crate::cache::object::test_support::with_verify_window(2);
+            let bytes = b"created between verification windows";
+            let oid = Oid::from_bytes(*blake3::hash(bytes).as_bytes());
+            let oids = [Oid::from_bytes([1; 32]), Oid::from_bytes([2; 32]), oid];
+            let mut calls = 0;
+            cache
+                .verify_windows_unmemoized(&oids, |_, statuses| -> Result<()> {
+                    if calls == 0 {
+                        assert_eq!(statuses, [ObjectVerification::Missing; 2]);
+                        assert!(!objects.exists());
+                        assert_eq!(write_object(&objects, bytes), oid);
+                    } else {
+                        assert_eq!(statuses, [ObjectVerification::Valid]);
+                    }
+                    calls += 1;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(calls, 2);
+        }
+
+        #[test]
+        fn unmemoized_namespace_type_failure_matches_single_object_verification() {
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::write(object_namespace_dir(tmp.path()), b"not a directory").unwrap();
+            let cache = CacheClient::open(tmp.path().to_path_buf());
+            let oid = Oid::from_bytes([1; 32]);
+            let expected = cache.verify(&oid);
+            let mut observed = Vec::new();
+            let result = cache.verify_windows_unmemoized(&[oid], |_, statuses| -> Result<()> {
+                observed.extend_from_slice(statuses);
+                Ok(())
+            });
+            // Platforms differ in how traversal through a non-directory is
+            // classified. The batch verifier must preserve the native result.
+            if let Ok(status) = expected {
+                result.unwrap();
+                assert_eq!(observed, [status]);
+            } else {
+                assert!(result.is_err());
+                assert!(observed.is_empty());
+            }
         }
 
         #[test]

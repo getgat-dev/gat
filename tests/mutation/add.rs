@@ -378,42 +378,47 @@ mod tests {
     /// pattern syntax, an `Err` from `GatGlobPattern::parse` itself rather
     /// than merely zero matches) must not leave the glob's
     /// `DiscoveringFiles` task overlapping the pending-file flush's own
-    /// `DiscoveringFiles`/`Hashing` task -- `discover.finish()` must run
-    /// before `flush_before_error`'s error-path flush ever begins a
-    /// second task.
+    /// `DiscoveringFiles`/`Hashing` task. Flushing earlier candidates on
+    /// the error path must finish discovery before beginning hashing.
     #[test]
     fn add_pending_file_then_failing_glob_never_overlaps_progress_tasks() {
-        let tmp = test_repo();
-        let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
-            .unwrap()
-            .repository_at(tmp.path().to_path_buf());
-        std::fs::write(tmp.path().join("a.bin"), b"payload").unwrap();
-        let progress = RecordingProgress::new();
+        for selector in ["data/a.bin", "data", "data/*.bin"] {
+            let tmp = test_repo();
+            let repo = gat_engine::Invocation::from_pairs([] as [(&str, &str); 0])
+                .unwrap()
+                .repository_at(tmp.path().to_path_buf());
+            std::fs::create_dir(tmp.path().join("data")).unwrap();
+            std::fs::write(tmp.path().join("data/a.bin"), b"payload").unwrap();
+            let progress = RecordingProgress::new();
 
-        let err = add(
-            &repo,
-            &[
-                PathBuf::from("a.bin"),
-                // An unmatched `[` is invalid glob pattern syntax (a
-                // `glob::PatternError`), not merely a pattern with zero
-                // matches -- this exercises `GatGlobPattern::parse`'s `Err`
-                // path itself.
-                PathBuf::from("dir/[unclosed"),
-            ],
-            &progress,
-        )
-        .unwrap_err();
-        assert!(
-            format!("{err:#}").to_lowercase().contains("pattern")
-                || format!("{err:#}").to_lowercase().contains("glob"),
-            "expected a glob-pattern error, got: {err:#}"
-        );
-        assert_eq!(
-            progress.max_active_tasks(),
-            1,
-            "the failing glob's DiscoveringFiles task and the pending file's \
+            let err = add(
+                &repo,
+                &[
+                    PathBuf::from(selector),
+                    // An unmatched `[` is invalid glob pattern syntax (a
+                    // `glob::PatternError`), not merely a pattern with zero
+                    // matches -- this exercises `GatGlobPattern::parse`'s `Err`
+                    // path itself.
+                    PathBuf::from("dir/[unclosed"),
+                ],
+                &progress,
+            )
+            .unwrap_err();
+            assert!(
+                format!("{err:#}").to_lowercase().contains("pattern")
+                    || format!("{err:#}").to_lowercase().contains("glob"),
+                "expected a glob-pattern error, got: {err:#}"
+            );
+            assert_eq!(
+                progress.max_active_tasks(),
+                1,
+                "the failing glob's DiscoveringFiles task and the pending file's \
              own flush-triggered task must never be simultaneously active"
-        );
+            );
+            let hashing = progress.only(gat_core::progress::ProgressOperation::Hashing);
+            assert_eq!(hashing.position, 1);
+            assert!(progress.tasks().iter().all(|task| task.finished));
+        }
     }
 
     #[test]

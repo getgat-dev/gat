@@ -323,9 +323,7 @@ pub fn repair_window(
     for (job, result) in jobs.iter().zip(worker_results) {
         results[job.payload] = Some(match result {
             Ok(publication) => {
-                if let Some(publication) = publication {
-                    publications.push(publication);
-                }
+                publications.push(publication);
                 Ok(())
             }
             Err(source) => Err(worker_error(

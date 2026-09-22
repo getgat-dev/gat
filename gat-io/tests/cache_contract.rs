@@ -182,7 +182,7 @@ fn first_publication_persists_proofs_after_opening_an_absent_cache() {
         );
 
         let (ingested, receipt) = root.writer().ingest(&b"first payload"[..]).unwrap();
-        client.apply_publications(&[receipt.unwrap()]).unwrap();
+        client.apply_publications(&[receipt]).unwrap();
         assert!(root.display_path().join("cache.sqlite3").is_file());
         assert_eq!(
             gat_io::cache_proof_test_support::snapshot().cache_db_opens - before,
@@ -212,7 +212,7 @@ fn deferred_index_open_failure_stays_disabled_for_the_session() {
     let database = root.display_path().join("cache.sqlite3");
     std::fs::write(&database, b"not a database").unwrap();
     let before = gat_io::cache_proof_test_support::snapshot().cache_db_opens;
-    let receipts = [receipt.unwrap()];
+    let receipts = [receipt];
     client.apply_publications(&receipts).unwrap();
     client.apply_publications(&receipts).unwrap();
     assert_eq!(
@@ -242,6 +242,6 @@ fn empty_proof_batches_do_not_initialize_a_deferred_index() {
     assert!(client.commit_verification(completed).unwrap().is_empty());
     assert!(!database.exists());
 
-    client.apply_publications(&[receipt.unwrap()]).unwrap();
+    client.apply_publications(&[receipt]).unwrap();
     assert!(database.exists());
 }

@@ -78,7 +78,7 @@ pub fn remove_with_progress(
         let plan = with_progress_typed(
             progress,
             ProgressSpec::indeterminate(ProgressOperation::ResolvingSelection),
-            |task| -> Result<(Vec<RemoveSelector>, Vec<GatPath>)> {
+            |task| -> Result<RemovalPlan> {
                 task.set_activity(ProgressActivity::ClassifyingSelectors);
                 let mut selectors = Vec::with_capacity(request.paths.len());
                 for scope in request.paths {
@@ -125,35 +125,28 @@ pub fn remove_with_progress(
                     })
                     .map_err(Box::new)?;
                 assert_no_first_owned_match(&policy, first_owned_match)?;
-                let removed = removed_by_arg.into_iter().flatten().collect::<Vec<_>>();
+                let plan = RemovalPlan::new(&selectors, removed_by_arg);
                 if !request.cached {
-                    validate_deletion_paths(repo, &removed)?;
+                    validate_deletion_paths(repo, &plan.paths)?;
                 }
-                Ok((selectors, removed))
+                Ok(plan)
             },
         )?;
 
-        let (selectors, removed) = plan;
+        let RemovalPlan {
+            paths: removed,
+            exact,
+            prefixes,
+        } = plan;
         if removed.is_empty() {
             return Ok(RemoveOutcome { paths: Vec::new() });
         }
-        let prefixes = selectors
-            .iter()
-            .filter_map(|selector| match selector {
-                RemoveSelector::Prefix(path) => Some(path.clone()),
-                RemoveSelector::Root | RemoveSelector::Glob(_) => None,
-            })
-            .collect::<Vec<_>>();
-        let include_exact = selectors
-            .iter()
-            .any(|selector| matches!(selector, RemoveSelector::Root | RemoveSelector::Glob(_)));
-
         with_progress_typed(
             progress,
             ProgressSpec::indeterminate(ProgressOperation::ApplyingChanges),
             |_| -> Result<()> {
                 desired
-                    .publish_removals(&removed, &prefixes, include_exact)
+                    .publish_removals(&exact, &prefixes)
                     .map_err(Box::new)?;
                 if !request.cached {
                     remove_and_prune(repo, &removed)
@@ -177,6 +170,35 @@ pub fn remove_with_progress(
 
 fn validate_deletion_paths(repo: &Repository, entries: &[GatPath]) -> Result<()> {
     validate_mutation_paths(repo, entries).map_err(Into::into)
+}
+
+struct RemovalPlan {
+    paths: Vec<GatPath>,
+    exact: Vec<GatPath>,
+    prefixes: Vec<GatPath>,
+}
+
+impl RemovalPlan {
+    fn new(selectors: &[RemoveSelector], selected: Vec<Vec<GatPath>>) -> Self {
+        let mut plan = Self {
+            paths: Vec::new(),
+            exact: Vec::new(),
+            prefixes: Vec::new(),
+        };
+        for (selector, paths) in selectors.iter().zip(selected) {
+            if paths.is_empty() {
+                continue;
+            }
+            match selector {
+                RemoveSelector::Prefix(prefix) if paths.len() > 1 => {
+                    plan.prefixes.push(prefix.clone());
+                }
+                _ => plan.exact.extend(paths.iter().cloned()),
+            }
+            plan.paths.extend(paths);
+        }
+        plan
+    }
 }
 
 enum RemoveSelector {

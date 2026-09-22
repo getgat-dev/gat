@@ -183,8 +183,8 @@ pub use initialization::{
     IntegrationStatus, ManagedHook, ResolvedCacheLocation,
 };
 pub use limits::{
-    ExecutionLimits, GcLimits, RemoteConcurrency, RemoteGcLimits, RemoteLimits, SyncLimits,
-    TransferLimits,
+    ExecutionLimits, GcLimits, LOCAL_TRANSFER_CONCURRENCY, RemoteConcurrency, RemoteGcLimits,
+    RemoteLimits, SyncLimits, TransferLimits,
 };
 pub use maintenance::{
     CacheClean, CacheDbState, CacheInspect, CacheRepair, CandidateInvalidReason, CandidateOutcome,
@@ -225,7 +225,8 @@ pub use repository_access::{
 };
 pub use repository_mutation::{
     AddCandidate, DesiredMutation, DesiredScope, DesiredState, GitPathStatus,
-    MaterializationSession, MaterializedEntry, RepositoryMutationError, RepositoryStateError,
+    MaterializationSession, MaterializedEntry, PreparedMove, RepositoryMutationError,
+    RepositoryStateError,
 };
 pub use repository_state::{
     DesiredRevision, DesiredRevisionError, StaleDesiredRevisionError, current_desired_revision,
