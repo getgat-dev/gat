@@ -5,10 +5,8 @@
 //! `RemoteExecutor` controls remote jobs and physical requests, while this
 //! module only owns process-wide worker capacity.
 
+use gat_engine::LOCAL_TRANSFER_CONCURRENCY;
 use std::num::NonZeroUsize;
-
-// Blocking file work has its own bounded pool; async workers only drive I/O.
-const TOKIO_BLOCKING_THREADS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ProcessResourcePolicy {
@@ -24,8 +22,7 @@ impl ProcessResourcePolicy {
             // This pool also performs synchronous file I/O; overlap its waits.
             cpu: NonZeroUsize::new(cpu_threads.get().saturating_mul(4)).unwrap(),
             tokio_worker: NonZeroUsize::new(cpu_threads.get().min(2)).unwrap(),
-            tokio_blocking: NonZeroUsize::new(TOKIO_BLOCKING_THREADS)
-                .expect("Tokio blocking thread policy must be positive"),
+            tokio_blocking: LOCAL_TRANSFER_CONCURRENCY,
         }
     }
 
@@ -72,7 +69,10 @@ mod tests {
         let policy = ProcessResourcePolicy::from_parallelism(None);
         assert_eq!(policy.cpu.get(), 4);
         assert_eq!(policy.tokio_worker.get(), 1);
-        assert_eq!(policy.tokio_blocking.get(), TOKIO_BLOCKING_THREADS);
+        assert_eq!(
+            policy.tokio_blocking.get(),
+            LOCAL_TRANSFER_CONCURRENCY.get()
+        );
     }
 
     #[test]
@@ -80,6 +80,9 @@ mod tests {
         let policy = ProcessResourcePolicy::from_parallelism(Some(NonZeroUsize::new(7).unwrap()));
         assert_eq!(policy.cpu.get(), 28);
         assert_eq!(policy.tokio_worker.get(), 2);
-        assert_eq!(policy.tokio_blocking.get(), TOKIO_BLOCKING_THREADS);
+        assert_eq!(
+            policy.tokio_blocking.get(),
+            LOCAL_TRANSFER_CONCURRENCY.get()
+        );
     }
 }

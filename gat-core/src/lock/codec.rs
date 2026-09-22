@@ -85,40 +85,14 @@ pub(super) fn validate_path(path: &str, line: usize) -> Result<()> {
 /// a real tree can't have a tracked file *and* tracked descendants under
 /// it at once.
 ///
-/// For each `path`, its descendants are exactly the strings in the
-/// exclusive range `["{path}/", "{path}0")`: `'/'` (0x2F) and `'0'`
-/// (0x30) are adjacent ASCII code points, so this range captures every
-/// string with `path` as a `/`-delimited prefix and nothing else, no
-/// matter what characters sibling paths contain. `BTreeSet::range` makes
-/// each check `O(log n)`, so validating the whole set is `O(n log n)`.
-/// Only the first key at or above the lower bound can be the first descendant;
-/// checking that key avoids allocating an upper bound. The lower-bound buffer
-/// is reused across paths.
+/// Paths are already ordered by the set. The shared resident-lock validator
+/// scans them once, retaining possible ancestors across intervening siblings.
+/// If several conflicts exist, any conflicting pair may be reported.
 pub fn validate_no_path_directory_conflicts<T>(paths: &std::collections::BTreeSet<T>) -> Result<()>
 where
     T: Ord + std::borrow::Borrow<str>,
 {
-    let mut lower = String::new();
-    for path in paths {
-        let path: &str = path.borrow();
-        lower.clear();
-        lower.push_str(path);
-        lower.push('/');
-        let bounds = (
-            std::ops::Bound::Included(lower.as_str()),
-            std::ops::Bound::Unbounded,
-        );
-        if let Some(descendant) = paths.range::<str, _>(bounds).next()
-            && is_directory_prefix(path, descendant.borrow())
-        {
-            let descendant: &str = descendant.borrow();
-            return Err(LockDomainError::DirectoryPrefixConflict {
-                ancestor: path.to_string(),
-                descendant: descendant.to_string(),
-            }
-            .into());
-        }
-    }
+    validate_paths_if_ordered(paths.iter().map(std::borrow::Borrow::borrow))?;
     Ok(())
 }
 
@@ -223,11 +197,10 @@ pub fn visit_filtered_matching(
 
 // Retain string-prefix candidates, including non-adjacent ancestors such as
 // `a`, `a-`, `a/b`. Each candidate is pushed and popped at most once.
-fn validate_entries_if_ordered<'a>(entries: impl Iterator<Item = &'a Entry>) -> Result<bool> {
+fn validate_paths_if_ordered<'a>(paths: impl Iterator<Item = &'a str>) -> Result<bool> {
     let mut previous: Option<&str> = None;
     let mut candidates: Vec<&str> = Vec::new();
-    for entry in entries {
-        let path = entry.path.as_str();
+    for path in paths {
         if let Some(previous) = previous {
             match previous.cmp(path) {
                 std::cmp::Ordering::Equal => {
@@ -269,10 +242,10 @@ impl Lock {
     /// Sorted inputs borrow entries directly; unordered inputs sort references,
     /// without cloning paths. Validation is linear in path bytes after ordering.
     pub fn validate(&self) -> Result<()> {
-        if !validate_entries_if_ordered(self.entries.iter())? {
+        if !validate_paths_if_ordered(self.entries.iter().map(|entry| entry.path.as_str()))? {
             let mut entries: Vec<_> = self.entries.iter().collect();
             entries.sort_unstable_by(|a, b| a.path.cmp(&b.path));
-            validate_entries_if_ordered(entries.into_iter())?;
+            validate_paths_if_ordered(entries.into_iter().map(|entry| entry.path.as_str()))?;
         }
         Ok(())
     }

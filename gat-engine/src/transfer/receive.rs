@@ -80,7 +80,7 @@ pub(super) async fn receive(
     client: RemoteClient,
     cache: CacheWriter,
     oid: Oid,
-) -> Result<Option<CachePublication>, ReceiveError> {
+) -> Result<CachePublication, ReceiveError> {
     if let Some(prepared) = client.prepare_file_read(oid) {
         let cancellation = executor.cancellation();
         let result = executor
@@ -108,7 +108,7 @@ async fn receive_network(
     client: RemoteClient,
     cache: CacheWriter,
     oid: Oid,
-) -> Result<Option<CachePublication>, ReceiveError> {
+) -> Result<CachePublication, ReceiveError> {
     let mut reader = executor
         .cancellable(client.open_read(&oid))
         .await
@@ -165,7 +165,7 @@ async fn publish_received(
     cache: CacheWriter,
     oid: Oid,
     body: ReceiveBody,
-) -> Result<Option<CachePublication>, ReceiveError> {
+) -> Result<CachePublication, ReceiveError> {
     let result = executor
         .local_transfer(move || body.finish(&cache, oid).map_err(ReceiveError::Cache))
         .await
@@ -173,7 +173,7 @@ async fn publish_received(
     received_result(result)
 }
 
-const fn received_result(result: ExpectedIngest) -> Result<Option<CachePublication>, ReceiveError> {
+const fn received_result(result: ExpectedIngest) -> Result<CachePublication, ReceiveError> {
     match result {
         ExpectedIngest::Published { publication } => Ok(publication),
         ExpectedIngest::HashMismatch { actual } => Err(ReceiveError::HashMismatch { actual }),

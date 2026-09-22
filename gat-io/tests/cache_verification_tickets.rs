@@ -34,9 +34,7 @@ fn publication_invalidates_both_pending_and_memo_only_tickets() {
     assert_eq!(client.verify(&oid).unwrap(), ObjectVerification::Missing);
     let known = client.prepare_verification(&[oid]).verify().unwrap();
     let (_, receipt) = root.writer().ingest(&bytes[..]).unwrap();
-    client
-        .apply_publications(&receipt.into_iter().collect::<Vec<_>>())
-        .unwrap();
+    client.apply_publications(&[receipt]).unwrap();
     for ticket in [pending, known] {
         assert_eq!(
             client.commit_verification(ticket).unwrap(),

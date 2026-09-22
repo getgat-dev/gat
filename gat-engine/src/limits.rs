@@ -27,6 +27,12 @@
 //! top-level immutable `ExecutionLimits` value.
 use std::num::NonZeroUsize;
 
+/// Maximum blocking transfer tasks admitted by one operation. This overlaps
+/// filesystem waits independently of CPU parallelism; remote job and payload
+/// budgets can impose tighter concurrency limits. The CLI uses the same
+/// capacity for its blocking pool to avoid a second, smaller worker ceiling.
+pub const LOCAL_TRANSFER_CONCURRENCY: NonZeroUsize = NonZeroUsize::new(128).unwrap();
+
 /// How many transfer obligations (push upload / fetch download / repair)
 /// or repair oids an operation windows through the object cache / remote
 /// executor at once, before flushing that window and moving on to the

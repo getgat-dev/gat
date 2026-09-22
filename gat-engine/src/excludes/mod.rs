@@ -149,15 +149,8 @@ fn sync_from_path_source(
         &mut dyn FnMut(&gat_core::lexical_path::GatPath) -> Result<()>,
     ) -> Result<()>,
 ) -> Result<SyncStatus> {
-    let plan = compact::IgnoreCoveragePlan::new(cfg.git.effective_ignore_patterns());
-    let mut exact = Vec::new();
-    visit_paths(&plan.excluded, &mut |path| {
-        if !plan.residual_matches(path) {
-            exact.push(path.as_str().to_string());
-        }
-        Ok(())
-    })?;
-    render(repo, cfg, exact, dry_run)
+    let body = body_from_paths(cfg, visit_paths)?;
+    Ok(render_with_proof(repo, body, dry_run)?.0)
 }
 
 /// As [`sync_from_store`], but reuses an already-loaded effective config
@@ -176,9 +169,23 @@ pub(crate) fn sync_from_store_with_config(
 /// Render ordered, unique store rows directly; no owned per-path collection.
 /// Literal-directory coverage is applied by indexed seeks before residual matching.
 fn body_from_store(store: &StateStore, cfg: &gat_core::config::Config) -> Result<ExcludeBody> {
+    body_from_paths(cfg, |excluded, visit| {
+        store.visit_desired_paths_excluding(excluded, visit)
+    })
+}
+
+/// The source supplies sorted, unique paths and applies indexed exclusions.
+/// Append directly to the final body without retaining another path collection.
+fn body_from_paths(
+    cfg: &gat_core::config::Config,
+    visit_paths: impl FnOnce(
+        &gat_io::DesiredPathExclusions,
+        &mut dyn FnMut(&gat_core::lexical_path::GatPath) -> Result<()>,
+    ) -> Result<()>,
+) -> Result<ExcludeBody> {
     let plan = compact::IgnoreCoveragePlan::new(cfg.git.effective_ignore_patterns());
     let mut body = ExcludeBody::new(cfg);
-    store.visit_desired_paths_excluding(&plan.excluded, |path| -> Result<()> {
+    visit_paths(&plan.excluded, &mut |path| {
         if !plan.residual_matches(path) {
             body.push_path(path.as_str());
         }
@@ -250,14 +257,13 @@ fn append_exact_exclude_pattern(escaped: &mut String, path: &str) {
 /// Sort and deduplicate paths needing exact rules, then render them plus
 /// `git.ignore_patterns` into the
 /// gat-managed `.git/info/exclude` block, writing it out unless `dry_run` or
-/// nothing changed. Borrow loaded lock paths; streamed mutation paths own
-/// their text until rendering. `exact` entries are Gat-managed
+/// nothing changed. Paths are borrowed from the loaded lock. `exact` entries are Gat-managed
 /// paths and are rendered through [`append_exact_exclude_pattern`]; `git.ignore_patterns`
 /// are hand-authored; comments matching block markers gain a comment prefix.
-fn render<P: AsRef<str> + Ord>(
+fn render(
     repo: &Repo,
     cfg: &gat_core::config::Config,
-    mut exact: Vec<P>,
+    mut exact: Vec<&str>,
     dry_run: bool,
 ) -> Result<SyncStatus> {
     if !exact.is_sorted() {
@@ -266,7 +272,7 @@ fn render<P: AsRef<str> + Ord>(
     exact.dedup();
     let mut body = ExcludeBody::new(cfg);
     for path in exact {
-        body.push_path(path.as_ref());
+        body.push_path(path);
     }
     Ok(render_with_proof(repo, body, dry_run)?.0)
 }
@@ -616,9 +622,9 @@ mod tests {
                         .as_ref()
                         .is_some_and(|m| compact::pattern_matches(m, e.path.as_str()))
                 })
-                .map(|e| e.path.as_str().to_string())
+                .map(|e| e.path.as_str())
                 .collect();
-            exact.sort();
+            exact.sort_unstable();
             exact.dedup();
             let expected_count = render(&repo, &cfg, exact, false).unwrap().count;
             let expected = std::fs::read_to_string(&exclude_path).unwrap();

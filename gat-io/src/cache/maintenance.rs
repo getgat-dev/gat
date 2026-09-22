@@ -66,10 +66,13 @@ impl<'cache> CacheMaintenance<'cache> {
         purge_objects(&self.root.objects_dir)
     }
 
-    pub fn sweep<E>(
+    /// Sweep independent first-level directories concurrently. Decisions may
+    /// overlap; all groups finish and proof cleanup is attempted for confirmed
+    /// deletions before a traversal or decision failure is returned.
+    pub fn sweep<E: Send>(
         &self,
         dry_run: bool,
-        decide: impl FnMut(gat_core::oid::Oid) -> Result<super::enumeration::CacheSweepDecision, E>,
+        decide: impl Fn(gat_core::oid::Oid) -> Result<super::enumeration::CacheSweepDecision, E> + Sync,
     ) -> Result<
         Result<super::enumeration::CacheSweepStats, E>,
         super::enumeration::CacheEnumerationError,

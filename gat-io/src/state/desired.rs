@@ -36,18 +36,30 @@ impl DesiredStateWrite<'_> {
         if entries.is_empty() {
             return Ok(());
         }
-        let mut touched = self
-            .desired_shard_ids_for_paths(entries.iter().map(|entry| &entry.path))
-            .map_err(E::from)?;
-        let shard_levels = Self::incremental_shard_levels(shape_lock);
-        self.upsert_entries(entries, shard_levels)
-            .map_err(E::from)?;
+        let mut touched = std::collections::BTreeSet::new();
+        self.upsert_collect_shards(
+            entries,
+            Self::incremental_shard_levels(shape_lock),
+            &mut touched,
+        )
+        .map_err(E::from)?;
+        self.publish_touched(layout, shape_lock, &touched)
+    }
+
+    fn upsert_collect_shards(
+        &self,
+        entries: &[Entry],
+        shard_levels: crate::lock::LockShardLevels,
+        touched: &mut std::collections::BTreeSet<LockShardId>,
+    ) -> Result<()> {
+        touched.extend(self.desired_shard_ids_for_paths(entries.iter().map(|entry| &entry.path))?);
+        self.upsert_entries(entries, shard_levels)?;
         touched.extend(
             entries
                 .iter()
                 .map(|entry| shard_id_for_path(&entry.path, shard_levels)),
         );
-        self.publish_touched(layout, shape_lock, &touched)
+        Ok(())
     }
 
     fn remove_and_publish<E>(
@@ -81,6 +93,27 @@ impl DesiredStateWrite<'_> {
             return Ok(());
         }
         self.publish_touched(layout, shape_lock, &touched)
+    }
+
+    fn publish_touched_windows<E>(
+        &self,
+        layout: &crate::RepositoryLayout,
+        shape_lock: &LockWriteGuard,
+        touched: std::collections::BTreeSet<LockShardId>,
+        window_size: usize,
+    ) -> std::result::Result<(), E>
+    where
+        E: From<StateStoreError> + From<LockError>,
+    {
+        assert!(window_size > 0);
+        let mut shards = touched.into_iter();
+        loop {
+            let group: std::collections::BTreeSet<_> = shards.by_ref().take(window_size).collect();
+            if group.is_empty() {
+                return Ok(());
+            }
+            self.publish_touched::<E>(layout, shape_lock, &group)?;
+        }
     }
 
     /// Publish the post-mutation contents of exactly `touched_shard_ids` and
@@ -316,7 +349,9 @@ fn upsert_desired_entries_tx(
                 rusqlite::types::ToSqlOutput::from(shard.as_str()),
             ]
         });
-        tx.execute(&sql, params_from_iter(params))
+        tx.prepare_cached(&sql)
+            .state_context("preparing desired-state upsert")?
+            .execute(params_from_iter(params))
             .with_state_context(|| format!("{verb} {} desired-state row(s)", chunk.len()))?;
     }
     Ok(())
@@ -568,14 +603,17 @@ pub(super) fn apply_shard_entries_tx(
     shard_id: LockShardId,
     entries: &[Entry],
 ) -> Result<()> {
-    let new_paths: std::collections::HashSet<&str> =
-        entries.iter().map(|e| e.path.as_str()).collect();
-    let stale: Vec<GatPath> = desired_shard_paths_tx(tx, shard_id)?
-        .into_iter()
-        .filter(|p| !new_paths.contains(p.as_str()))
-        .collect();
-    if !stale.is_empty() {
-        clear_desired_exact_tx(tx, &stale)?;
+    let previous_paths = desired_shard_paths_tx(tx, shard_id)?;
+    if !previous_paths.is_empty() {
+        let new_paths: std::collections::HashSet<&str> =
+            entries.iter().map(|entry| entry.path.as_str()).collect();
+        let stale: Vec<GatPath> = previous_paths
+            .into_iter()
+            .filter(|path| !new_paths.contains(path.as_str()))
+            .collect();
+        if !stale.is_empty() {
+            clear_desired_exact_tx(tx, &stale)?;
+        }
     }
 
     // `shard_id` is identical for every row this call writes -- encode it
@@ -711,22 +749,13 @@ impl StateStore {
                 if batch.is_empty() {
                     continue;
                 }
-                touched.extend(
-                    desired
-                        .desired_shard_ids_for_paths(batch.iter().map(|entry| &entry.path))
-                        .map_err(E::from)?,
-                );
                 desired
-                    .upsert_entries(
+                    .upsert_collect_shards(
                         &batch,
                         DesiredStateWrite::incremental_shard_levels(shape_lock),
+                        &mut touched,
                     )
                     .map_err(E::from)?;
-                touched.extend(
-                    desired
-                        .desired_shard_ids_for_paths(batch.iter().map(|entry| &entry.path))
-                        .map_err(E::from)?,
-                );
             }
             desired.publish_touched(layout, shape_lock, &touched)
         })
@@ -744,6 +773,43 @@ impl StateStore {
         E: From<StateStoreError> + From<LockError>,
     {
         self.desired_write(|desired| desired.remove_and_publish(layout, shape_lock, removals))
+    }
+
+    /// Clear a desired subtree and publish each affected shard once, loading
+    /// at most `window_size` shards together. The caller holds the shape lock
+    /// and recovers any partially published filesystem state before retrying.
+    pub(crate) fn publish_desired_prefix_removal<E>(
+        &mut self,
+        layout: &crate::RepositoryLayout,
+        shape_lock: &LockWriteGuard,
+        target: &GatPath,
+        window_size: usize,
+    ) -> std::result::Result<usize, E>
+    where
+        E: From<StateStoreError> + From<LockError>,
+    {
+        self.desired_write(|desired| {
+            let (lower, upper) = descendant_range(target.as_str());
+            let removed = desired
+                .tx
+                .query_row(
+                    "SELECT COUNT(*) FROM state WHERE desired_oid IS NOT NULL
+                 AND (path = ?1 OR (path >= ?2 AND path < ?3))",
+                    (target.as_str(), lower, upper),
+                    |row| {
+                        let count = row.get::<_, i64>(0)?;
+                        usize::try_from(count)
+                            .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, count))
+                    },
+                )
+                .state_context("counting desired subtree removals")
+                .map_err(E::from)?;
+            let touched =
+                desired_shard_ids_for_scope_inner(&desired.tx, target).map_err(E::from)?;
+            clear_desired_prefix_tx(&desired.tx, target).map_err(E::from)?;
+            desired.publish_touched_windows::<E>(layout, shape_lock, touched, window_size)?;
+            Ok(removed)
+        })
     }
 
     /// Move a desired prefix and publish the union of its prior source,
@@ -771,63 +837,64 @@ impl StateStore {
         })
     }
 
-    /// Replay bounded desired-entry windows using the publication strategy
-    /// appropriate to the locked shape. Flat state is upserted in one
-    /// transaction and streamed to disk once; sharded state preserves
-    /// per-window publication and progress/fault boundaries.
-    #[allow(clippy::too_many_arguments)]
+    /// Apply bounded input windows in one transaction, then publish every
+    /// affected shard once. Publication groups contain no more shard IDs than
+    /// the largest input window contains rows; only touched IDs span windows.
     pub fn publish_desired_upsert_windows<E>(
         &mut self,
         layout: &crate::RepositoryLayout,
         shape_lock: &LockWriteGuard,
         mut next_window: impl FnMut() -> std::result::Result<Option<Vec<Entry>>, E>,
-        imported: &mut usize,
-        maybe_published: &mut bool,
-        mut after_window: impl FnMut() -> std::result::Result<(), E>,
-        after_flat_publish: impl FnOnce() -> std::result::Result<(), E>,
+        result: &mut super::repository::MountReplayResult,
+        mut after_commit: impl FnMut() -> std::result::Result<(), E>,
+        after_publish: impl FnOnce() -> std::result::Result<(), E>,
     ) -> std::result::Result<(), E>
     where
         E: From<StateStoreError> + From<LockError>,
     {
-        if shape_lock.is_flat() {
-            let imported_here = self.desired_write(|desired| {
-                let mut count = 0usize;
-                while let Some(batch) = next_window()? {
-                    if batch.is_empty() {
-                        continue;
-                    }
-                    desired
-                        .upsert_entries(
-                            &batch,
-                            DesiredStateWrite::incremental_shard_levels(shape_lock),
-                        )
-                        .map_err(E::from)?;
-                    count += batch.len();
+        let imported_here = self.desired_write(|desired| {
+            let levels = DesiredStateWrite::incremental_shard_levels(shape_lock);
+            let mut count = 0usize;
+            let mut publication_window = 0usize;
+            let mut touched = std::collections::BTreeSet::new();
+            while let Some(batch) = next_window()? {
+                if batch.is_empty() {
+                    continue;
                 }
-                if count == 0 {
-                    return Ok::<usize, E>(0);
+                publication_window = publication_window.max(batch.len());
+                if shape_lock.is_flat() {
+                    touched.insert(LockShardId::flat());
+                } else {
+                    touched.extend(
+                        desired
+                            .desired_shard_ids_for_paths(batch.iter().map(|entry| &entry.path))
+                            .map_err(E::from)?,
+                    );
+                    touched.extend(
+                        batch
+                            .iter()
+                            .map(|entry| shard_id_for_path(&entry.path, levels)),
+                    );
                 }
-                *maybe_published = true;
-                desired.publish_flat_streaming::<E>(layout)?;
-                after_flat_publish()?;
-                Ok::<usize, E>(count)
-            })?;
-            *imported += imported_here;
-            if imported_here != 0 {
-                after_window()?;
+                desired.upsert_entries(&batch, levels).map_err(E::from)?;
+                count += batch.len();
             }
-            return Ok(());
-        }
-
-        while let Some(batch) = next_window()? {
-            if batch.is_empty() {
-                continue;
+            if count == 0 {
+                return Ok::<usize, E>(0);
             }
-            let count = batch.len();
-            *maybe_published = true;
-            self.publish_desired_upsert::<E>(layout, shape_lock, &batch)?;
-            *imported += count;
-            after_window()?;
+            result.publication_may_have_landed = true;
+            desired.publish_touched_windows::<E>(
+                layout,
+                shape_lock,
+                touched,
+                publication_window,
+            )?;
+            after_publish()?;
+            Ok::<usize, E>(count)
+        })?;
+        result.imported += imported_here;
+        if imported_here != 0 {
+            after_commit()?;
         }
         Ok(())
     }

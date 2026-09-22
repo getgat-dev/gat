@@ -342,9 +342,7 @@ pub fn download_window(
                 match result {
                     Ok(publication) => {
                         downloaded += 1;
-                        if let Some(publication) = publication {
-                            publications.push(publication);
-                        }
+                        publications.push(publication);
                     }
                     Err(source) => {
                         return Err(worker_error(

@@ -106,54 +106,49 @@ pub fn move_with_progress(
     repo.with_desired_mutation(progress, |cfg, mut desired| {
         let policy = MountOwnership::new(&cfg.mounts)?;
         assert_root_owned(&policy, &dst)?;
-        let dst_collisions = with_progress_typed(
+        let prepared = with_progress_typed(
             progress,
             ProgressSpec::indeterminate(ProgressOperation::ResolvingSelection),
             |task| -> Result<_> {
                 task.set_activity(ProgressActivity::MatchingSourcePath);
-                let (matches, dst_collisions) =
-                    desired.resolve_move(&src, &dst).map_err(Box::new)?;
-                if matches.is_empty() {
-                    return Err(MoveError::SourceNotTracked { path: src.clone() });
-                }
-                assert_no_owned_entry(&policy, &matches)?;
+                let prepared = desired
+                    .prepare_move(&src, &dst)
+                    .map_err(Box::new)?
+                    .ok_or_else(|| MoveError::SourceNotTracked { path: src.clone() })?;
+                prepared
+                    .source_paths()
+                    .try_for_each(|path| assert_root_owned(&policy, path))?;
                 validate_mutation_path(repo, &src)?;
 
                 task.set_activity(ProgressActivity::CheckingDestination);
-                assert_no_owned_entry(&policy, &dst_collisions)?;
-                if !dst_collisions.is_empty() && !force {
+                assert_no_owned_entry(&policy, prepared.collisions())?;
+                if !prepared.collisions().is_empty() && !force {
                     return Err(MoveError::DestinationTracked {
                         src: src.clone(),
                         dst: dst.clone(),
                     });
                 }
                 preflight_destination(repo, &src, &dst, force)?;
-                Ok(dst_collisions)
+                Ok(prepared)
             },
         )?;
 
-        with_progress_typed(
-            progress,
-            ProgressSpec::indeterminate(ProgressOperation::ApplyingChanges),
-            |_| -> Result<()> {
-                let dst_collision_paths = dst_collisions
-                    .into_iter()
-                    .map(|entry| entry.path)
-                    .collect::<Vec<_>>();
-                let pending = move_on_disk(repo, &src, &dst)?;
-                if let Err(error) = desired.publish_move(&src, &dst, &dst_collision_paths) {
-                    return Err(rollback_or_report(error, pending, &src, &dst));
-                }
-                pending.commit();
-                let published = |source| MoveError::Published {
-                    src: src.clone(),
-                    dst: dst.clone(),
-                    source: Box::new(source),
-                };
-                desired.sync_excludes().map_err(published)?;
-                Ok(())
-            },
-        )?;
+        let applying = progress.begin(ProgressSpec::indeterminate(
+            ProgressOperation::ApplyingChanges,
+        ));
+        let pending = move_on_disk(repo, &src, &dst)?;
+        if let Err(error) = prepared.publish() {
+            return Err(rollback_or_report(error, pending, &src, &dst));
+        }
+        pending.commit();
+        desired
+            .sync_excludes()
+            .map_err(|source| MoveError::Published {
+                src: src.clone(),
+                dst: dst.clone(),
+                source: Box::new(source),
+            })?;
+        applying.finish();
         Ok(MoveOutcome { src, dst })
     })
 }

@@ -354,7 +354,7 @@ impl<'repo> DesiredStateSession<'repo> {
             for result in results {
                 let (entry, receipt) = result?;
                 entries.push(entry);
-                receipts.extend(receipt);
+                receipts.push(receipt);
             }
             if !receipts.is_empty() {
                 let _ = cache.apply_publications(&receipts);
@@ -587,6 +587,66 @@ pub struct DesiredMutationSession<'repo> {
     pending_materialized: Vec<MaterializedRow>,
 }
 
+/// A move bound to the session whose repository lock protects its source rows.
+/// Publication consumes the plan; its paths and collisions cannot be replaced.
+pub struct PreparedRepositoryMove<'session, 'repo> {
+    session: &'session mut DesiredMutationSession<'repo>,
+    movement: super::movement::RepositoryMoveRows,
+    collisions: Vec<Entry>,
+}
+
+impl PreparedRepositoryMove<'_, '_> {
+    pub fn source_paths(&self) -> impl Iterator<Item = &GatPath> {
+        self.movement.source_paths()
+    }
+    #[must_use]
+    pub fn collisions(&self) -> &[Entry] {
+        &self.collisions
+    }
+
+    /// Stage both state halves before publishing the lock. A ledger failure
+    /// leaves the old lock intact so the caller can roll back its rename.
+    pub fn publish(self) -> Result<(), DesiredPublicationError> {
+        let Self {
+            session,
+            movement,
+            collisions,
+        } = self;
+        if let Some(lock) = session.full_lock.as_mut() {
+            let collisions: HashSet<&str> =
+                collisions.iter().map(|entry| entry.path.as_str()).collect();
+            lock.entries = std::mem::take(&mut lock.entries)
+                .into_par_iter()
+                .filter_map(|mut entry| {
+                    if collisions.contains(entry.path.as_str()) {
+                        return None;
+                    }
+                    if entry.path.is_or_under(&movement.src) {
+                        entry.path = entry
+                            .path
+                            .with_replaced_prefix(&movement.src, &movement.dst);
+                    }
+                    Some(entry)
+                })
+                .collect();
+        }
+        session.store.desired_write(|desired| {
+            let touched = movement.apply(desired, session.target)?;
+            if let Some(lock) = &session.full_lock {
+                let evidence = LockStore::publish_complete_with_evidence(
+                    session.layout,
+                    lock,
+                    session.target,
+                )?;
+                super::reconciliation::apply_full_lock_evidence_tx(&desired.tx, evidence)?;
+                Ok(())
+            } else {
+                desired.publish_touched(session.layout, &session.shape_lock, &touched)
+            }
+        })
+    }
+}
+
 impl<'repo> DesiredMutationSession<'repo> {
     pub fn acquire(
         layout: &'repo RepositoryLayout,
@@ -654,76 +714,39 @@ impl<'repo> DesiredMutationSession<'repo> {
         result
     }
 
-    pub fn resolve_move(
-        &mut self,
+    /// Prepare a tracked move while retaining exclusive access to this session.
+    /// No plan is returned for an untracked source.
+    pub fn prepare_move<'session>(
+        &'session mut self,
         src: &GatPath,
         dst: &GatPath,
-    ) -> Result<(Vec<Entry>, Vec<Entry>), StateStoreError> {
-        if self.shape_lock.can_publish_incrementally() {
-            let matches = self.store.desired_rows(DesiredQuery::scope(src))?;
-            let collisions = self
-                .store
+    ) -> Result<Option<PreparedRepositoryMove<'session, 'repo>>, StateStoreError> {
+        let movement = super::movement::RepositoryMoveRows::read(&self.store.conn, src, dst)?;
+        if !movement.has_tracked_source() {
+            return Ok(None);
+        }
+        let collisions = if self.shape_lock.can_publish_incrementally() {
+            self.store
                 .desired_rows(DesiredQuery::scope(dst))?
                 .into_iter()
                 .filter(|entry| !entry.path.is_or_under(src))
+                .collect()
+        } else {
+            let lock = self.store.load_desired_as_lock()?;
+            let collisions = lock
+                .entries
+                .iter()
+                .filter(|entry| entry.path.is_or_under(dst) && !entry.path.is_or_under(src))
+                .cloned()
                 .collect();
-            return Ok((matches, collisions));
-        }
-
-        let lock = self.store.load_desired_as_lock()?;
-        let matches = lock
-            .entries
-            .iter()
-            .filter(|entry| entry.path.is_or_under(src))
-            .cloned()
-            .collect::<Vec<_>>();
-        let collisions = lock
-            .entries
-            .iter()
-            .filter(|entry| entry.path.is_or_under(dst))
-            .filter(|entry| !entry.path.is_or_under(src))
-            .cloned()
-            .collect();
-        self.full_lock = Some(lock);
-        Ok((matches, collisions))
-    }
-
-    /// Move desired and materialized state in one transaction. Stage ledger
-    /// changes before lock publication so a ledger failure leaves the old lock
-    /// intact and the caller can roll back its physical rename.
-    pub fn publish_move(
-        &mut self,
-        src: &GatPath,
-        dst: &GatPath,
-        collision_paths: &[GatPath],
-    ) -> Result<(), DesiredPublicationError> {
-        if let Some(lock) = self.full_lock.as_mut() {
-            let collisions: HashSet<&str> = collision_paths.iter().map(GatPath::as_str).collect();
-            lock.entries = std::mem::take(&mut lock.entries)
-                .into_par_iter()
-                .filter_map(|mut entry| {
-                    if collisions.contains(entry.path.as_str()) {
-                        return None;
-                    }
-                    if entry.path.is_or_under(src) {
-                        entry.path = entry.path.with_replaced_prefix(src, dst);
-                    }
-                    Some(entry)
-                })
-                .collect();
-        }
-
-        self.store.desired_write(|desired| {
-            let touched = desired.move_repository_rows(src, dst, self.target)?;
-            if let Some(lock) = &self.full_lock {
-                let evidence =
-                    LockStore::publish_complete_with_evidence(self.layout, lock, self.target)?;
-                super::reconciliation::apply_full_lock_evidence_tx(&desired.tx, evidence)?;
-                Ok(())
-            } else {
-                desired.publish_touched(self.layout, &self.shape_lock, &touched)
-            }
-        })
+            self.full_lock = Some(lock);
+            collisions
+        };
+        Ok(Some(PreparedRepositoryMove {
+            session: self,
+            movement,
+            collisions,
+        }))
     }
 
     pub fn resolve_removals(
@@ -753,9 +776,8 @@ impl<'repo> DesiredMutationSession<'repo> {
 
     pub fn publish_removals(
         &mut self,
-        affected_paths: &[GatPath],
+        exact_paths: &[GatPath],
         prefixes: &[GatPath],
-        include_exact: bool,
     ) -> Result<(), DesiredPublicationError> {
         if let Some(lock) = self.full_lock.as_ref() {
             return self
@@ -771,8 +793,8 @@ impl<'repo> DesiredMutationSession<'repo> {
             .iter()
             .map(super::desired::DesiredRemoval::Prefix)
             .collect::<Vec<_>>();
-        if include_exact {
-            removals.push(super::desired::DesiredRemoval::Exact(affected_paths));
+        if !exact_paths.is_empty() {
+            removals.push(super::desired::DesiredRemoval::Exact(exact_paths));
         }
         self.store
             .publish_desired_removals::<DesiredPublicationError>(
@@ -786,7 +808,7 @@ impl<'repo> DesiredMutationSession<'repo> {
         self.store.remove_exact(paths)
     }
 
-    /// Visit desired paths from the cheapest already-available semantic
+    /// Visit sorted, unique desired paths from the already-available semantic
     /// source. Full-fallback mutations reuse their retained lock; sparse
     /// mutations stream the same retained store. Callers never observe which
     /// persistence shape supplied the rows. Covered descendants are skipped
@@ -800,10 +822,16 @@ impl<'repo> DesiredMutationSession<'repo> {
         E: From<StateStoreError>,
     {
         if let Some(lock) = &self.full_lock {
-            for entry in &lock.entries {
-                if !excluded.contains(&entry.path) {
-                    visit(&entry.path)?;
-                }
+            let mut paths: Vec<_> = lock
+                .entries
+                .iter()
+                .map(|entry| &entry.path)
+                .filter(|path| !excluded.contains(path))
+                .collect();
+            paths.sort_unstable();
+            paths.dedup();
+            for path in paths {
+                visit(path)?;
             }
             return Ok(());
         }
@@ -889,7 +917,8 @@ impl<'repo> MountMutationSession<'repo> {
         }
     }
 
-    /// Delete every desired row under `target` in bounded windows.
+    /// Delete every desired row under `target`, publishing each affected shard
+    /// once in bounded groups.
     ///
     /// Derived materialized state is cleared by prefix after desired
     /// publication, including when an earlier recovery attempt already
@@ -904,34 +933,13 @@ impl<'repo> MountMutationSession<'repo> {
     ) -> Result<usize, DesiredPublicationError> {
         assert!(window_size > 0, "mount deletion window must be non-zero");
         let removed = if self.shape_lock.can_publish_incrementally() {
-            let mut total = 0usize;
-            loop {
-                let window = self.store.with_desired_rows(
-                    DesiredQuery::scope(target),
-                    |mut rows| -> Result<Vec<GatPath>, StateStoreError> {
-                        let mut batch = Vec::new();
-                        while batch.len() < window_size {
-                            match rows.next()? {
-                                Some(row) => batch.push(row.path),
-                                None => break,
-                            }
-                        }
-                        Ok(batch)
-                    },
-                )?;
-                if window.is_empty() {
-                    break;
-                }
-                total += window.len();
-                self.store
-                    .publish_desired_removals::<DesiredPublicationError>(
-                        self.layout,
-                        &self.shape_lock,
-                        &[super::desired::DesiredRemoval::Exact(&window)],
-                    )?;
-                self.store.remove_exact(&window)?;
-            }
-            total
+            self.store
+                .publish_desired_prefix_removal::<DesiredPublicationError>(
+                    self.layout,
+                    &self.shape_lock,
+                    target,
+                    window_size,
+                )?
         } else {
             let mut lock = self.store.load_desired_as_lock()?;
             let before = lock.entries.len();
@@ -952,14 +960,14 @@ impl<'repo> MountMutationSession<'repo> {
     }
 
     /// Replay bounded entry windows using the appropriate private
-    /// publication strategy. Flat state is committed through one deferred,
-    /// streamed publication; sparse state touches only affected shards.
+    /// publication strategy. Rows share one transaction, and each affected
+    /// shard is published once after all input windows have been applied.
     pub fn replay_windows<E>(
         &mut self,
         mut next_window: impl FnMut() -> std::result::Result<Option<Vec<Entry>>, E>,
         result: &mut MountReplayResult,
-        mut after_window: impl FnMut() -> std::result::Result<(), E>,
-        after_flat_publish: impl FnOnce() -> std::result::Result<(), E>,
+        mut after_commit: impl FnMut() -> std::result::Result<(), E>,
+        after_publish: impl FnOnce() -> std::result::Result<(), E>,
     ) -> std::result::Result<(), E>
     where
         E: From<StateStoreError> + From<LockError> + From<crate::atomic::AtomicError>,
@@ -978,7 +986,7 @@ impl<'repo> MountMutationSession<'repo> {
             result.publication_may_have_landed = true;
             self.store
                 .publish_desired_complete::<E>(self.layout, &lock, self.target)?;
-            after_window()?;
+            after_commit()?;
             return Ok(());
         }
 
@@ -986,15 +994,14 @@ impl<'repo> MountMutationSession<'repo> {
             self.layout,
             &self.shape_lock,
             &mut next_window,
-            &mut result.imported,
-            &mut result.publication_may_have_landed,
-            &mut after_window,
-            after_flat_publish,
+            result,
+            &mut after_commit,
+            after_publish,
         )?;
         Ok(())
     }
 
-    /// Visit desired paths, seeking past excluded descendants without
+    /// Visit sorted, unique desired paths, seeking past excluded descendants without
     /// exposing their physical representation.
     pub fn visit_desired_paths<E>(
         &self,
@@ -1150,11 +1157,21 @@ mod tests {
                 let src = gp("source");
                 let dst = gp("target");
                 let mut session = DesiredMutationSession::acquire(&layout, target).unwrap();
-                let (_, collisions) = session.resolve_move(&src, &dst).unwrap();
-                let collisions = collisions
-                    .into_iter()
-                    .map(|entry| entry.path)
-                    .collect::<Vec<_>>();
+                assert!(
+                    session
+                        .prepare_move(&gp("source/untracked"), &dst)
+                        .unwrap()
+                        .is_none()
+                );
+                {
+                    let prepared = session.prepare_move(&src, &dst).unwrap().unwrap();
+                    assert_eq!(
+                        prepared.source_paths().collect::<Vec<_>>(),
+                        vec![&original.entries[0].path]
+                    );
+                    assert_eq!(prepared.collisions(), &original.entries[1..]);
+                    // Dropping an unpublished plan leaves the source available for retry.
+                }
                 session
                     .store
                     .conn
@@ -1164,7 +1181,14 @@ mod tests {
                      BEGIN SELECT RAISE(ABORT, 'injected materialized move failure'); END;",
                     )
                     .unwrap();
-                assert!(session.publish_move(&src, &dst, &collisions).is_err());
+                assert!(
+                    session
+                        .prepare_move(&src, &dst)
+                        .unwrap()
+                        .unwrap()
+                        .publish()
+                        .is_err()
+                );
                 let mut on_disk = LockStore::load_repository(&layout).unwrap();
                 on_disk.entries.sort_by(|a, b| a.path.cmp(&b.path));
                 assert_eq!(on_disk.entries, original.entries);
@@ -1183,8 +1207,12 @@ mod tests {
                 drop(session);
 
                 let mut session = DesiredMutationSession::acquire(&layout, target).unwrap();
-                session.resolve_move(&src, &dst).unwrap();
-                session.publish_move(&src, &dst, &collisions).unwrap();
+                session
+                    .prepare_move(&src, &dst)
+                    .unwrap()
+                    .unwrap()
+                    .publish()
+                    .unwrap();
                 let desired = LockStore::load_repository(&layout).unwrap();
                 assert_eq!(
                     desired.entries,
@@ -1314,7 +1342,10 @@ mod tests {
                 let mut session = DesiredMutationSession::acquire(&layout, target).unwrap();
                 for retained_lock in [false, true] {
                     if retained_lock {
-                        session.full_lock = Some(lock.clone());
+                        let mut retained = lock.clone();
+                        retained.entries.reverse();
+                        retained.entries.push(retained.entries[0].clone());
+                        session.full_lock = Some(retained);
                     }
                     let mut visited = Vec::new();
                     session
@@ -1413,7 +1444,7 @@ mod tests {
                 .unwrap();
             assert_eq!(paths.len(), 129);
             assert!(mutation.full_lock.is_none());
-            mutation.publish_removals(&paths, &[], true).unwrap();
+            mutation.publish_removals(&paths, &[]).unwrap();
             assert!(
                 LockStore::load_all(layout.root_path())
                     .unwrap()
@@ -1425,41 +1456,50 @@ mod tests {
 
     #[test]
     fn mount_session_deletes_in_windows_and_repeats_idempotently() {
-        let (_temp, layout) = layout();
-        let target_shape = LockShardLevels::new(0).unwrap();
-        let entries = (0..23)
-            .map(|index| Entry {
-                path: gp(&format!("mounted/file-{index:02}.bin")),
-                oid: oid('a'),
-            })
-            .collect::<Vec<_>>();
-        publish_complete(
-            &layout,
-            &Lock {
-                entries: entries.clone(),
-            },
-            target_shape,
-        )
-        .unwrap();
-        record_materialized_for_test(&layout, &entries).unwrap();
+        for depth in [0, 1, 2] {
+            let (_temp, layout) = layout();
+            let target_shape = LockShardLevels::new(depth).unwrap();
+            let mut entries = (0..23)
+                .map(|index| Entry {
+                    path: gp(&format!("mounted/file-{index:02}.bin")),
+                    oid: oid('a'),
+                })
+                .collect::<Vec<_>>();
+            let neighbor = Entry {
+                path: gp("mounted-neighbor/file.bin"),
+                oid: oid('b'),
+            };
+            entries.push(neighbor.clone());
+            publish_complete(
+                &layout,
+                &Lock {
+                    entries: entries.clone(),
+                },
+                target_shape,
+            )
+            .unwrap();
+            record_materialized_for_test(&layout, &entries).unwrap();
 
-        let mut session = MountMutationSession::acquire(&layout, target_shape).unwrap();
-        assert_eq!(session.desired_count_subtree(&gp("mounted")).unwrap(), 23);
-        assert_eq!(
-            session.delete_subtree_windowed(&gp("mounted"), 5).unwrap(),
-            23
-        );
-        assert_eq!(session.desired_count_subtree(&gp("mounted")).unwrap(), 0);
-        assert_eq!(
-            session.delete_subtree_windowed(&gp("mounted"), 5).unwrap(),
-            0
-        );
-        assert!(
-            load_materialized_for_test(&layout)
-                .unwrap()
-                .entries
-                .is_empty()
-        );
+            let mut session = MountMutationSession::acquire(&layout, target_shape).unwrap();
+            assert_eq!(session.desired_count_subtree(&gp("mounted")).unwrap(), 23);
+            assert_eq!(
+                session.delete_subtree_windowed(&gp("mounted"), 5).unwrap(),
+                23
+            );
+            assert_eq!(session.desired_count_subtree(&gp("mounted")).unwrap(), 0);
+            assert_eq!(
+                session.delete_subtree_windowed(&gp("mounted"), 5).unwrap(),
+                0
+            );
+            assert_eq!(
+                load_materialized_for_test(&layout).unwrap().entries,
+                vec![neighbor.clone()]
+            );
+            assert_eq!(
+                LockStore::load_all(layout.root_path()).unwrap().entries,
+                vec![neighbor]
+            );
+        }
     }
 
     #[test]
@@ -1486,68 +1526,248 @@ mod tests {
     }
 
     #[test]
-    fn mount_session_replays_bounded_windows_through_one_flat_publication() {
-        let (_temp, layout) = layout();
-        let target_shape = LockShardLevels::new(0).unwrap();
-        let mut session = MountMutationSession::acquire(&layout, target_shape).unwrap();
-        let mut windows = (0..4)
-            .map(|window| {
-                (0..3)
-                    .map(|row| Entry {
-                        path: gp(&format!("mounted/{window}-{row}.bin")),
-                        oid: oid('b'),
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<std::collections::VecDeque<_>>();
-        let mut result = MountReplayResult::default();
-        let mut publications = 0usize;
-        session
-            .replay_windows::<PublishError>(
-                || Ok(windows.pop_front()),
-                &mut result,
-                || {
-                    publications += 1;
-                    Ok(())
-                },
-                || Ok(()),
-            )
-            .unwrap();
+    fn mount_session_replays_bounded_windows_in_one_commit() {
+        for depth in [0, 1, 2] {
+            let (_temp, layout) = layout();
+            let target_shape = LockShardLevels::new(depth).unwrap();
+            let mut session = MountMutationSession::acquire(&layout, target_shape).unwrap();
+            let mut windows = (0..4)
+                .map(|window| {
+                    (0..3)
+                        .map(|row| Entry {
+                            path: gp(&format!("mounted/{window}-{row}.bin")),
+                            oid: oid('b'),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<std::collections::VecDeque<_>>();
+            let expected: Vec<_> = windows.iter().flatten().cloned().collect();
+            let mut result = MountReplayResult::default();
+            let mut publications = 0usize;
+            session
+                .replay_windows::<PublishError>(
+                    || Ok(windows.pop_front()),
+                    &mut result,
+                    || {
+                        publications += 1;
+                        Ok(())
+                    },
+                    || Ok(()),
+                )
+                .unwrap();
 
-        assert!(windows.is_empty());
-        assert_eq!(result.imported, 12);
-        assert!(result.publication_may_have_landed);
-        assert_eq!(publications, 1);
-        assert_eq!(session.desired_count_subtree(&gp("mounted")).unwrap(), 12);
+            assert!(windows.is_empty());
+            assert_eq!(result.imported, 12);
+            assert!(result.publication_may_have_landed);
+            assert_eq!(publications, 1);
+            assert_eq!(session.desired_count_subtree(&gp("mounted")).unwrap(), 12);
+            let mut published = LockStore::load_all(layout.root_path()).unwrap().entries;
+            published.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+            assert_eq!(published, expected);
+            assert_eq!(
+                session.store.load_desired_as_lock().unwrap().entries,
+                expected
+            );
+        }
     }
 
     #[test]
-    fn mount_session_retains_publication_evidence_when_flat_commit_fails() {
-        let (_temp, layout) = layout();
-        let target_shape = LockShardLevels::new(0).unwrap();
-        let mut session = MountMutationSession::acquire(&layout, target_shape).unwrap();
-        let mut windows = Some(vec![Entry {
-            path: gp("mounted/published.bin"),
-            oid: oid('c'),
-        }]);
-        let mut result = MountReplayResult::default();
-        let outcome = session.replay_windows::<PublishError>(
-            || Ok(windows.take()),
-            &mut result,
-            || Ok(()),
-            || Err(PublishError::InjectedAfterPublish),
-        );
+    fn mount_replay_publishes_a_shared_shard_only_once_across_input_windows() {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap()
+            .install(|| {
+                let (_temp, layout) = layout();
+                let levels = LockShardLevels::new(1).unwrap();
+                let shard = shard_id_for_path(&gp("mounted/seed"), levels);
+                let entries: Vec<_> = (0..)
+                    .map(|index| gp(&format!("mounted/{index:06}.bin")))
+                    .filter(|path| shard_id_for_path(path, levels) == shard)
+                    .take(12)
+                    .map(|path| Entry {
+                        path,
+                        oid: oid('b'),
+                    })
+                    .collect();
+                let mut windows = entries.chunks(3);
+                let mut session = MountMutationSession::acquire(&layout, levels).unwrap();
+                let before = lock::test_support::render_entries_calls();
+                let mut result = MountReplayResult::default();
+                session
+                    .replay_windows::<PublishError>(
+                        || Ok(windows.next().map(<[Entry]>::to_vec)),
+                        &mut result,
+                        || Ok(()),
+                        || Ok(()),
+                    )
+                    .unwrap();
+                assert_eq!(result.imported, entries.len());
+                assert_eq!(lock::test_support::render_entries_calls() - before, 1);
+                assert_eq!(
+                    LockStore::load_all(layout.root_path()).unwrap().entries,
+                    entries
+                );
+            });
+    }
 
-        assert!(matches!(outcome, Err(PublishError::InjectedAfterPublish)));
-        assert_eq!(result.imported, 0);
-        assert!(result.publication_may_have_landed);
+    #[test]
+    fn mount_deletion_recovers_after_a_later_publication_group_fails() {
+        let (_temp, layout) = layout();
+        let levels = LockShardLevels::new(1).unwrap();
+        let mut entries = ["mounted/first", "mounted/second"].map(|path| Entry {
+            path: gp(path),
+            oid: oid('c'),
+        });
+        entries.sort_by_key(|entry| shard_id_for_path(&entry.path, levels));
+        let shards = entries
+            .each_ref()
+            .map(|entry| shard_id_for_path(&entry.path, levels));
+        assert_ne!(shards[0], shards[1]);
+        publish_complete(
+            &layout,
+            &Lock {
+                entries: entries.to_vec(),
+            },
+            levels,
+        )
+        .unwrap();
+        record_materialized_for_test(&layout, &entries).unwrap();
+        let mut session = MountMutationSession::acquire(&layout, levels).unwrap();
+        let blocked = layout
+            .root_path()
+            .join(crate::state::CanonicalShardIdBuf::encode(shards[1]).as_str());
+        let original = std::fs::read(&blocked).unwrap();
+        std::fs::remove_file(&blocked).unwrap();
+        std::fs::create_dir(&blocked).unwrap();
+        assert!(session.delete_subtree_windowed(&gp("mounted"), 1).is_err());
+        assert_eq!(session.desired_count_subtree(&gp("mounted")).unwrap(), 2);
+        assert_eq!(
+            load_materialized_for_test(&layout).unwrap().entries.len(),
+            2
+        );
+        assert!(
+            !layout
+                .root_path()
+                .join(crate::state::CanonicalShardIdBuf::encode(shards[0]).as_str(),)
+                .exists()
+        );
+        drop(session);
+        std::fs::remove_dir(&blocked).unwrap();
+        std::fs::write(&blocked, original).unwrap();
+        let mut session = MountMutationSession::acquire(&layout, levels).unwrap();
+        assert_eq!(
+            session.delete_subtree_windowed(&gp("mounted"), 1).unwrap(),
+            1
+        );
         assert!(
             LockStore::load_all(layout.root_path())
                 .unwrap()
                 .entries
-                .iter()
-                .any(|entry| entry.path == gp("mounted/published.bin"))
+                .is_empty()
         );
+        assert!(
+            load_materialized_for_test(&layout)
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn mount_replay_recovers_after_a_later_publication_group_fails() {
+        let (_temp, layout) = layout();
+        let levels = LockShardLevels::new(1).unwrap();
+        let mut entries = ["mounted/first", "mounted/second"].map(|path| Entry {
+            path: gp(path),
+            oid: oid('c'),
+        });
+        entries.sort_by_key(|entry| shard_id_for_path(&entry.path, levels));
+        let shards = entries
+            .each_ref()
+            .map(|entry| shard_id_for_path(&entry.path, levels));
+        assert_ne!(shards[0], shards[1]);
+        let mut session = MountMutationSession::acquire(&layout, levels).unwrap();
+        let blocked = layout
+            .root_path()
+            .join(crate::state::CanonicalShardIdBuf::encode(shards[1]).as_str());
+        std::fs::create_dir_all(&blocked).unwrap();
+        let mut windows = entries.chunks(1);
+        let mut result = MountReplayResult::default();
+        assert!(
+            session
+                .replay_windows::<PublishError>(
+                    || Ok(windows.next().map(<[Entry]>::to_vec)),
+                    &mut result,
+                    || Ok(()),
+                    || Ok(()),
+                )
+                .is_err()
+        );
+        assert!(result.publication_may_have_landed);
+        assert_eq!(result.imported, 0);
+        assert_eq!(session.desired_count_subtree(&gp("mounted")).unwrap(), 0);
+        assert!(
+            layout
+                .root_path()
+                .join(crate::state::CanonicalShardIdBuf::encode(shards[0]).as_str(),)
+                .is_file()
+        );
+        drop(session);
+        std::fs::remove_dir(blocked).unwrap();
+
+        let mut session = MountMutationSession::acquire(&layout, levels).unwrap();
+        let mut windows = entries.chunks(1);
+        let mut result = MountReplayResult::default();
+        session
+            .replay_windows::<PublishError>(
+                || Ok(windows.next().map(<[Entry]>::to_vec)),
+                &mut result,
+                || Ok(()),
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(result.imported, entries.len());
+        let mut published = LockStore::load_all(layout.root_path()).unwrap().entries;
+        published.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+        entries.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(published, entries);
+        assert_eq!(
+            session.store.load_desired_as_lock().unwrap().entries,
+            entries
+        );
+    }
+
+    #[test]
+    fn mount_session_retains_publication_evidence_when_commit_fails() {
+        for depth in [0, 1] {
+            let (_temp, layout) = layout();
+            let target_shape = LockShardLevels::new(depth).unwrap();
+            let mut session = MountMutationSession::acquire(&layout, target_shape).unwrap();
+            let mut windows = Some(vec![Entry {
+                path: gp("mounted/published.bin"),
+                oid: oid('c'),
+            }]);
+            let mut result = MountReplayResult::default();
+            let outcome = session.replay_windows::<PublishError>(
+                || Ok(windows.take()),
+                &mut result,
+                || Ok(()),
+                || Err(PublishError::InjectedAfterPublish),
+            );
+
+            assert!(matches!(outcome, Err(PublishError::InjectedAfterPublish)));
+            assert_eq!(result.imported, 0);
+            assert!(result.publication_may_have_landed);
+            assert!(
+                LockStore::load_all(layout.root_path())
+                    .unwrap()
+                    .entries
+                    .iter()
+                    .any(|entry| entry.path == gp("mounted/published.bin"))
+            );
+            assert_eq!(session.desired_count_subtree(&gp("mounted")).unwrap(), 0);
+        }
     }
 
     #[test]
