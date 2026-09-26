@@ -36,9 +36,10 @@ SHA-256 checksum before installation. Use Git alongside Gat to commit metadata.
     <Note>
       By default, `gat` is installed to `~/.local/bin` on macOS/Linux and
       `%USERPROFILE%\.local\bin` on Windows. The installer tells you if that
-      directory is not currently on your <Tooltip tip="The list of directories your shell searches when you type a command such as gat.">PATH</Tooltip>.
-      If prompted, add it to `PATH` before continuing; opening a new shell alone
-      does not add the directory.
+      directory is missing from your <Tooltip tip="The list of directories your shell searches when you type a command such as gat.">PATH</Tooltip>
+      or another `gat` command takes precedence. Follow the printed instructions
+      to use the new installation by name, or run the full-path command provided
+      by the installer. Opening a new shell alone does not add a directory to `PATH`.
     </Note>
   </Step>
 
@@ -80,6 +81,8 @@ Choose an option for a pinned version, custom location, or source build.
 
     The destination must be a regular file or absent, not a directory or symlink.
     On Windows, close running Gat processes if the executable is locked.
+    If temporary files cannot be removed, the installer prints their location
+    for manual cleanup. This warning does not change the installation result.
   </Accordion>
 
   <Accordion

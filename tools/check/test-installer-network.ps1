@@ -6,7 +6,7 @@ $parseErrors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile(
   (Join-Path $PSScriptRoot '../../docs/install.ps1'), [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw $parseErrors[0] }
-foreach ($name in @('Resolve-ReleaseRedirect', 'Invoke-ReleaseRequest', 'Get-ReleaseResource')) {
+foreach ($name in @('Write-InstallerMessage', 'Resolve-ReleaseRedirect', 'Invoke-ReleaseRequest', 'Get-ReleaseResource')) {
   $helper = $ast.Find({ param($node)
     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
   }, $true)
@@ -113,6 +113,9 @@ foreach ($mode in @('json', 'file', 'missing', 'headers', 'body', 'trickle', 're
       if ($mode -eq 'redirect' -and $peer.Requests -ne 2) { throw 'redirect was not followed' }
       if ($result.tag_name -cne 'v0.1.0') { throw 'response was not fully downloaded' }
     }
+    if ($mode -eq 'disk_failure' -and $failure.Exception.Message -notmatch 'could not be saved') {
+      throw 'local file failure lost its recovery guidance'
+    }
     Write-Output "PASS: HTTP $mode"
   } finally {
     $peer.Dispose()
@@ -137,6 +140,9 @@ foreach ($mode in @('reset_once', 'reset_always', 'disk_failure')) {
       if ($null -eq $failure -or $peer.Requests -ne 3) { throw 'body retry budget was not enforced' }
     } elseif ($null -eq $failure -or $peer.Requests -ne 1) {
       throw 'local file failure was retried'
+    }
+    if ($mode -eq 'disk_failure' -and $failure.Exception.Message -notmatch 'could not be saved') {
+      throw 'local file failure lost its recovery guidance'
     }
     Write-Output "PASS: HTTP $mode"
   } finally {

@@ -20,9 +20,56 @@ MIN_GLIBC=2.28
 # leading "v" (which is stripped and re-added separately).
 SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$'
 
+step() {
+  printf '=> %s\n' "$1"
+}
+
 err() {
-  echo "error: $*" >&2
+  printf 'error: %s\n' "$*" >&2
   exit 1
+}
+
+# Print one literal shell argument, including apostrophes and trailing newlines.
+quote_shell() {
+  printf "'"
+  while :; do
+    case "$1" in
+      *"'"*)
+        printf '%s' "${1%%\'*}" "'\\''"
+        set -- "${1#*\'}"
+        ;;
+      *) printf "%s'" "$1"; break ;;
+    esac
+  done
+}
+
+show_next_steps() {
+  resolved_gat="$(command -v gat 2>/dev/null)" || resolved_gat=""
+  printf '\nTry gat now:\n  '
+  # Compare file identity through Bash: POSIX test has no portable -ef operator.
+  if [ -n "$resolved_gat" ] && bash -p -c '[[ "$1" -ef "$2" ]]' bash "$resolved_gat" "$INSTALL_DIR/gat"; then
+    printf 'gat --help\n'
+  else
+    quote_shell "$INSTALL_DIR/gat"
+    printf ' --help\n'
+    if [ -n "$resolved_gat" ]; then
+      printf '\nYour PATH currently finds another gat first:\n  %s\n' "$resolved_gat"
+    fi
+    case "$INSTALL_DIR" in
+      *:*)
+        printf '\nThis directory contains a colon, so it cannot be added to PATH.\nUse the full command above, or set GAT_INSTALL_DIR to a directory without a colon and reinstall.\n'
+        ;;
+      *)
+        printf '\nTo use this installation by name, put its directory first in PATH.\n'
+        printf 'For sh, bash, or zsh, run:\n  export PATH='
+        quote_shell "$INSTALL_DIR"
+        # shellcheck disable=SC2016 # The suggested command expands PATH when run.
+        printf ':"$PATH"\n'
+        printf '\nFor future terminals, add that line to your shell startup file\n(e.g. ~/.bashrc for bash or ~/.zshrc for zsh).\n'
+        ;;
+    esac
+  fi
+  printf '\nInstallation guide: https://getgat.dev/installation\n'
 }
 
 need_cmd() {
@@ -37,6 +84,15 @@ fetch() {
 }
 
 assert_destination() {
+  # Reject files in the directory chain before requesting release metadata.
+  parent="$INSTALL_DIR"
+  while [ ! -d "$parent" ]; do
+    if [ -e "$parent" ] || [ -L "$parent" ]; then
+      err "installation directory is blocked by a non-directory: $parent. Set GAT_INSTALL_DIR to a directory you can write to."
+    fi
+    parent="${parent%/*}"
+    [ -n "$parent" ] || parent=/
+  done
   if [ -L "$INSTALL_DIR/gat" ] || {
     [ -e "$INSTALL_DIR/gat" ] && [ ! -f "$INSTALL_DIR/gat" ]
   }; then
@@ -45,6 +101,7 @@ assert_destination() {
 }
 
 usage() {
+  if [ "${1:-0}" -ne 0 ]; then exec 1>&2; fi
   printf '%s\n' 'usage: install.sh [--version|-v <version>] [--libc auto|gnu|musl]
 
   --version, -v <version>   Install this exact gat release (e.g. 0.1.0 or
@@ -52,8 +109,15 @@ usage() {
                              be supplied via the GAT_VERSION environment
                              variable.
   --libc auto|gnu|musl      Linux binary variant (default: auto). Auto uses
-                             GNU on glibc '"$MIN_GLIBC"'+, static musl otherwise.' >&2
-  exit "${1:-1}"
+                             GNU on glibc '"$MIN_GLIBC"'+, static musl otherwise.
+  --help, -h              Show this help.
+
+Environment:
+  GAT_VERSION             Release to install (overridden by --version).
+  GAT_INSTALL_DIR         Installation directory (default: ~/.local/bin).
+
+The installer does not modify your shell startup files.'
+  exit "${1:-0}"
 }
 
 while [ $# -gt 0 ]; do
@@ -82,7 +146,7 @@ while [ $# -gt 0 ]; do
       usage 0
       ;;
     *)
-      echo "error: unknown argument: $1" >&2
+      printf 'error: unknown argument: %s\n' "$1" >&2
       usage 1
       ;;
   esac
@@ -98,7 +162,7 @@ if [ -z "$INSTALL_DIR" ]; then
 fi
 
 for utility in bash curl tar awk grep uname mktemp rm mkdir install mv cat sleep; do
-  need_cmd "$utility" || err "'$utility' is required to install gat"
+  need_cmd "$utility" || err "'$utility' is required to install gat. Install it with your system package manager, then try again."
 done
 # Make relative overrides safe for utility option parsing and staged moves.
 case "$INSTALL_DIR" in
@@ -109,6 +173,10 @@ assert_destination
 if ! need_cmd sha256sum && ! need_cmd shasum; then
   err "'sha256sum' or 'shasum' is required to install gat"
 fi
+
+printf '\n'
+step 'Installing gat'
+printf '\n'
 
 os="$(uname -s)"
 arch="$(uname -m)"
@@ -132,12 +200,12 @@ case "$os" in
         }'; then
           LIBC=gnu
         fi
-        echo "Detected glibc $glibc_version; selecting $LIBC build."
+        step "Using the $LIBC Linux build (glibc $glibc_version detected)."
       else
-        echo "Could not detect glibc; selecting static musl build."
+        step 'Using the portable Linux build (glibc not detected).'
       fi
     else
-      echo "Selecting $LIBC build (--libc override)."
+      step "Using the $LIBC Linux build you requested."
     fi
     platform="unknown-linux-$LIBC"
     ;;
@@ -157,6 +225,7 @@ esac
 target="${cpu}-${platform}"
 
 if [ -z "$VERSION" ]; then
+  step 'Finding the latest release...'
   # Resolve GitHub's canonical release redirect instead of parsing JSON with
   # line-oriented tools. Validate the resulting URL before using its tag.
   latest_url="$(fetch -o /dev/null -w '%{url_effective}' \
@@ -186,16 +255,23 @@ tag="v$core"
 archive="gat-$tag-$target.tar.gz"
 base_url="https://github.com/$REPO/releases/download/$tag"
 
-workdir="$(mktemp -d)"
+workdir="$(mktemp -d)" || err "could not create a temporary directory. Check TMPDIR and available disk space."
 stagedir=""
 probe_pid=""
 cleanup() {
+  status=$?
+  trap - EXIT
   if [ -n "$probe_pid" ]; then
     kill -TERM "$probe_pid" 2>/dev/null || :
     wait "$probe_pid" 2>/dev/null || :
   fi
-  rm -rf "$workdir"
-  [ -z "$stagedir" ] || rm -rf "$stagedir"
+  if ! rm -rf "$workdir"; then
+    printf 'warning: could not remove temporary directory %s; remove it manually.\n' "$workdir" >&2
+  fi
+  if [ -n "$stagedir" ] && ! rm -rf "$stagedir"; then
+    printf 'warning: could not remove staging directory %s; remove it manually.\n' "$stagedir" >&2
+  fi
+  exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 129' HUP
@@ -204,8 +280,9 @@ trap 'exit 143' TERM
 
 # Inspect the release's own asset inventory first. Older pinned releases may
 # not offer musl; do not substitute a different version or an incompatible GNU asset.
+step 'Checking release files...'
 fetch "$base_url/SHA256SUMS" -o "$workdir/SHA256SUMS" \
-  || err "failed to download checksum for $archive"
+  || err "failed to download checksum for $archive. Check your connection and that release $tag exists at https://github.com/$REPO/releases."
 
 # Select one exact filename before checking: the other release archives are
 # intentionally not downloaded. Reject missing, duplicate, or malformed entries.
@@ -225,31 +302,36 @@ awk -v archive="$archive" '
 [ -s "$workdir/$archive.sha256" ] \
   || err "release $tag does not provide $target; choose a release with this build or build from source (https://getgat.dev/installation); existing installation preserved"
 
-echo "Downloading gat $tag for $target..."
+step "Downloading gat $tag for $target..."
 fetch "$base_url/$archive" -o "$workdir/$archive" \
-  || err "failed to download $archive from release $tag"
+  || err "failed to download $archive from release $tag. Check your connection and try again."
 
+step 'Verifying the download...'
 (
   cd "$workdir" || exit 1
   if need_cmd sha256sum; then
-    sha256sum -c "$archive.sha256"
+    sha256sum -c "$archive.sha256" > /dev/null
   else
-    shasum -a 256 -c "$archive.sha256"
+    shasum -a 256 -c "$archive.sha256" > /dev/null
   fi
-) || err "checksum verification failed for $archive"
+) || err "checksum verification failed for $archive. Please run the installer again; the download may be incomplete."
 
+step 'Extracting gat...'
 tar -xzf "$workdir/$archive" -C "$workdir" \
-  || err "failed to extract $archive"
-mkdir -p "$INSTALL_DIR"
+  || err "failed to extract $archive. Check available disk space and try again; the archive may be damaged."
+mkdir -p "$INSTALL_DIR" \
+  || err "could not create $INSTALL_DIR. Set GAT_INSTALL_DIR to a directory you can write to."
 # Stage on the destination filesystem so committing the upgrade is a rename.
 # A failed copy or incompatible executable must leave the old binary intact.
-stagedir="$(mktemp -d "$INSTALL_DIR/.gat-install.XXXXXXXX")"
+stagedir="$(mktemp -d "$INSTALL_DIR/.gat-install.XXXXXXXX")" \
+  || err "could not stage gat in $INSTALL_DIR. Check directory permissions and available disk space; existing installation preserved."
 payload="$workdir/gat-$tag-$target/gat"
 if [ ! -f "$payload" ] || [ -L "$payload" ]; then
   err "archive does not contain a regular gat executable"
 fi
 install -m 755 "$payload" "$stagedir/gat" \
-  || err "failed to stage gat; existing installation preserved"
+  || err "failed to stage gat. Check directory permissions and available disk space; existing installation preserved."
+step 'Checking that gat runs on your system...'
 # Poll a child process so startup cannot hang installation indefinitely. Keep
 # its PID owned until wait completes, including when a signal triggers cleanup.
 # Bash job control gives the probe its own process group on both Linux and
@@ -288,16 +370,13 @@ if [ "$probe_status" -ne 0 ]; then
 fi
 [ "$(cat "$stagedir/version")" = "gat $core" ] \
   || err "downloaded gat reported an unexpected version; existing installation preserved"
+step "Installing to $INSTALL_DIR..."
 assert_destination
 mv -f "$stagedir/gat" "$INSTALL_DIR/" \
-  || err "failed to replace gat; existing installation preserved"
+  || err "failed to replace gat. Check directory permissions and close any running gat processes, then try again; existing installation preserved."
 
-echo "Installed gat $tag to $INSTALL_DIR/gat"
+printf '\n'
+step "Successfully installed gat $tag!"
+printf '  Location: %s/gat\n' "$INSTALL_DIR"
 
-case ":${PATH:-}:" in
-  *":$INSTALL_DIR:"*) ;;
-  *)
-    echo "Note: $INSTALL_DIR is not on your PATH."
-    echo "  Add it, e.g.: export PATH=\"$INSTALL_DIR:\$PATH\""
-    ;;
-esac
+show_next_steps

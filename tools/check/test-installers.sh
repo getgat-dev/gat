@@ -128,10 +128,11 @@ MOCK
 REAL_INSTALL="$(command -v install)"
 REAL_MV="$(command -v mv)"
 REAL_SLEEP="$(command -v sleep)"
-export REAL_INSTALL REAL_MV REAL_SLEEP
+REAL_RM="$(command -v rm)"
+export REAL_INSTALL REAL_MV REAL_SLEEP REAL_RM
 cat > "$fixture/bin/install" <<'MOCK'
 #!/bin/sh
-if [ "$FIXTURE_SCENARIO" = copy_failure ]; then
+if [ "$FIXTURE_SCENARIO" = copy_failure ] || [ "$FIXTURE_SCENARIO" = cleanup_failure ]; then
   printf 'partial executable' > "$4"
   exit 1
 fi
@@ -156,9 +157,17 @@ cat > "$fixture/bin/sleep" <<'MOCK'
 [ "$FIXTURE_SCENARIO" != hung_payload ] || { "$REAL_SLEEP" 0.05; exit 0; }
 exec "$REAL_SLEEP" "$@"
 MOCK
+cat > "$fixture/bin/rm" <<'MOCK'
+#!/bin/sh
+case "$FIXTURE_SCENARIO" in
+  cleanup_success|cleanup_failure)
+    case "$*" in *"$FIXTURE_DIR/tmp/"*) exit 1 ;; esac ;;
+esac
+exec "$REAL_RM" "$@"
+MOCK
 chmod +x "$fixture/bin/"*
 # Limit PATH so the fallback test cannot accidentally discover sha256sum.
-for utility in bash ps tr cp grep awk mktemp rm tar gzip mkdir cat; do
+for utility in bash ps tr cp grep awk mktemp tar gzip mkdir cat; do
   ln -s "$(command -v "$utility")" "$fixture/bin/$utility"
 done
 
@@ -170,8 +179,8 @@ for checker in sha256sum shasum; do
   ln -s "$(command -v "$checker")" "$fixture/bin/$checker"
   for scenario in valid startup_env descendant hangup missing duplicate malformed short_hash malformed_duplicate mismatch similar_name crlf uppercase_hash \
     upgrade latest latest_failure latest_bad_url latest_bad_tag download_failure checksum_download_failure checksum_read_failure \
-    invalid_archive missing_payload incompatible hung_payload wrong_version copy_failure rename_failure interrupted interrupted_probe directory symlink dangling_symlink fifo non_glibc \
-    multiline_prefix multiline_suffix trailing_newline carriage_return double_prefix empty_version empty_version_equals env_version relative_path macos_arm64 macos_x86_64 linux_arm64 unsupported_os unsupported_arch \
+    invalid_archive missing_payload incompatible hung_payload wrong_version copy_failure cleanup_success cleanup_failure rename_failure interrupted interrupted_probe directory symlink dangling_symlink fifo non_glibc \
+    multiline_prefix multiline_suffix trailing_newline carriage_return double_prefix empty_version empty_version_equals env_version relative_path quoted_path path_present path_shadowed path_separator path_trailing_slash macos_arm64 macos_x86_64 linux_arm64 unsupported_os unsupported_arch \
     glibc_minimum glibc_old glibc_single_digit glibc_future_minor glibc_future_major glibc_malformed glibc_multiline missing_getconf musl_arm64 \
     override_musl override_gnu_old explicit_auto invalid_libc empty_libc empty_libc_equals missing_libc macos_libc old_release_musl; do
     export FIXTURE_SCENARIO="$scenario"
@@ -220,6 +229,10 @@ for checker in sha256sum shasum; do
       *) printf '%s  %s\n' "$hash" "$archive" ;;
     esac >> "$fixture/SHA256SUMS"
     destination="$fixture/install $checker $scenario"
+    if [ "$scenario" = quoted_path ]; then
+      destination="$destination'\$literal\`text\`"
+    fi
+    if [ "$scenario" = path_separator ]; then destination="$destination:bin"; fi
     mkdir -p "$destination"
     # Failures must preserve an existing installation, not merely avoid a new one.
     case "$scenario" in
@@ -232,7 +245,7 @@ for checker in sha256sum shasum; do
     esac
     expect_success=false
     case "$scenario" in
-      valid|startup_env|descendant|crlf|uppercase_hash|upgrade|latest|env_version|relative_path|macos_arm64|macos_x86_64|linux_arm64|non_glibc|glibc_minimum|glibc_old|glibc_single_digit|glibc_future_minor|glibc_future_major|glibc_malformed|glibc_multiline|missing_getconf|musl_arm64|override_musl|override_gnu_old|explicit_auto) expect_success=true ;;
+      valid|cleanup_success|startup_env|descendant|crlf|uppercase_hash|upgrade|latest|env_version|relative_path|quoted_path|path_present|path_shadowed|path_separator|path_trailing_slash|macos_arm64|macos_x86_64|linux_arm64|non_glibc|glibc_minimum|glibc_old|glibc_single_digit|glibc_future_minor|glibc_future_major|glibc_malformed|glibc_multiline|missing_getconf|musl_arm64|override_musl|override_gnu_old|explicit_auto) expect_success=true ;;
     esac
     set -- --version '0.1.0+build.1'
     export GAT_VERSION=''
@@ -266,7 +279,18 @@ for checker in sha256sum shasum; do
     if [ "$scenario" = missing_getconf ]; then
       mv "$fixture/bin/getconf" "$fixture/getconf"
     fi
-    if (cd "$fixture" && BASH_ENV="$startup_file" PATH="$fixture/bin" GAT_INSTALL_DIR="$install_override" "$installer_shell" \
+    installer_path="$fixture/bin"
+    case "$scenario" in
+      path_present) installer_path="$installer_path:$destination" ;;
+      path_trailing_slash) installer_path="$installer_path:$destination/" ;;
+      path_shadowed)
+        mkdir -p "$fixture/shadow"
+        cp "$fixture/gat" "$fixture/shadow/gat"
+        chmod +x "$fixture/shadow/gat"
+        installer_path="$fixture/shadow:$installer_path:$destination"
+        ;;
+    esac
+    if (cd "$fixture" && BASH_ENV="$startup_file" PATH="$installer_path" GAT_INSTALL_DIR="$install_override" "$installer_shell" \
       "$repo_dir/docs/install.sh" "$@") > "$fixture/output" 2>&1; then
       if [ "$expect_success" != true ]; then
         cat "$fixture/output"
@@ -294,6 +318,33 @@ for checker in sha256sum shasum; do
     fi
     if [ "$expect_success" = true ]; then
       grep -Fq "Downloading gat v0.1.0+build.1 for $target" "$fixture/output"
+      grep -Fq 'Successfully installed gat' "$fixture/output"
+      grep -Fq 'Try gat now:' "$fixture/output"
+      test "$(grep -c -- ' --help$' "$fixture/output")" -eq 1
+      if [ "$scenario" = path_present ] || [ "$scenario" = path_trailing_slash ]; then
+        grep -Fxq '  gat --help' "$fixture/output"
+        if grep -Fq 'export PATH=' "$fixture/output"; then
+          echo 'FAIL: unnecessary PATH instructions'; exit 1
+        fi
+      elif [ "$scenario" = path_separator ]; then
+        grep -Fq 'cannot be added to PATH' "$fixture/output"
+        if grep -Fq 'export PATH=' "$fixture/output"; then
+          echo 'FAIL: unusable PATH command'; exit 1
+        fi
+      else
+        if [ "$scenario" = path_shadowed ]; then
+          grep -Fq 'another gat first' "$fixture/output"
+        fi
+        path_command="$(awk '/^  export PATH=/ { sub(/^  /, ""); print }' "$fixture/output")"
+        test -n "$path_command"
+        # shellcheck disable=SC2016 # Read PATH in the child after running the suggestion.
+        actual_path="$(PATH="$installer_path" "$installer_shell" -c "$path_command"'; printf "%s" "$PATH"')"
+        expected_directory="$install_override"
+        case "$expected_directory" in /*) ;; *) expected_directory="$fixture/$expected_directory" ;; esac
+        test "$actual_path" = "$expected_directory:$installer_path"
+      fi
+    elif grep -Fq 'Successfully installed gat' "$fixture/output"; then
+      echo 'FAIL: failure reported as a successful installation'; exit 1
     fi
     case "$scenario" in
       multiline_*|trailing_newline|carriage_return|double_prefix|empty_version|empty_version_equals)
@@ -322,7 +373,7 @@ for checker in sha256sum shasum; do
         fi
         test "$(wc -l < "$fixture/requests" | tr -d ' ')" = 1 ;;
       latest_bad_tag) grep -q 'invalid version' "$fixture/output" ;;
-      invalid_archive) grep -q 'failed to extract' "$fixture/output" ;;
+      invalid_archive) grep -q 'failed to extract' "$fixture/output"; grep -q 'available disk space' "$fixture/output" ;;
       missing_payload) grep -q 'archive does not contain a regular gat executable' "$fixture/output" ;;
       hung_payload) grep -q 'gat startup timed out' "$fixture/output" ;;
       wrong_version) grep -q 'reported an unexpected version' "$fixture/output" ;;
@@ -330,8 +381,8 @@ for checker in sha256sum shasum; do
         grep -q 'downloaded gat cannot run' "$fixture/output"
         grep -q 'loader: GLIBC_2.39 not found' "$fixture/output"
         test "$(wc -l < "$fixture/requests" | tr -d ' ')" = 2 ;;
-      copy_failure) grep -q 'failed to stage gat' "$fixture/output" ;;
-      rename_failure) grep -q 'failed to replace gat' "$fixture/output" ;;
+      copy_failure|cleanup_failure) grep -q 'failed to stage gat' "$fixture/output"; grep -q 'directory permissions' "$fixture/output" ;;
+      rename_failure) grep -q 'failed to replace gat' "$fixture/output"; grep -q 'directory permissions' "$fixture/output" ;;
       hangup) test "$installer_status" -eq 129 ;;
       interrupted|interrupted_probe)
         test "$installer_status" -eq 143
@@ -353,6 +404,14 @@ for checker in sha256sum shasum; do
         *) kill -KILL "$child_pid"; echo 'FAIL: probe descendant survived'; exit 1 ;;
       esac
     fi
+    case "$scenario" in
+      cleanup_success|cleanup_failure)
+        grep -Fq 'warning: could not remove temporary directory' "$fixture/output"
+        test -n "$(find "$fixture/tmp" -mindepth 1 -print)"
+        rm -rf "$fixture/tmp"
+        mkdir "$fixture/tmp"
+        ;;
+    esac
     test -z "$(find "$destination" -name '.gat-install.*' -print)"
     test -z "$(find "$fixture/tmp" -mindepth 1 -print)"
     echo "PASS: $checker $scenario"
@@ -364,10 +423,19 @@ done
 # Run in a subshell so the caller's environment stays intact.
 (
   unset HOME GAT_INSTALL_DIR
-  PATH="$fixture/no-tools" "$installer_shell" "$repo_dir/docs/install.sh" --help > "$fixture/output" 2>&1
+  PATH="$fixture/no-tools" "$installer_shell" "$repo_dir/docs/install.sh" --help > "$fixture/output" 2> "$fixture/stderr"
 )
 grep -q '^usage: install.sh' "$fixture/output"
-echo 'PASS: help without HOME'
+test ! -s "$fixture/stderr"
+grep -q 'GAT_INSTALL_DIR' "$fixture/output"
+echo 'PASS: help without HOME, on stdout'
+if "$installer_shell" "$repo_dir/docs/install.sh" --unknown > "$fixture/output" 2> "$fixture/stderr"; then
+  echo 'FAIL: accepted unknown option'; exit 1
+fi
+test ! -s "$fixture/output"
+grep -q 'unknown argument' "$fixture/stderr"
+grep -q '^usage: install.sh' "$fixture/stderr"
+echo 'PASS: usage errors on stderr'
 
 if (
   unset HOME GAT_INSTALL_DIR
@@ -378,3 +446,17 @@ if (
 fi
 grep -q 'set HOME or GAT_INSTALL_DIR' "$fixture/output"
 echo 'PASS: missing install directory diagnostic'
+
+# Invalid directory chains must fail before any downloads or filesystem changes.
+printf 'keep this file\n' > "$fixture/blocked"
+for install_directory in "$fixture/blocked" "$fixture/blocked/bin"; do
+  : > "$fixture/requests"
+  if PATH="$fixture/bin" GAT_INSTALL_DIR="$install_directory" "$installer_shell" \
+    "$repo_dir/docs/install.sh" --version 0.1.0 > "$fixture/output" 2>&1; then
+    echo 'FAIL: accepted a file in the install directory chain'; exit 1
+  fi
+  grep -q 'installation directory is blocked by a non-directory' "$fixture/output"
+  test ! -s "$fixture/requests"
+  test "$(cat "$fixture/blocked")" = 'keep this file'
+done
+echo 'PASS: invalid install directories fail before downloads'
