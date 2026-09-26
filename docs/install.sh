@@ -255,7 +255,14 @@ tag="v$core"
 archive="gat-$tag-$target.tar.gz"
 base_url="https://github.com/$REPO/releases/download/$tag"
 
-workdir="$(mktemp -d)" || err "could not create a temporary directory. Check TMPDIR and available disk space."
+# Apple's mktemp may prefer the system temp directory over TMPDIR unless an
+# explicit template is supplied. Keep the override consistent across platforms.
+temp_root="${TMPDIR:-/tmp}"
+case "$temp_root" in
+  /*) ;;
+  *) temp_root="$PWD/$temp_root" ;;
+esac
+workdir="$(mktemp -d "$temp_root/gat-install.XXXXXXXX")" || err "could not create a temporary directory. Check TMPDIR and available disk space."
 stagedir=""
 probe_pid=""
 cleanup() {

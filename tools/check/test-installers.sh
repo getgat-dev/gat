@@ -129,7 +129,8 @@ REAL_INSTALL="$(command -v install)"
 REAL_MV="$(command -v mv)"
 REAL_SLEEP="$(command -v sleep)"
 REAL_RM="$(command -v rm)"
-export REAL_INSTALL REAL_MV REAL_SLEEP REAL_RM
+REAL_MKTEMP="$(command -v mktemp)"
+export REAL_INSTALL REAL_MV REAL_SLEEP REAL_RM REAL_MKTEMP
 cat > "$fixture/bin/install" <<'MOCK'
 #!/bin/sh
 if [ "$FIXTURE_SCENARIO" = copy_failure ] || [ "$FIXTURE_SCENARIO" = cleanup_failure ]; then
@@ -165,9 +166,17 @@ case "$FIXTURE_SCENARIO" in
 esac
 exec "$REAL_RM" "$@"
 MOCK
+cat > "$fixture/bin/mktemp" <<'MOCK'
+#!/bin/sh
+# Model macOS choosing a system directory despite TMPDIR for a bare -d.
+if [ "$#" -eq 1 ] && [ "$1" = -d ]; then
+  exec "$REAL_MKTEMP" -d "$FIXTURE_DIR/system-tmp.XXXXXXXX"
+fi
+exec "$REAL_MKTEMP" "$@"
+MOCK
 chmod +x "$fixture/bin/"*
 # Limit PATH so the fallback test cannot accidentally discover sha256sum.
-for utility in bash ps tr cp grep awk mktemp tar gzip mkdir cat; do
+for utility in bash ps tr cp grep awk tar gzip mkdir cat; do
   ln -s "$(command -v "$utility")" "$fixture/bin/$utility"
 done
 
