@@ -8,6 +8,17 @@
 #   & ([scriptblock]::Create((irm https://getgat.dev/install.ps1)))
 #
 #   & ([scriptblock]::Create((irm https://getgat.dev/install.ps1))) -Version 0.1.0
+<#
+.SYNOPSIS
+Install a verified gat release for Windows.
+.DESCRIPTION
+Downloads gat to $env:USERPROFILE\.local\bin, or GAT_INSTALL_DIR when set. Uses the latest
+release unless -Version or GAT_VERSION is provided. Does not change your PATH.
+.PARAMETER Version
+Release to install, such as 0.1.0 or v0.1.0. Overrides GAT_VERSION.
+.EXAMPLE
+./install.ps1 -Version 0.1.0
+#>
 [CmdletBinding()]
 param(
   [string]$Version = ""
@@ -18,6 +29,8 @@ param(
   param([string]$Version, [bool]$VersionSpecified)
 
   $ErrorActionPreference = "Stop"
+  # Use the installer's step messages instead of nested archive/module progress UI.
+  $ProgressPreference = 'SilentlyContinue'
 
   if ($VersionSpecified -and [string]::IsNullOrEmpty($Version)) {
     throw "invalid version: -Version requires a non-empty argument"
@@ -30,6 +43,53 @@ param(
   # Official SemVer 2.0.0 grammar (https://semver.org), without the leading
   # "v" (which is stripped and re-added separately).
   $SemVerPattern = '\A(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?\z'
+
+  function Write-InstallerMessage {
+    param([string]$Message, [switch]$Step)
+    if ($Step) { $Message = "=> $Message" }
+    # Keep progress out of the success stream used by release metadata requests.
+    Write-Information -InformationAction Continue $Message
+  }
+
+  function ConvertTo-PowerShellLiteral {
+    param([string]$Value)
+    # PowerShell treats typographic apostrophes as string delimiters too.
+    return "'" + ($Value -replace '[\u0027\u2018-\u201B]', '$0$0') + "'"
+  }
+
+  function Show-InstallationHelp {
+    param([string]$Directory, [string]$Executable)
+    $found = Get-Command -Name gat -ErrorAction SilentlyContinue
+    # An alias is usable when its final target is the installed executable.
+    $resolved = if ($found -is [Management.Automation.AliasInfo]) { $found.ResolvedCommand } else { $found }
+    $ready = $null -ne $resolved -and $resolved.CommandType -eq 'Application' -and
+      [string]::Equals($resolved.Path, $Executable, [StringComparison]::OrdinalIgnoreCase)
+    $command = if ($ready) { 'gat' } else { '& ' + (ConvertTo-PowerShellLiteral $Executable) }
+    Write-InstallerMessage "`nTry gat now:`n  $command --help"
+    if (-not $ready) {
+      if ($null -ne $found -and $found.CommandType -ne 'Application') {
+        Write-InstallerMessage "`nAnother PowerShell command named gat takes precedence."
+        Write-InstallerMessage "Use the full command above, or inspect the conflict with: Get-Command gat -All"
+      } elseif ($Directory.Contains(';')) {
+        Write-InstallerMessage "`nThis directory contains a semicolon, so it cannot be added to PATH."
+        Write-InstallerMessage "Use the full command above, or set GAT_INSTALL_DIR to a directory without a semicolon and reinstall."
+      } else {
+        if ($null -ne $resolved) {
+          Write-InstallerMessage "`nYour PATH currently finds another gat first:`n  $($resolved.Path)"
+        }
+        $pathPrefix = ConvertTo-PowerShellLiteral ($Directory + ';')
+        Write-InstallerMessage "`nTo use this installation by name, put its directory first in PATH."
+        Write-InstallerMessage "For this PowerShell session, run:`n  `$env:Path = $pathPrefix + `$env:Path"
+        if ($null -ne $resolved) {
+          Write-InstallerMessage "`nFor future terminals, update Path in Windows Environment Variables so this directory comes before the other gat directory:`n  $Directory"
+        } else {
+          Write-InstallerMessage "`nFor future terminals, add this directory to your user Path in Windows Environment Variables:`n  $Directory"
+        }
+        Write-InstallerMessage "Open a new terminal after changing your saved Path."
+      }
+    }
+    Write-InstallerMessage "`nInstallation guide: https://getgat.dev/installation"
+  }
 
   function Resolve-ReleaseRedirect {
     param([Uri]$Source, [string]$Location)
@@ -155,9 +215,61 @@ param(
         }
         $transient = $status -in @(408, 429, 500, 502, 503, 504) -or ($status -eq 0 -and $networkFailure)
         if (-not $transient -or $attempt -ge 2) {
-          throw "failed to download ${Uri}: $($failure.Message)"
+          $hint = if ($status -eq 404) {
+            'The release file was not found. Check the requested version at https://github.com/getgat-dev/gat/releases.'
+          } elseif ($status -eq 403) {
+            'The server refused the request (HTTP 403). Check your network access or try again later.'
+          } elseif ($status -eq 429) {
+            'The server is limiting downloads (HTTP 429). Wait a few minutes, then try again.'
+          } elseif (($failure -is [Net.WebException] -and $failure.Status -in @(
+              [Net.WebExceptionStatus]::TrustFailure, [Net.WebExceptionStatus]::SecureChannelFailure)) -or
+              $failure.InnerException -is [Security.Authentication.AuthenticationException]) {
+            'A secure connection could not be established. Check your system clock and HTTPS proxy settings.'
+          } elseif ($failure -is [IO.IOException] -or $failure -is [UnauthorizedAccessException]) {
+            'The download could not be saved. Check temporary-directory permissions and available disk space.'
+          } elseif ($transient) {
+            'The download still could not finish after three attempts. Check your connection or try again later.'
+          } else {
+            'Check your connection and the release URL, then try again.'
+          }
+          throw "failed to download ${Uri}. $hint"
         }
+        Write-InstallerMessage -Step "The download could not finish. Retrying ($($attempt + 1)/2)..."
         Start-Sleep -Seconds ($attempt + 1)
+      }
+    }
+  }
+
+  function Assert-InstallDirectory {
+    param([string]$Path)
+    $parent = $Path
+    while ($parent) {
+      $item = Get-Item -LiteralPath $parent -Force -ErrorAction SilentlyContinue
+      if ($null -ne $item) {
+        if (-not $item.PSIsContainer) {
+          throw "installation directory is blocked by a non-directory: $parent. Set GAT_INSTALL_DIR to a directory you can write to."
+        }
+        return
+      }
+      $parent = [IO.Path]::GetDirectoryName($parent)
+    }
+  }
+
+  function Remove-StagedExecutable {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+      Justification = 'Cleanup removes only the installer-owned staged file and must run on failure.')]
+    param([string]$Path)
+    # Windows can briefly retain image-file locks after the probe exits.
+    $deadline = [Diagnostics.Stopwatch]::StartNew()
+    while ([IO.File]::Exists($Path)) {
+      try {
+        # A failed copy may retain the payload's read-only attribute.
+        [IO.File]::SetAttributes($Path, [IO.FileAttributes]::Normal)
+        [IO.File]::Delete($Path)
+        return
+      } catch [IO.IOException], [UnauthorizedAccessException] {
+        if ($deadline.ElapsedMilliseconds -ge 1000) { throw }
+        [Threading.Thread]::Sleep(25)
       }
     }
   }
@@ -180,22 +292,39 @@ param(
     throw "unsupported architecture: 32-bit Windows is not supported"
   }
 
+  Write-InstallerMessage ""
+  Write-InstallerMessage -Step "Installing gat"
+  Write-InstallerMessage ""
+
   $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64" -or $env:PROCESSOR_ARCHITEW6432 -eq "ARM64") {
     "aarch64"
   } else {
     "x86_64"
   }
 
-  $InstallDir = if ($env:GAT_INSTALL_DIR) { $env:GAT_INSTALL_DIR } else { Join-Path $env:USERPROFILE ".local\bin" }
+  $InstallDir = if ($env:GAT_INSTALL_DIR) {
+    $env:GAT_INSTALL_DIR
+  } elseif ($env:USERPROFILE) {
+    Join-Path $env:USERPROFILE ".local\bin"
+  } else {
+    throw "set USERPROFILE or GAT_INSTALL_DIR to choose an install directory"
+  }
 
   $target = "$arch-pc-windows-msvc"
   # Resolve relative overrides once; .NET file operations do not use PowerShell's
   # current location when resolving relative paths.
-  $InstallDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($InstallDir)
+  $provider = $null
+  $drive = $null
+  $InstallDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($InstallDir, [ref]$provider, [ref]$drive)
+  if ($provider.Name -ne 'FileSystem') {
+    throw "GAT_INSTALL_DIR must be a filesystem directory, not a $($provider.Name) path"
+  }
+  Assert-InstallDirectory $InstallDir
   $destination = Join-Path $InstallDir "gat.exe"
   Assert-InstallDestination $destination
 
   if ([string]::IsNullOrEmpty($Version)) {
+    Write-InstallerMessage -Step "Finding the latest release..."
     $release = Get-ReleaseResource -Uri "https://api.github.com/repos/$Repo/releases/latest"
     $tagProperty = if ($null -ne $release) { $release.PSObject.Properties['tag_name'] } else { $null }
     if ($null -eq $tagProperty -or [string]::IsNullOrEmpty($tagProperty.Value)) {
@@ -215,15 +344,18 @@ param(
 
   $archive = "gat-$tag-$target.zip"
   $baseUrl = "https://github.com/$Repo/releases/download/$tag"
-  $workdir = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName())
-  New-Item -ItemType Directory -Path $workdir | Out-Null
+  try {
+    $workdir = Join-Path ([IO.Path]::GetTempPath()) ([IO.Path]::GetRandomFileName())
+    New-Item -ItemType Directory -Path $workdir | Out-Null
+  } catch {
+    throw "could not create a temporary directory. Check TEMP and TMP, directory permissions, and available disk space."
+  }
 
   $stagedPath = $null
   try {
-    Write-Information -InformationAction Continue "Downloading gat $tag for $target..."
+    Write-InstallerMessage -Step "Checking release files..."
     $archivePath = Join-Path $workdir $archive
     $checksumPath = Join-Path $workdir "SHA256SUMS"
-    Get-ReleaseResource -Uri "$baseUrl/$archive" -OutFile $archivePath
     Get-ReleaseResource -Uri "$baseUrl/SHA256SUMS" -OutFile $checksumPath
 
     # Match the literal filename, including any SemVer build metadata.
@@ -231,24 +363,48 @@ param(
       $fields = $_ -split '  ', 2
       $fields.Count -eq 2 -and $fields[1] -ceq $archive
     })
+    if ($entries.Count -eq 0) {
+      throw "release $tag does not provide $target; choose a release with this build or build from source (https://getgat.dev/installation); existing installation preserved"
+    }
     if ($entries.Count -ne 1 -or $entries[0] -cnotmatch '^[0-9a-fA-F]{64}  ') {
       throw "expected exactly one valid checksum for $archive in SHA256SUMS"
     }
     $expected = $entries[0].Substring(0, 64).ToLowerInvariant()
+    Write-InstallerMessage -Step "Downloading gat $tag for $target..."
+    Get-ReleaseResource -Uri "$baseUrl/$archive" -OutFile $archivePath
+    Write-InstallerMessage -Step "Verifying the download..."
     $actual = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($expected -ne $actual) {
-      throw "checksum verification failed for $archive (expected $expected, got $actual)"
+      throw "checksum verification failed for $archive. Please run the installer again; the download may be incomplete."
     }
 
-    Expand-Archive -LiteralPath $archivePath -DestinationPath $workdir -Force
-    New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+    Write-InstallerMessage -Step "Extracting gat..."
+    try {
+      # Some Archive module versions emit an assembly object on extraction failure.
+      Expand-Archive -LiteralPath $archivePath -DestinationPath $workdir -Force | Out-Null
+    } catch {
+      throw "failed to extract $archive. Please run the installer again; the archive may be damaged. Existing installation preserved."
+    }
+    try {
+      New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+    } catch {
+      throw "could not create $InstallDir. Set GAT_INSTALL_DIR to a directory you can write to. $($_.Exception.Message)"
+    }
     $payload = Join-Path $workdir "gat-$tag-$target\gat.exe"
+    if (-not (Test-Path -LiteralPath $payload -PathType Leaf)) {
+      throw "archive does not contain a regular gat executable; existing installation preserved"
+    }
     $payloadItem = Get-Item -LiteralPath $payload -Force
     if ($payloadItem.PSIsContainer -or ($payloadItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
       throw "archive does not contain a regular gat executable"
     }
     $stagedPath = Join-Path $InstallDir (".gat-install." + [Guid]::NewGuid().ToString('N') + ".exe")
-    Copy-Item -LiteralPath $payload -Destination $stagedPath
+    try {
+      Copy-Item -LiteralPath $payload -Destination $stagedPath
+    } catch {
+      throw "failed to stage gat in $InstallDir. Check directory permissions and available disk space; existing installation preserved. $($_.Exception.Message)"
+    }
+    Write-InstallerMessage -Step "Checking that gat runs on your system..."
     # A child shell waits for admission to a kill-on-close job before it can
     # start gat. This avoids the race between launching a probe and assigning
     # its job, and works on both Windows PowerShell 5.1 and PowerShell 7.
@@ -340,10 +496,14 @@ public sealed class GatInstallerProbeJob : IDisposable {
     $probe = [Diagnostics.Process]::new()
     $shellName = if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh.exe' } else { 'powershell.exe' }
     $probe.StartInfo.FileName = Join-Path $PSHOME $shellName
-    $command = "if (`$null -eq [Console]::ReadLine()) { exit 1 }; " +
-      "`$p = New-Object Diagnostics.Process; `$p.StartInfo.FileName = '" + $stagedPath.Replace("'", "''") +
-      "'; `$p.StartInfo.Arguments = '--version'; `$p.StartInfo.UseShellExecute = `$false; " +
-      "`$null = `$p.Start(); `$p.WaitForExit(); exit `$p.ExitCode"
+    $quotedStagedPath = ConvertTo-PowerShellLiteral $stagedPath
+    # Keep module-loading progress and serialized PowerShell records out of stderr.
+    $command = "`$ProgressPreference = 'SilentlyContinue'; `$ErrorActionPreference = 'Stop'; " +
+      "try { if (`$null -eq [Console]::ReadLine()) { exit 1 }; " +
+      "`$p = New-Object Diagnostics.Process; `$p.StartInfo.FileName = $quotedStagedPath; " +
+      "`$p.StartInfo.Arguments = '--version'; `$p.StartInfo.UseShellExecute = `$false; " +
+      "`$null = `$p.Start(); `$p.WaitForExit(); exit `$p.ExitCode } " +
+      "catch { [Console]::Error.WriteLine(`$_.Exception.Message); exit 1 }"
     $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
     $probe.StartInfo.Arguments = '-NoLogo -NoProfile -NonInteractive -EncodedCommand ' + $encodedCommand
     $probe.StartInfo.UseShellExecute = $false
@@ -369,9 +529,13 @@ public sealed class GatInstallerProbeJob : IDisposable {
         throw "gat startup timed out; existing installation preserved"
       }
       $reportedVersion = $stdout.GetAwaiter().GetResult().TrimEnd([char[]]"`r`n")
-      $null = $stderr.GetAwaiter().GetResult()
+      $startupError = $stderr.GetAwaiter().GetResult().TrimEnd([char[]]"`r`n")
       if ($probe.ExitCode -ne 0) {
-        throw "downloaded gat cannot run on this system; existing installation preserved"
+        $message = "downloaded gat cannot run on this system; existing installation preserved"
+        if (-not [string]::IsNullOrWhiteSpace($startupError)) {
+          $message += "`nStartup error: $startupError"
+        }
+        throw $message
       }
       if ($reportedVersion -cne "gat $core") {
         throw "downloaded gat reported an unexpected version; existing installation preserved"
@@ -389,41 +553,35 @@ public sealed class GatInstallerProbeJob : IDisposable {
         $probe.Dispose()
       }
     }
+    Write-InstallerMessage -Step "Installing to $InstallDir..."
     Assert-InstallDestination $destination
     # Replace on the destination filesystem without first deleting a locked executable.
-    if ([IO.File]::Exists($destination)) {
-      [IO.File]::Replace($stagedPath, $destination, [NullString]::Value)
-    } else {
-      [IO.File]::Move($stagedPath, $destination)
+    try {
+      if ([IO.File]::Exists($destination)) {
+        [IO.File]::Replace($stagedPath, $destination, [NullString]::Value)
+      } else {
+        [IO.File]::Move($stagedPath, $destination)
+      }
+    } catch [IO.IOException], [UnauthorizedAccessException] {
+      throw "failed to replace gat at $destination. Close any running gat processes and check directory permissions, then try again; existing installation preserved."
     }
 
-    Write-Information -InformationAction Continue "Installed gat $tag to $InstallDir\gat.exe"
-    $pathEntries = ($env:Path -split ";") | Where-Object { $_ -ne "" }
-    if (-not ($pathEntries -contains $InstallDir)) {
-      Write-Information -InformationAction Continue "Note: $InstallDir is not on your PATH."
-      Write-Information -InformationAction Continue "  Add it, e.g.: `$env:Path = `"$InstallDir;`$env:Path`""
-    }
+    Write-InstallerMessage ""
+    Write-InstallerMessage -Step "Successfully installed gat $tag!"
+    Write-InstallerMessage "  Location: $destination"
+    Show-InstallationHelp -Directory $InstallDir -Executable $destination
   } finally {
-    try {
-      if ($stagedPath) {
-        # Windows can briefly retain image-file locks after a job reports that
-        # its processes have exited. Bound cleanup retries to that specific case.
-        $cleanupDeadline = [Diagnostics.Stopwatch]::StartNew()
-        while ([IO.File]::Exists($stagedPath)) {
-          try {
-            # A failed copy may retain source attributes. Clear them only on
-            # our staged file so read-only payloads cannot defeat cleanup.
-            [IO.File]::SetAttributes($stagedPath, [IO.FileAttributes]::Normal)
-            [IO.File]::Delete($stagedPath)
-            break
-          } catch [IO.IOException], [UnauthorizedAccessException] {
-            if ($cleanupDeadline.ElapsedMilliseconds -ge 1000) { throw }
-            [Threading.Thread]::Sleep(25)
-          }
-        }
+    # Cleanup must not replace the original error or turn an installed binary
+    # into a reported failure. Force warnings to remain non-terminating.
+    if ($stagedPath) {
+      try { Remove-StagedExecutable $stagedPath } catch {
+        Write-Warning -WarningAction Continue "could not remove staged executable $stagedPath; remove it manually."
       }
-    } finally {
-      Remove-Item -LiteralPath $workdir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    try {
+      Remove-Item -LiteralPath $workdir -Recurse -Force -ErrorAction Stop
+    } catch {
+      Write-Warning -WarningAction Continue "could not remove temporary directory $workdir; remove it manually."
     }
   }
 } -Version $Version -VersionSpecified ($PSBoundParameters.ContainsKey('Version'))

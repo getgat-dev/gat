@@ -11,7 +11,7 @@ $installer = Join-Path $PSScriptRoot '../../docs/install.ps1'
 $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ([IO.Path]::GetRandomFileName())
 New-Item -ItemType Directory -Path $fixtureRoot | Out-Null
 $savedEnvironment = @{}
-foreach ($name in @('GAT_INSTALL_DIR', 'GAT_VERSION', 'PROCESSOR_ARCHITECTURE', 'PROCESSOR_ARCHITEW6432', 'FIXTURE_SCENARIO', 'TEMP', 'TMP')) {
+foreach ($name in @('GAT_INSTALL_DIR', 'GAT_VERSION', 'PROCESSOR_ARCHITECTURE', 'PROCESSOR_ARCHITEW6432', 'FIXTURE_SCENARIO', 'TEMP', 'TMP', 'Path')) {
   $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
 }
 
@@ -29,9 +29,14 @@ function Invoke-WebRequest {
       [IO.File]::WriteAllText($OutFile, 'partial download')
       throw 'archive request failed'
     }
-    if ($env:FIXTURE_SCENARIO -eq 'http_not_found' -or
+    if ($env:FIXTURE_SCENARIO -in @('http_not_found', 'http_forbidden', 'http_rate_limited') -or
         ($env:FIXTURE_SCENARIO -eq 'http_retry_success' -and $fixtureState.ArchiveRequests -eq 1)) {
-      $status = if ($env:FIXTURE_SCENARIO -eq 'http_not_found') { 404 } else { 503 }
+      $status = switch ($env:FIXTURE_SCENARIO) {
+        'http_not_found' { 404 }
+        'http_forbidden' { 403 }
+        'http_rate_limited' { 429 }
+        default { 503 }
+      }
       $response = [FixtureHttpResponse]::new($status)
       throw [Net.WebException]::new('HTTP failure', $null, [Net.WebExceptionStatus]::ProtocolError, $response)
     }
@@ -73,7 +78,7 @@ function Start-Sleep {
 
 function Copy-Item {
   param([string]$LiteralPath, [string]$Destination)
-  if ($env:FIXTURE_SCENARIO -in @('copy_failure', 'readonly_copy_failure') -and [IO.Path]::GetFileName($Destination).StartsWith('.gat-install.')) {
+  if ($env:FIXTURE_SCENARIO -in @('copy_failure', 'readonly_copy_failure', 'cleanup_failure') -and [IO.Path]::GetFileName($Destination).StartsWith('.gat-install.')) {
     [IO.File]::WriteAllText($Destination, 'partial executable')
     if ($env:FIXTURE_SCENARIO -eq 'readonly_copy_failure') {
       [IO.File]::SetAttributes($Destination, [IO.FileAttributes]::ReadOnly)
@@ -81,6 +86,24 @@ function Copy-Item {
     throw 'staged copy failed'
   }
   Microsoft.PowerShell.Management\Copy-Item -LiteralPath $LiteralPath -Destination $Destination
+}
+
+function Remove-Item {
+  [CmdletBinding()]
+  param(
+    [Parameter(Position = 0, ValueFromPipeline = $true)]
+    [string[]]$Path,
+    [string[]]$LiteralPath,
+    [switch]$Recurse,
+    [switch]$Force
+  )
+  process {
+    if ($env:FIXTURE_SCENARIO -in @('cleanup_success', 'cleanup_failure') -and $null -ne $LiteralPath -and $LiteralPath.Count -eq 1 -and
+        [IO.Path]::GetDirectoryName($LiteralPath[0]) -eq $tempDir) {
+      throw [IO.IOException]::new('fixture cleanup failure')
+    }
+    Microsoft.PowerShell.Management\Remove-Item @PSBoundParameters
+  }
 }
 
 # Replace the transport boundary in a parsed copy; real transport tests below
@@ -134,7 +157,10 @@ class Fixture {
       System.IO.File.WriteAllText(System.IO.Path.Combine(Environment.GetEnvironmentVariable("GAT_INSTALL_DIR"), "child.pid"), child.Id.ToString());
     }
     if (args.Length != 1 || args[0] != "--version") return 2;
-    if (Environment.GetEnvironmentVariable("FIXTURE_SCENARIO") == "incompatible") return 1;
+    if (Environment.GetEnvironmentVariable("FIXTURE_SCENARIO") == "incompatible") {
+      Console.Error.WriteLine("fixture startup failed"); return 1;
+    }
+    if (Environment.GetEnvironmentVariable("FIXTURE_SCENARIO") == "incompatible_silent") return 1;
     if (Environment.GetEnvironmentVariable("FIXTURE_SCENARIO") == "hung_payload") System.Threading.Thread.Sleep(60000);
     if (Environment.GetEnvironmentVariable("FIXTURE_SCENARIO") == "wrong_version") {
       Console.WriteLine("gat 9.9.9"); return 0;
@@ -164,14 +190,29 @@ class Fixture {
     $validArchive = [IO.File]::ReadAllBytes($archivePath)
 
     foreach ($scenario in @('valid', 'missing', 'duplicate', 'malformed', 'short_hash', 'malformed_duplicate', 'mismatch', 'similar_name', 'crlf', 'uppercase_hash',
-        'upgrade', 'latest', 'latest_failure', 'latest_missing', 'download_failure', 'checksum_download_failure', 'certificate_failure', 'retry_success', 'retry_exhausted', 'http_retry_success', 'http_not_found', 'http_exception_retry', 'http_certificate_failure',
-        'invalid_archive', 'incompatible', 'hung_payload', 'inherited_pipes', 'wrong_version', 'copy_failure', 'readonly_copy_failure', 'locked_destination', 'directory', 'multiline_prefix', 'multiline_suffix', 'trailing_newline',
-        'carriage_return', 'double_prefix', 'empty_version', 'unknown_option', 'env_version', 'relative_path', 'scoped_success', 'scoped_failure')) {
+        'upgrade', 'latest', 'latest_failure', 'latest_missing', 'download_failure', 'checksum_download_failure', 'certificate_failure', 'retry_success', 'retry_exhausted', 'http_retry_success', 'http_not_found', 'http_forbidden', 'http_rate_limited', 'http_exception_retry', 'http_certificate_failure',
+        'invalid_archive', 'missing_payload', 'invalid_executable', 'incompatible', 'incompatible_silent', 'hung_payload', 'inherited_pipes', 'wrong_version', 'copy_failure', 'readonly_copy_failure', 'cleanup_success', 'cleanup_failure', 'locked_destination', 'directory', 'multiline_prefix', 'multiline_suffix', 'trailing_newline',
+        'carriage_return', 'double_prefix', 'empty_version', 'unknown_option', 'env_version', 'relative_path', 'quoted_path', 'path_present', 'path_quoted', 'path_shadowed', 'path_separator', 'command_conflict', 'alias_current', 'alias_other', 'install_dir_file', 'install_parent_file', 'non_filesystem', 'temp_dir_failure', 'scoped_success', 'scoped_failure')) {
+      $env:TEMP = $tempDir
+      $env:TMP = $tempDir
       $env:FIXTURE_SCENARIO = $scenario
       $env:GAT_VERSION = ''
       $fixtureState = @{ Requests = 0; ArchiveRequests = 0; RetryDelays = @() }
       [IO.File]::WriteAllBytes($archivePath, $validArchive)
       if ($scenario -eq 'invalid_archive') { [IO.File]::WriteAllText($archivePath, 'not an archive') }
+      if ($scenario -eq 'missing_payload') {
+        $sourceExe = Join-Path $sourceDir 'gat.exe'
+        $otherFile = Join-Path $sourceDir 'readme.txt'
+        Move-Item -LiteralPath $sourceExe -Destination $otherFile
+        try { Compress-Archive -LiteralPath $sourceDir -DestinationPath $archivePath -Force }
+        finally { Move-Item -LiteralPath $otherFile -Destination $sourceExe }
+      }
+      if ($scenario -eq 'invalid_executable') {
+        $sourceExe = Join-Path $sourceDir 'gat.exe'
+        [IO.File]::WriteAllText($sourceExe, 'not a Windows executable')
+        try { Compress-Archive -LiteralPath $sourceDir -DestinationPath $archivePath -Force }
+        finally { Microsoft.PowerShell.Management\Copy-Item -LiteralPath $fixtureExe -Destination $sourceExe }
+      }
       $hash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
       $entry = "$hash  $fixtureArchive`n"
       $record = switch ($scenario) {
@@ -189,6 +230,19 @@ class Fixture {
       [IO.File]::WriteAllText((Join-Path $fixtureRoot 'SHA256SUMS'), "$hash  unrelated.zip`n$record", [Text.Encoding]::ASCII)
       # Brackets and spaces exercise literal path handling in PowerShell.
       $destination = Join-Path $fixtureRoot "install [$architecture $scenario]"
+      if ($scenario -eq 'quoted_path') {
+        $destination += "'`$literal``text``" + [char]0x2018 + [char]0x2019 + [char]0x201A + [char]0x201B
+      }
+      if ($scenario -eq 'path_separator') { $destination += ';bin' }
+      $env:Path = $savedEnvironment['Path']
+      if ($scenario -eq 'path_present') { $env:Path = $destination + '\;' + $env:Path }
+      if ($scenario -eq 'path_quoted') { $env:Path = '"' + $destination + '\";' + $env:Path }
+      if ($scenario -eq 'path_shadowed') {
+        $shadowDir = Join-Path $fixtureRoot "shadow $architecture"
+        New-Item -ItemType Directory -Path $shadowDir -Force | Out-Null
+        Microsoft.PowerShell.Management\Copy-Item -LiteralPath $fixtureExe -Destination (Join-Path $shadowDir 'gat.exe')
+        $env:Path = $shadowDir + ';' + $destination + ';' + $env:Path
+      }
       New-Item -ItemType Directory -Path $destination | Out-Null
       $installedFile = Join-Path $destination 'gat.exe'
       if ($scenario -eq 'directory') {
@@ -210,6 +264,18 @@ class Fixture {
         'scoped_success' { $env:GAT_VERSION = '0.1.0+build.1' }
         'scoped_failure' { $env:GAT_VERSION = 'invalid' }
         'env_version' { $arguments = @{}; $env:GAT_VERSION = 'V0.1.0+build.1' }
+        { $_ -in @('install_dir_file', 'install_parent_file') } {
+          $blocked = Join-Path $destination 'blocked'
+          [IO.File]::WriteAllText($blocked, 'keep this file')
+          $env:GAT_INSTALL_DIR = if ($scenario -eq 'install_dir_file') { $blocked } else { Join-Path $blocked 'bin' }
+        }
+        'temp_dir_failure' {
+          $blockedTemp = Join-Path $destination 'blocked-temp'
+          [IO.File]::WriteAllText($blockedTemp, 'keep this file')
+          $env:TEMP = $blockedTemp
+          $env:TMP = $blockedTemp
+        }
+        'non_filesystem' { $env:GAT_INSTALL_DIR = 'Env:GAT_VERSION' }
         'relative_path' { $env:GAT_INSTALL_DIR = '.\' + [IO.Path]::GetFileName($destination) }
       }
       $lock = $null
@@ -217,25 +283,44 @@ class Fixture {
         $lock = [IO.File]::Open($installedFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
       }
       $failure = $null
+      $messages = [Collections.Generic.List[object]]::new()
       Push-Location -LiteralPath $fixtureRoot
       try {
         if ($scenario -like 'scoped_*') {
           & {
             param([string]$Version)
             $ErrorActionPreference = 'Continue'
+            $ProgressPreference = 'Stop'
             $Repo = 'caller repository'
             function Get-ReleaseResource { 'caller helper' }
             try {
-              & $installerBlock
+              & $installerBlock 6>&1 3>&1 | ForEach-Object { $messages.Add($_) }
             } finally {
-              if ($Version -cne 'caller version' -or $ErrorActionPreference -cne 'Continue' -or $Repo -cne 'caller repository' -or
+              if ($Version -cne 'caller version' -or $ErrorActionPreference -cne 'Continue' -or
+                  $ProgressPreference -cne 'Stop' -or $Repo -cne 'caller repository' -or
                   (Get-ReleaseResource) -cne 'caller helper') {
                 throw 'installer changed caller state through scoped invocation'
               }
             }
           } -Version 'caller version'
+        } elseif ($scenario -in @('alias_current', 'alias_other')) {
+          & {
+            $aliasTarget = if ($scenario -eq 'alias_current') { $installedFile } else { $fixtureExe }
+            Set-Alias -Name gat -Value $aliasTarget
+            & $installerBlock @arguments
+          } 6>&1 3>&1 | ForEach-Object { $messages.Add($_) }
+        } elseif ($scenario -eq 'command_conflict') {
+          & {
+            function gat { throw 'installer must not execute the conflicting command' }
+            & $installerBlock @arguments
+          } 6>&1 3>&1 | ForEach-Object { $messages.Add($_) }
+        } elseif ($scenario -in @('cleanup_success', 'cleanup_failure')) {
+          & {
+            $WarningPreference = 'Stop'
+            & $installerBlock @arguments
+          } 6>&1 3>&1 | ForEach-Object { $messages.Add($_) }
         } else {
-          & $installerBlock @arguments
+          & $installerBlock @arguments 6>&1 3>&1 | ForEach-Object { $messages.Add($_) }
         }
       } catch {
         $failure = $_
@@ -251,7 +336,7 @@ class Fixture {
           }
         }
       }
-      if ($scenario -in @('valid', 'crlf', 'uppercase_hash', 'upgrade', 'latest', 'retry_success', 'http_retry_success', 'http_exception_retry', 'env_version', 'relative_path', 'scoped_success')) {
+      if ($scenario -in @('valid', 'cleanup_success', 'crlf', 'uppercase_hash', 'upgrade', 'latest', 'retry_success', 'http_retry_success', 'http_exception_retry', 'env_version', 'relative_path', 'quoted_path', 'path_present', 'path_quoted', 'path_shadowed', 'path_separator', 'command_conflict', 'alias_current', 'alias_other', 'scoped_success')) {
         if ($null -ne $failure) { throw $failure }
         if ((Get-FileHash -LiteralPath $installedFile).Hash -ne $payloadHash) { throw "installed payload differs for $scenario" }
       } else {
@@ -263,24 +348,80 @@ class Fixture {
           throw "old installation damaged by $scenario"
         }
       }
+      $output = ($messages | ForEach-Object { $_.ToString() }) -join "`n"
+      $warnings = @($messages | Where-Object { $_ -is [Management.Automation.WarningRecord] })
+      $unexpectedOutput = @($messages | Where-Object {
+        $_ -isnot [Management.Automation.InformationRecord] -and $_ -isnot [Management.Automation.WarningRecord]
+      })
+      if ($scenario -in @('cleanup_success', 'cleanup_failure')) {
+        if ($warnings.Count -ne 1 -or $warnings[0].ToString() -notmatch 'could not remove temporary directory') { throw 'missing cleanup warning' }
+        if (@(Get-ChildItem -LiteralPath $tempDir -Force).Count -ne 1) { throw 'cleanup fixture did not leave a temporary directory' }
+        Get-ChildItem -LiteralPath $tempDir -Force | Microsoft.PowerShell.Management\Remove-Item -Recurse -Force
+      } elseif ($warnings.Count) { throw "unexpected installer warning: $warnings" }
+      if ($unexpectedOutput.Count) { throw "unexpected success-stream output for $scenario`: $unexpectedOutput" }
+      if ($null -eq $failure) {
+        if ($output -notmatch 'Successfully installed gat' -or $output -notmatch 'Try gat now:') { throw 'missing completion guidance' }
+        if (@($output -split "`n" | Where-Object { $_ -match ' --help\r?$' }).Count -ne 1) { throw 'completion guidance must show one help command' }
+        if ($scenario -in @('path_present', 'alias_current')) {
+          if ($output -match '\$env:Path =' -or $output -notmatch '(?m)^  gat --help\r?$') { throw 'incorrect PATH guidance' }
+        } elseif ($scenario -in @('path_separator', 'command_conflict', 'alias_other')) {
+          $expectedHint = if ($scenario -eq 'path_separator') { 'cannot be added to PATH' } else { 'takes precedence' }
+          if ($output -notmatch $expectedHint -or $output -match '\$env:Path =') { throw 'incorrect conflict guidance' }
+        } else {
+          if ($scenario -eq 'path_shadowed' -and
+              ($output -notmatch 'another gat first' -or $output -notmatch 'comes before the other gat directory')) { throw 'missing shadowed command guidance' }
+          $pathCommand = ($output -split "`n" | Where-Object { $_ -like '  $env:Path =*' })
+          if (-not $pathCommand) { throw 'missing PATH command' }
+          $before = $env:Path
+          try {
+            . ([scriptblock]::Create($pathCommand))
+            if ($env:Path -cne ($destination + ';' + $before)) { throw 'PATH command did not preserve literal directory' }
+          } finally { $env:Path = $before }
+        }
+      } elseif ($output -match 'Successfully installed gat') { throw 'failure reported as success' }
+      if ($scenario -in @('missing', 'similar_name')) {
+        if ($fixtureState.ArchiveRequests -ne 0 -or $failure.Exception.Message -notmatch 'does not provide') { throw 'unavailable build was downloaded' }
+      }
+      if ($scenario -in @('install_dir_file', 'install_parent_file', 'non_filesystem')) {
+        if ($fixtureState.Requests -ne 0 -or $failure.Exception.Message -notmatch 'installation directory is blocked|must be a filesystem directory') { throw 'invalid directory reached the network' }
+        if ($scenario -ne 'non_filesystem' -and [IO.File]::ReadAllText($blocked) -cne 'keep this file') { throw 'blocked path was modified' }
+      }
+      if ($scenario -eq 'temp_dir_failure') {
+        if ($fixtureState.Requests -ne 0 -or $failure.Exception.Message -notmatch 'could not create a temporary directory') { throw 'temporary-directory failure lost context or reached downloads' }
+        if ([IO.File]::ReadAllText($blockedTemp) -cne 'keep this file') { throw 'temporary-directory blocker was modified' }
+      }
+      if ($scenario -eq 'invalid_archive' -and $failure.Exception.Message -notmatch 'failed to extract') { throw $failure }
       if ($scenario -eq 'unknown_option' -and
           ($fixtureState.Requests -ne 0 -or $failure.Exception -isnot [System.Management.Automation.ParameterBindingException])) { throw 'invalid arguments reached installer' }
       if ($scenario -in @('hung_payload', 'inherited_pipes') -and $failure.Exception.Message -notmatch 'gat startup timed out') { throw $failure }
       if ($scenario -eq 'wrong_version' -and $failure.Exception.Message -notmatch 'reported an unexpected version') { throw $failure }
-      if ($scenario -eq 'incompatible' -and $failure.Exception.Message -notmatch 'downloaded gat cannot run') { throw $failure }
-      if ($scenario -in @('copy_failure', 'readonly_copy_failure') -and $failure.Exception.Message -notmatch 'staged copy failed') { throw $failure }
-      if ($scenario -eq 'locked_destination' -and $failure.Exception.InnerException -isnot [IO.IOException]) { throw $failure }
-      if ($scenario -in @('missing', 'duplicate', 'malformed', 'short_hash', 'malformed_duplicate', 'mismatch', 'similar_name') -and
+      if ($scenario -in @('invalid_executable', 'incompatible', 'incompatible_silent') -and $failure.Exception.Message -notmatch 'downloaded gat cannot run') { throw $failure }
+      if ($scenario -eq 'incompatible' -and $failure.Exception.Message -notmatch 'Startup error: fixture startup failed') { throw $failure }
+      if ($scenario -in @('invalid_executable', 'incompatible') -and
+          ($failure.Exception.Message -notmatch 'Startup error:' -or $failure.Exception.Message -match 'CLIXML|Preparing modules')) { throw $failure }
+      if ($scenario -eq 'incompatible_silent' -and $failure.Exception.Message -match 'Startup error:') { throw 'empty startup diagnostic was displayed' }
+      if ($scenario -in @('copy_failure', 'readonly_copy_failure', 'cleanup_failure') -and $failure.Exception.Message -notmatch 'staged copy failed') { throw $failure }
+      if ($scenario -eq 'locked_destination' -and $failure.Exception.Message -notmatch 'Close any running gat processes') { throw $failure }
+      if ($scenario -eq 'missing_payload' -and $failure.Exception.Message -notmatch 'archive does not contain a regular gat executable') { throw $failure }
+      if ($scenario -in @('duplicate', 'malformed', 'short_hash', 'malformed_duplicate', 'mismatch') -and
           $failure.Exception.Message -notmatch 'expected exactly one valid checksum|checksum verification failed') { throw $failure }
       if ($scenario -in @('multiline_prefix', 'multiline_suffix', 'trailing_newline', 'carriage_return', 'double_prefix', 'empty_version', 'scoped_failure')) {
         if ($fixtureState.Requests -ne 0 -or $failure.Exception.Message -notmatch 'invalid version') { throw 'invalid version reached network' }
       }
-      if ($scenario -in @('certificate_failure', 'http_not_found', 'http_certificate_failure') -and $fixtureState.ArchiveRequests -ne 1) { throw 'certificate error was retried' }
+      if ($scenario -in @('certificate_failure', 'http_not_found', 'http_forbidden', 'http_certificate_failure') -and $fixtureState.ArchiveRequests -ne 1) { throw 'certificate error was retried' }
       if ($scenario -in @('retry_success', 'http_retry_success', 'http_exception_retry') -and ($fixtureState.ArchiveRequests -ne 2 -or ($fixtureState.RetryDelays -join ',') -ne '1')) { throw 'retry did not recover' }
-      if ($scenario -eq 'retry_exhausted' -and ($fixtureState.ArchiveRequests -ne 3 -or ($fixtureState.RetryDelays -join ',') -ne '1,2')) { throw 'retry budget not enforced' }
-      if ($scenario -in @('download_failure', 'checksum_download_failure', 'latest_failure', 'certificate_failure', 'http_not_found', 'http_certificate_failure')) {
+      if ($scenario -in @('retry_exhausted', 'http_rate_limited') -and ($fixtureState.ArchiveRequests -ne 3 -or ($fixtureState.RetryDelays -join ',') -ne '1,2')) { throw 'retry budget not enforced' }
+      if ($scenario -in @('download_failure', 'checksum_download_failure', 'latest_failure', 'certificate_failure', 'http_not_found', 'http_forbidden', 'http_certificate_failure')) {
         if ($fixtureState.RetryDelays.Count -ne 0 -or $failure.Exception.Message -notmatch 'failed to download https://') { throw 'permanent error lost context or retried' }
       }
+      $downloadHint = switch ($scenario) {
+        'http_not_found' { 'Check the requested version' }
+        'http_forbidden' { 'server refused the request' }
+        'http_rate_limited' { 'server is limiting downloads' }
+        'retry_exhausted' { 'after three attempts' }
+        { $_ -in @('certificate_failure', 'http_certificate_failure') } { 'system clock and HTTPS proxy settings' }
+      }
+      if ($downloadHint -and $failure.Exception.Message -notmatch $downloadHint) { throw "missing download guidance for $scenario" }
       if (@(Get-ChildItem -LiteralPath $destination -Force -Filter '.gat-install.*').Count -ne 0) { throw 'staged executable leaked' }
       if (@(Get-ChildItem -LiteralPath $tempDir -Force).Count -ne 0) { throw ('temporary download leaked: ' + ((Get-ChildItem -LiteralPath $tempDir -Force).Name -join ', ')) }
       Write-Output "PASS: $architecture $scenario"
