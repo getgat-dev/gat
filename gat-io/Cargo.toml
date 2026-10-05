@@ -41,7 +41,7 @@ opendal = { version = "0.58", features = ["services-s3", "services-azblob", "ser
 url = "2"
 gix = { version = "0.87", default-features = false, features = ["index", "attributes", "excludes", "dirwalk", "revision", "sha1", "sha256", "blocking-network-client", "blocking-http-transport-reqwest-rust-tls", "worktree-mutation"] }
 gix-config = "0.60"
-gix-lock = "24"
+gix-lock = "25"
 
 [dev-dependencies]
 # Standalone gat-io tests need core probes without workspace feature unification.
