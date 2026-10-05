@@ -50,7 +50,7 @@ unicode-segmentation = "1.12"
 yaml_serde = "0.10"
 # Parses scp-like Git locations for root-owned fail-closed presentation
 # redaction without importing the physical gat-io Git implementation.
-gix-url = "0.38"
+gix-url = "0.39"
 # Parses and safely rewrites standard URI userinfo, queries, and fragments in
 # root-owned diagnostics and command output.
 url = "2.5"
