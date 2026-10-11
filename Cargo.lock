@@ -989,7 +989,7 @@ dependencies = [
 
 [[package]]
 name = "gat"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anstream",
  "anstyle",
@@ -1107,6 +1107,7 @@ dependencies = [
  "gix-config",
  "gix-lock",
  "http",
+ "libc",
  "mea",
  "memmap2",
  "opendal",

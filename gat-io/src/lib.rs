@@ -458,6 +458,7 @@
 mod atomic;
 mod cache;
 mod config;
+mod directory_sync;
 mod env;
 mod file_state;
 mod git;
