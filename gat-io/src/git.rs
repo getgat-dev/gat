@@ -118,50 +118,16 @@ impl GitReader {
 pub struct GitOpenError {
     path: PathBuf,
     #[source]
-    source: Box<gix::open::Error>,
+    source: Box<gix::Error>,
 }
 
 impl GitOpenError {
     /// OS classification of repository discovery/configuration access.
     #[must_use]
     pub fn io_kind(&self) -> Option<std::io::ErrorKind> {
-        match &*self.source {
-            gix::open::Error::Io(source)
-            | gix::open::Error::Config(gix::config::Error::Io { source, .. }) => {
-                Some(source.kind())
-            }
-            gix::open::Error::NotARepository {
-                source:
-                    gix::discover::is_git::Error::Metadata { source, .. }
-                    | gix::discover::is_git::Error::MissingCommonDir { source, .. }
-                    | gix::discover::is_git::Error::GitFile(
-                        gix::discover::path::from_gitdir_file::Error::Io(source),
-                    )
-                    | gix::discover::is_git::Error::CurrentDir(source)
-                    | gix::discover::is_git::Error::FindHeadRef(
-                        gix::refs::file::find::existing::Error::Find(
-                            gix::refs::file::find::Error::ReadFileContents { source, .. },
-                        ),
-                    ),
-                ..
-            } => Some(source.kind()),
-            gix::open::Error::Config(
-                gix::config::Error::Init(gix_config::file::init::Error::Includes(source))
-                | gix::config::Error::ResolveIncludes(source)
-                | gix::config::Error::FromEnv(gix_config::file::init::from_env::Error::Includes(
-                    source,
-                )),
-            ) => match source {
-                gix_config::file::includes::Error::CopyBuffer(source)
-                | gix_config::file::includes::Error::Io { source, .. } => Some(source.kind()),
-                gix_config::file::includes::Error::Realpath(
-                    gix::path::realpath::Error::ReadLink(source)
-                    | gix::path::realpath::Error::CurrentWorkingDir(source),
-                ) => Some(source.kind()),
-                _ => None,
-            },
-            _ => None,
-        }
+        self.source
+            .downcast_any_ref::<std::io::Error>()
+            .map(std::io::Error::kind)
     }
 
     /// The repository path that could not be opened.

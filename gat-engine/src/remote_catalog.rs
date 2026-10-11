@@ -115,6 +115,8 @@ impl IdentityRange {
     pub(crate) fn allocate(len: usize) -> std::result::Result<Self, RemoteIdentityError> {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static NEXT: AtomicUsize = AtomicUsize::new(0);
+        // The replacement, try_update, requires Rust 1.95; our MSRV is 1.91.
+        #[allow(deprecated)]
         let start = NEXT
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
                 next.checked_add(len.max(1))

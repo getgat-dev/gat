@@ -219,7 +219,7 @@ impl GitIntegration {
                         GitIntegrationErrorKind::Config,
                         &path,
                         "editing merge.gat-lock section",
-                        source,
+                        source.into_error(),
                     )
                 })?;
             if value_is(&section, "name", MERGE_DRIVER_HUMAN_NAME)
@@ -234,7 +234,7 @@ impl GitIntegration {
                         GitIntegrationErrorKind::Config,
                         &path,
                         "setting merge.gat-lock.name",
-                        source,
+                        source.into_error(),
                     )
                 })?;
             section
@@ -244,7 +244,7 @@ impl GitIntegration {
                         GitIntegrationErrorKind::Config,
                         &path,
                         "setting merge.gat-lock.driver",
-                        source,
+                        source.into_error(),
                     )
                 })?;
             Ok(GitIntegrationStatus::Changed)
@@ -374,7 +374,7 @@ fn load_config(path: &Path) -> Result<gix_config::File, GitIntegrationError> {
                 GitIntegrationErrorKind::Config,
                 path,
                 format!("parsing {}", path.display()),
-                source,
+                source.into_error(),
             )
         },
     )
@@ -390,19 +390,19 @@ fn mutate_config(
         gix_lock::acquire::Fail::Immediately,
         None,
     )
-    .map_err(|source| match source {
-        gix_lock::acquire::Error::Io(source) => GitIntegrationError::io(
-            GitIntegrationErrorKind::Config,
-            path,
-            "locking Git configuration",
-            source,
-        ),
-        source @ gix_lock::acquire::Error::PermanentlyLocked { .. } => GitIntegrationError::new(
-            GitIntegrationErrorKind::ConfigLocked,
-            path,
-            "locking Git configuration",
-            source,
-        ),
+    .map_err(|source| {
+        let io_kind = source
+            .downcast_any_ref::<std::io::Error>()
+            .map(std::io::Error::kind);
+        let kind = if io_kind == Some(std::io::ErrorKind::AlreadyExists) {
+            GitIntegrationErrorKind::ConfigLocked
+        } else {
+            GitIntegrationErrorKind::Config
+        };
+        let mut error =
+            GitIntegrationError::new(kind, path, "locking Git configuration", source.into_error());
+        error.io_kind = io_kind;
+        error
     })?;
     let mut file = load_config(path)?;
     if edit(&mut file)? == GitIntegrationStatus::Unchanged {
@@ -448,6 +448,20 @@ fn make_executable(_path: &Path) -> Result<(), GitIntegrationError> {
 #[cfg(test)]
 mod error_tests {
     use super::*;
+
+    #[test]
+    fn config_lock_io_failure_retains_its_os_category() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("not-a-directory");
+        std::fs::write(&parent, b"file").unwrap();
+        let error = mutate_config(&parent.join("config"), |_| {
+            panic!("editing must not start when locking fails")
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), GitIntegrationErrorKind::Config);
+        assert!(error.io_kind().is_some());
+        assert!(std::error::Error::source(&error).is_some());
+    }
 
     #[test]
     fn config_lock_precedes_reading_and_is_released_on_every_exit() {

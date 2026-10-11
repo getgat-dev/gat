@@ -150,13 +150,9 @@ fn traversal(
     operation: impl Into<String>,
     source: impl std::error::Error + Send + Sync + 'static,
 ) -> GitHistoryError {
-    traversal_boxed(operation, Box::new(source))
-}
-
-fn traversal_boxed(operation: impl Into<String>, source: BoxedSource) -> GitHistoryError {
     GitHistoryError(HistoryFailure::Traversal {
         operation: operation.into(),
-        source,
+        source: Box::new(source),
     })
 }
 
@@ -366,7 +362,7 @@ fn resolve_root(
             {
                 push_peeled_ref(
                     reference.map_err(|source| {
-                        traversal_boxed("reading a local branch ref for --branches", source)
+                        traversal("reading a local branch ref for --branches", source)
                     })?,
                     &mut out,
                 )?;
@@ -376,7 +372,7 @@ fn resolve_root(
             })? {
                 push_peeled_ref(
                     reference.map_err(|source| {
-                        traversal_boxed(
+                        traversal(
                             "reading a remote-tracking branch ref for --branches",
                             source,
                         )
@@ -396,9 +392,8 @@ fn resolve_root(
                 .map_err(|source| traversal("listing tags for --tags", source))?
             {
                 push_peeled_ref(
-                    reference.map_err(|source| {
-                        traversal_boxed("reading a tag ref for --tags", source)
-                    })?,
+                    reference
+                        .map_err(|source| traversal("reading a tag ref for --tags", source))?,
                     &mut out,
                 )?;
             }
@@ -414,9 +409,8 @@ fn resolve_root(
                 .map_err(|source| traversal("listing all refs for --all-history", source))?
             {
                 push_peeled_ref(
-                    reference.map_err(|source| {
-                        traversal_boxed("reading a ref for --all-history", source)
-                    })?,
+                    reference
+                        .map_err(|source| traversal("reading a ref for --all-history", source))?,
                     &mut out,
                 )?;
             }

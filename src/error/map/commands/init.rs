@@ -78,6 +78,20 @@ mod tests {
     use gat_engine::InitializationError;
 
     #[test]
+    fn git_config_parser_source_is_retained_but_not_rendered() {
+        const SENTINEL: &str = "SENTINEL_PRIVATE_GIT_CONFIG";
+        let tmp = test_support::git_repo_with_initial_commit();
+        let layout = gat_io::RepositoryLayout::at(tmp.path().to_path_buf());
+        let integration = gat_io::GitIntegration::open(&layout).unwrap();
+        std::fs::write(tmp.path().join(".git/config"), format!("[{SENTINEL}\n")).unwrap();
+        let error = integration.install_merge_driver().unwrap_err();
+        let failure: Failure = InitError::Engine(error.into()).into();
+        assert_eq!(failure.diagnostic().code(), ErrorCode::GitOperationFailed);
+        assert!(!format!("{:?}", failure.diagnostic()).contains(SENTINEL));
+        assert!(failure.technical_source().is_some());
+    }
+
+    #[test]
     fn scaffold_failure_preserves_os_category_without_rendering_sources() {
         for (kind, code) in [
             (

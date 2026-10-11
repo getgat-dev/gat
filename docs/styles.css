@@ -3,6 +3,20 @@
   margin: auto !important;
 }
 
+/* Keep the homepage title available to assistive technology and in metadata,
+   without displaying it in the mobile navigation bar. */
+body:has(#gat-home) #navbar button.text-left > div:last-child {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 @media (min-width: 1280px) {
   div:has(> #content-area):has(> #content-side-layout) {
     gap: 0 !important;

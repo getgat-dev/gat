@@ -2,6 +2,9 @@ version: 2
 updates:
   - package-ecosystem: "cargo"
     directory: "/"
+    groups:
+      gitoxide:
+        patterns: ["gix", "gix-*"]
     cooldown:
       default-days: 7
     schedule:
@@ -20,6 +23,9 @@ updates:
 
   - package-ecosystem: "github-actions"
     directory: "/"
+    groups:
+      codeql:
+        patterns: ["github/codeql-action/*"]
     cooldown:
       default-days: 7
     schedule:
