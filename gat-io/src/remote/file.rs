@@ -11,13 +11,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 fn sync_directory(path: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    return std::fs::File::open(path)?.sync_all();
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        Ok(())
-    }
+    crate::directory_sync::sync(path).map(|_| ())
 }
 
 fn ensure_directory(path: &Path) -> io::Result<()> {
@@ -1147,6 +1141,65 @@ mod tests {
         assert_eq!(error.source.kind(), io::ErrorKind::PermissionDenied);
         assert!(error.cleanup.is_none());
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn unsupported_directory_sync_still_publishes() {
+        for kind in [io::ErrorKind::InvalidInput, io::ErrorKind::Unsupported] {
+            let root = tempfile::tempdir().unwrap();
+            let mut writer = prepare(root.path(), 3).begin().unwrap();
+            writer.append(b"new").unwrap();
+            writer
+                .finish_with(
+                    || false,
+                    std::fs::File::sync_all,
+                    |_| crate::directory_sync::classify(Err(kind.into())).map(|_| ()),
+                )
+                .unwrap();
+            assert_eq!(std::fs::read(root.path().join("object")).unwrap(), b"new");
+            assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn unsupported_file_sync_is_still_fatal() {
+        for kind in [io::ErrorKind::InvalidInput, io::ErrorKind::Unsupported] {
+            let root = tempfile::tempdir().unwrap();
+            let mut writer = prepare(root.path(), 3).begin().unwrap();
+            writer.append(b"new").unwrap();
+            let error = writer
+                .finish_with(
+                    || false,
+                    |_| Err(kind.into()),
+                    |_| panic!("directory sync must not follow failed file sync"),
+                )
+                .unwrap_err();
+            assert_eq!(error.phase, FileWritePhase::Sync);
+            assert!(!error.is_published());
+            assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_io_error_remains_a_published_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let mut writer = prepare(root.path(), 3).begin().unwrap();
+        writer.append(b"new").unwrap();
+        let error = writer
+            .finish_with(
+                || false,
+                std::fs::File::sync_all,
+                |_| {
+                    crate::directory_sync::classify(Err(io::Error::from_raw_os_error(5)))
+                        .map(|_| ())
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.phase, FileWritePhase::DirectorySync);
+        assert!(error.is_published());
+        assert_eq!(error.source.raw_os_error(), Some(5));
+        assert_eq!(std::fs::read(root.path().join("object")).unwrap(), b"new");
     }
 
     #[test]

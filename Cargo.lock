@@ -1107,6 +1107,7 @@ dependencies = [
  "gix-config",
  "gix-lock",
  "http",
+ "libc",
  "mea",
  "memmap2",
  "opendal",

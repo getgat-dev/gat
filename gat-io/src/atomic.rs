@@ -346,16 +346,7 @@ pub fn persist_finalized_with_proof(
 /// longer exists) -- callers rely on the transaction record plus an intact
 /// backup for recoverability, not on this being infallible.
 pub fn sync_dir(dir: &Path) {
-    #[cfg(unix)]
-    {
-        if let Ok(handle) = std::fs::File::open(dir) {
-            let _ = handle.sync_all();
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = dir;
-    }
+    let _ = crate::directory_sync::sync(dir);
 }
 
 /// How long to wait for another process's advisory lock before giving up.

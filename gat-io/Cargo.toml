@@ -43,6 +43,9 @@ gix = { version = "0.88", default-features = false, features = ["index", "attrib
 gix-config = "0.61"
 gix-lock = "25"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # Standalone gat-io tests need core probes without workspace feature unification.
 gat-core = { path = "../gat-core", features = ["test-support"] }
