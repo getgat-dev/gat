@@ -26,6 +26,8 @@ updates:
     groups:
       codeql:
         patterns: ["github/codeql-action/*"]
+      release-drafter:
+        patterns: ["release-drafter/release-drafter*"]
     cooldown:
       default-days: 7
     schedule:
