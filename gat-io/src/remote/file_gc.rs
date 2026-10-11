@@ -67,7 +67,6 @@ impl FileGc {
 
     /// Prepare bounded owned batches lazily, without touching the filesystem.
     /// Every batch contains at most the internal file-GC work limit.
-    #[must_use]
     pub fn deletion_batches<'a>(
         &'a self,
         oids: &'a [Oid],

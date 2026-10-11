@@ -173,7 +173,6 @@ impl<'a> ValidatedLockFile<'a> {
     }
 
     /// Iterate borrowed semantic rows after complete certification.
-    #[must_use]
     pub fn rows(
         &self,
     ) -> impl ExactSizeIterator<Item = (crate::lexical_path::GatPathRef<'_>, Oid)> + '_ {

@@ -126,7 +126,7 @@ impl PreparedFileRead {
         let remote_error = |source| Self::remote_error(source);
         #[cfg(test)]
         tests::record(|counts| counts.metadata += 1);
-        let metadata = std::fs::symlink_metadata(&self.source).map_err(&remote_error)?;
+        let metadata = std::fs::symlink_metadata(&self.source).map_err(remote_error)?;
         if !metadata.is_file() {
             return Err(remote_error(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -138,10 +138,10 @@ impl PreparedFileRead {
         }
         #[cfg(test)]
         tests::record(|counts| counts.source_opens += 1);
-        let source = std::fs::File::open(&self.source).map_err(&remote_error)?;
+        let source = std::fs::File::open(&self.source).map_err(remote_error)?;
         #[cfg(test)]
         tests::record(|counts| counts.metadata += 1);
-        let metadata = source.metadata().map_err(&remote_error)?;
+        let metadata = source.metadata().map_err(remote_error)?;
         if !metadata.is_file() {
             return Err(remote_error(io::Error::new(
                 io::ErrorKind::InvalidData,

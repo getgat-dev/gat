@@ -88,7 +88,7 @@ param(
         Write-InstallerMessage "Open a new terminal after changing your saved Path."
       }
     }
-    Write-InstallerMessage "`nInstallation guide: https://getgat.dev/installation"
+    Write-InstallerMessage "`nQuickstart: https://getgat.dev/quickstart"
   }
 
   function Resolve-ReleaseRedirect {

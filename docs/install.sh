@@ -69,7 +69,7 @@ show_next_steps() {
         ;;
     esac
   fi
-  printf '\nInstallation guide: https://getgat.dev/installation\n'
+  printf '\nQuickstart: https://getgat.dev/quickstart\n'
 }
 
 need_cmd() {
