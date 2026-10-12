@@ -184,17 +184,6 @@ now relative to that new path.
 - If removal would leave the default pointing to a missing name, change or
   unset the default first.
 
-Management is configuration-only. It does not fetch, synchronize, evict,
-change tracking, or impose permanent access restrictions. `add`, `rm`,
-`mv`, garbage collection, integrity checks, and mount source filters retain
-their own policies.
-
-<Accordion title="Migrate the old selection configuration">
-  The old `selection:` section and `gat config selection.*` keys are removed.
-  Move the complete path and filters into `selections.NAME`, then activate it
-  with `gat selection default NAME`.
-</Accordion>
-
 ## Mount selection
 
 Use the same flags with `gat mount add` and `gat mount update`. Selectors
