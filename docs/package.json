@@ -1,7 +1,7 @@
 {
   "private": true,
   "devDependencies": {
-    "mint": "4.2.985"
+    "mint": "4.2.988"
   },
   "scripts": {
     "login": "mint login",
