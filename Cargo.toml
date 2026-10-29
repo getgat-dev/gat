@@ -50,7 +50,7 @@ unicode-segmentation = "1.12"
 yaml_serde = "0.10"
 # Parses scp-like Git locations for root-owned fail-closed presentation
 # redaction without importing the physical gat-io Git implementation.
-gix-url = "0.39"
+gix-url = "0.40"
 # Parses and safely rewrites standard URI userinfo, queries, and fragments in
 # root-owned diagnostics and command output.
 url = "2.5"
@@ -73,7 +73,7 @@ tempfile = "3.27"
 # Direct dependencies of root tests and characterization cases.
 blake3 = "1.8"
 fs2 = "0.4"
-gix = { version = "0.88", default-features = false, features = ["index", "attributes", "excludes", "dirwalk", "revision", "sha1", "sha256", "blocking-network-client", "blocking-http-transport-reqwest-rust-tls", "worktree-mutation"] }
+gix = { version = "0.89", default-features = false, features = ["index", "attributes", "excludes", "dirwalk", "revision", "sha1", "sha256", "blocking-network-client", "blocking-http-transport-reqwest-rust-tls", "worktree-mutation"] }
 opendal = { version = "0.58", features = ["services-s3", "services-azblob", "services-gcs", "services-oss", "services-fs", "blocking"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde_json = "1.0"
