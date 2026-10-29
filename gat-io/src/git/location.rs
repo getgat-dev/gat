@@ -467,16 +467,13 @@ mod tests {
     fn native_path_conversion_preserves_non_utf8_local_paths() {
         use std::os::unix::ffi::OsStrExt;
 
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp
-            .path()
-            .join(std::ffi::OsStr::from_bytes(b"repository-\xff"));
-        std::fs::create_dir(&path).unwrap();
-        let parsed = gix::url::parse(path.as_os_str().as_bytes()).unwrap();
+        // Unix path conversion preserves bytes even on filesystems that reject
+        // such names, so this conversion test must not create the path on disk.
+        let path = b"repository-\xff";
+        let parsed = gix::url::parse(path).unwrap();
         let location = location_from_url(parsed).unwrap();
         assert_eq!(location.kind(), GitLocationKind::LocalPath);
-        let prepared = prepare_worktree(&location, &AtomicBool::new(false)).unwrap();
-        assert_eq!(prepared.root(), std::fs::canonicalize(&path).unwrap());
+        assert_eq!(location.path.as_os_str().as_bytes(), path);
     }
 
     fn parse(raw: &str) -> Result<GitLocation, GitLocationError> {
