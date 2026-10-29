@@ -321,7 +321,9 @@ fn resolve_selection<'repo>(
         traversal: selection.traversal,
         time: selection.time,
         parents: selection.parents,
-        shallow: repo.is_shallow(),
+        shallow: repo
+            .is_shallow()
+            .map_err(|source| traversal("checking shallow repository state", source))?,
     })
 }
 
@@ -603,7 +605,7 @@ pub fn parse_cli_date(input: &str) -> Result<GitTimestamp, GitHistoryError> {
         .map_err(|source| {
             GitHistoryError(HistoryFailure::InvalidDate {
                 input: input.to_owned(),
-                source: Box::new(source.into_error()),
+                source: Box::new(source),
             })
         })
 }
@@ -611,6 +613,19 @@ pub fn parse_cli_date(input: &str) -> Result<GitTimestamp, GitHistoryError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_cli_date_retains_the_gix_error_source() {
+        let error = parse_cli_date("not-a-date").unwrap_err();
+        assert_eq!(error.kind(), GitHistoryErrorKind::InvalidDate);
+        assert_eq!(error.subject(), "not-a-date");
+        assert!(
+            std::error::Error::source(&error)
+                .unwrap()
+                .downcast_ref::<gix::Error>()
+                .is_some()
+        );
+    }
 
     fn git(root: &Path, args: &[&str]) -> String {
         let output = test_support_git::GitCommand::new(root, args).run();
@@ -657,6 +672,7 @@ mod tests {
         expected.sort();
         assert_eq!(actual, expected);
         assert_eq!(stats.visited, 2);
+        assert!(!stats.shallow);
     }
 
     #[test]
@@ -1895,13 +1911,46 @@ mod ownership_tests {
             &["clone", "--depth", "1", &source_url, "."],
         );
         let shallow_repo = open_repo(shallow_dir.path());
-        assert!(shallow_repo.is_shallow());
+        assert!(shallow_repo.is_shallow().unwrap());
 
         let selection = HistorySelection::conservative_default();
         let resolved = resolve_selection(&shallow_repo, &selection).unwrap();
         assert!(resolved.shallow);
         let (_ids, stats) = visit_all(&resolved);
         assert!(stats.shallow);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unrepresentable_shallow_path_is_a_traversal_failure() {
+        use std::io::Write;
+
+        let tmp = test_repo();
+        let mut config = std::fs::OpenOptions::new()
+            .append(true)
+            .open(tmp.path().join(".git/config"))
+            .unwrap();
+        config
+            .write_all(b"\n[gitoxide \"core\"]\nshallowFile = invalid-\xff\n")
+            .unwrap();
+        drop(config);
+        let repo = open_repo(tmp.path());
+        let selection = HistorySelection {
+            roots: Vec::new(),
+            ..Default::default()
+        };
+        let error = match resolve_selection(&repo, &selection) {
+            Ok(_) => panic!("invalid native path must fail before traversal"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), GitHistoryErrorKind::Traversal);
+        assert_eq!(error.subject(), "checking shallow repository state");
+        assert!(
+            std::error::Error::source(&error)
+                .unwrap()
+                .downcast_ref::<gix::Error>()
+                .is_some()
+        );
     }
 
     fn head_only() -> HistorySelection {

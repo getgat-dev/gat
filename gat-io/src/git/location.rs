@@ -38,6 +38,7 @@ pub enum GitLocationError {
 #[derive(Clone)]
 pub struct GitLocation {
     parsed: gix::Url,
+    path: PathBuf,
 }
 
 impl std::fmt::Debug for GitLocation {
@@ -63,8 +64,7 @@ impl GitLocation {
 
     /// Infers Gat's default mount-target basename.
     pub fn repository_name(&self) -> Result<PathBuf, GitLocationError> {
-        let decoded = gix::path::from_bstr(&self.parsed.path);
-        repo_basename(&decoded)
+        repo_basename(&self.path)
             .map(PathBuf::from)
             .ok_or(GitLocationError::NoRepositoryName)
     }
@@ -76,7 +76,16 @@ impl GitLocation {
 /// error because either may contain credentials.
 pub fn parse_location(spec: &GitLocationSpec) -> Result<GitLocation, GitLocationError> {
     let parsed = gix::url::parse(spec.as_location_str()).map_err(|_| GitLocationError::Invalid)?;
-    Ok(GitLocation { parsed })
+    location_from_url(parsed)
+}
+
+// Validate native path encoding at the parsing boundary, where invalid locations
+// are redacted. Later operations can use the owned path without another conversion.
+fn location_from_url(parsed: gix::Url) -> Result<GitLocation, GitLocationError> {
+    let path = gix::path::from_bstr(&parsed.path)
+        .map_err(|_| GitLocationError::Invalid)?
+        .into_owned();
+    Ok(GitLocation { parsed, path })
 }
 
 /// Semantic stage at which repository cloning failed.
@@ -278,10 +287,10 @@ pub fn prepare_worktree(
     location: &GitLocation,
     interrupt: &AtomicBool,
 ) -> Result<PreparedGitWorktree, PrepareGitWorktreeError> {
-    let source_path = gix::path::from_bstr(&location.parsed.path);
-    check_interrupt(interrupt, &source_path)?;
+    let source_path = &location.path;
+    check_interrupt(interrupt, source_path)?;
     if location.kind() == GitLocationKind::LocalPath {
-        let local = source_path.as_ref();
+        let local = source_path.as_path();
         let root = std::fs::canonicalize(local).map_err(|source| {
             if source.kind() == std::io::ErrorKind::NotFound {
                 PrepareGitWorktreeError::LocalSourceMissing {
@@ -442,6 +451,33 @@ fn repo_basename(path: &Path) -> Option<std::ffi::OsString> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn invalid_native_path_encoding_is_rejected_without_leaking_url_data() {
+        let mut parsed = gix::url::parse("https://example.invalid/repository").unwrap();
+        parsed.path = b"/SENTINEL-\xff".as_slice().into();
+        let error = location_from_url(parsed).unwrap_err();
+        assert_eq!(error, GitLocationError::Invalid);
+        assert!(!error.to_string().contains("SENTINEL"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_path_conversion_preserves_non_utf8_local_paths() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"repository-\xff"));
+        std::fs::create_dir(&path).unwrap();
+        let parsed = gix::url::parse(path.as_os_str().as_bytes()).unwrap();
+        let location = location_from_url(parsed).unwrap();
+        assert_eq!(location.kind(), GitLocationKind::LocalPath);
+        let prepared = prepare_worktree(&location, &AtomicBool::new(false)).unwrap();
+        assert_eq!(prepared.root(), std::fs::canonicalize(&path).unwrap());
+    }
 
     fn parse(raw: &str) -> Result<GitLocation, GitLocationError> {
         parse_location(&GitLocationSpec::from(raw))
