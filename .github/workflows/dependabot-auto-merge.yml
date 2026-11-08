@@ -4,8 +4,7 @@ on:
   pull_request_target:
     types: [opened, reopened, synchronize, ready_for_review]
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   auto-merge:
@@ -14,17 +13,30 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       !github.event.pull_request.draft
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
     steps:
       # Never check out PR code in this privileged workflow.
+      # GITHUB_TOKEN can enable auto-merge but cannot add a PR to a merge queue.
+      # See CONTRIBUTING.md for the GitHub App installation and secret setup.
+      - name: Create merge queue token
+        id: merge-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.DEPENDABOT_MERGE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.DEPENDABOT_MERGE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-merge-queues: write
+          # Dependabot also updates files under .github/workflows.
+          permission-workflows: write
+
       # The main branch requires a merge queue configured to squash. GitHub
       # queues the PR once required checks and approvals pass, then tests it
       # against the latest main before merging.
       - name: Enable automatic merge queue entry
         run: gh pr merge --auto --match-head-commit "$PR_HEAD" "$PR_URL"
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.merge-token.outputs.token }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}

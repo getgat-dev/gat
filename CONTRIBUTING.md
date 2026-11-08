@@ -55,6 +55,41 @@ Workflows that provide required checks must handle both `pull_request` and
 `merge_group` (`checks_requested`) events. Keep their check names consistent
 with the required checks in the `main` ruleset.
 
+### Dependabot merge automation setup
+
+The [Dependabot auto-merge workflow](.github/workflows/dependabot-auto-merge.yml)
+uses a GitHub App installation token to enter the merge queue. GitHub's built-in
+`GITHUB_TOKEN` can enable auto-merge but
+[cannot add pull requests to a merge queue](https://docs.github.com/en/code-security/tutorials/secure-your-dependencies/automate-dependabot-with-actions#enabling-automerge-on-a-pull-request).
+
+Before enabling this automation, configure the repository:
+
+1. Register a GitHub App with **Contents: Read and write**, **Pull requests:
+   Read and write**, **Merge queues: Read and write**, and **Workflows: Read and
+   write** repository permissions.
+   Workflows permission allows Dependabot updates to `.github/workflows` files.
+   Install it on `getgat-dev/gat`; no organization permissions or ruleset bypass
+   are needed.
+2. Set the Actions repository variable `DEPENDABOT_MERGE_APP_CLIENT_ID` to the
+   App's **Client ID**.
+3. Generate an App private key and save its complete PEM contents as
+   `DEPENDABOT_MERGE_APP_PRIVATE_KEY` in both the repository's **Dependabot
+   secrets** and **Actions secrets**. Using the same name supports events
+   initiated by Dependabot and by maintainers. See GitHub's
+   [Dependabot secret guidance](https://docs.github.com/en/code-security/reference/supply-chain-security/troubleshoot-dependabot/dependabot-on-actions#accessing-secrets).
+
+The workflow scopes each token to this repository and explicitly requests its
+permissions. The token is revoked when the job finishes. Missing credentials
+fail the token-creation step; the workflow does not fall back to `GITHUB_TOKEN`.
+It handles only non-draft Dependabot PRs from this repository, never checks out
+PR code, and matches the PR head commit when requesting auto-merge. Required
+checks and the merge queue continue to control when the PR merges.
+
+Deploying this workflow does not retrigger existing PRs. After setup, a maintainer
+can add an existing PR to the queue with `gh pr merge --auto`, authenticated as
+an account with merge permission. New Dependabot PRs and the workflow's existing
+reopen, synchronization, and ready-for-review events use the App token.
+
 ## Generated documentation
 
 Do not edit `docs/commands/*.mdx` or
