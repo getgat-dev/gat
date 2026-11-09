@@ -30,7 +30,7 @@ serde_json = "1"
 yaml_serde = "0.10"
 rayon = "1"
 blake3 = { version = "1", features = ["mmap", "rayon"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 memmap2 = "0.9"
 reflink-copy = "0.1"
 mea = "0.6"
