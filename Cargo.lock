@@ -3313,9 +3313,9 @@ dependencies = [
 
 [[package]]
 name = "reflink-copy"
-version = "0.1.30"
+version = "0.1.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9dd7ab4af0363d5ccfd2838d782a28196cf32a5cc2e4fe3c5dc83f2be588b8b"
+checksum = "3dd31f458a66eeda05a9e837fc5f0effbaacbe8565868ecae5b37bf0544c19f5"
 dependencies = [
  "cfg-if",
  "libc",
