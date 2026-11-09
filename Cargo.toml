@@ -75,7 +75,7 @@ blake3 = "1.8"
 fs2 = "0.4"
 gix = { version = "0.88", default-features = false, features = ["index", "attributes", "excludes", "dirwalk", "revision", "sha1", "sha256", "blocking-network-client", "blocking-http-transport-reqwest-rust-tls", "worktree-mutation"] }
 opendal = { version = "0.58", features = ["services-s3", "services-azblob", "services-gcs", "services-oss", "services-fs", "blocking"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 serde_json = "1.0"
 
 # Only used in `src/output/progress.rs`'s tests, to measure terminal
