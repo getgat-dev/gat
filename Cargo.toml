@@ -87,7 +87,7 @@ console = "0.16"
 # terminal (not indicatif's own fixed-width `InMemoryTerm`, so no
 # extra indicatif feature is needed beyond the main dependency above)
 # to actually resize a real VT100 terminal emulator mid-test.
-vt100 = "0.16"
+vt100 = "0.18"
 
 [lints]
 workspace = true

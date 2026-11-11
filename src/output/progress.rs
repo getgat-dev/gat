@@ -361,6 +361,7 @@ fn stderr_is_tty() -> bool {
 
 #[cfg(test)]
 pub(crate) mod test_support {
+    use std::num::NonZeroU16;
     use std::sync::Arc;
     use std::sync::Mutex;
 
@@ -394,8 +395,13 @@ pub(crate) mod test_support {
 
     impl FakeTerminal {
         pub(crate) fn new(width: u16) -> Self {
+            let width = NonZeroU16::new(width).expect("terminal width must be nonzero");
             Self {
-                parser: Arc::new(Mutex::new(vt100::Parser::new(1000, width, 0))),
+                parser: Arc::new(Mutex::new(vt100::Parser::new(
+                    NonZeroU16::new(1000).unwrap(),
+                    width,
+                    0,
+                ))),
             }
         }
 
@@ -405,6 +411,7 @@ pub(crate) mod test_support {
         /// terminal emulator faces on `SIGWINCH`, which is what this
         /// module's resize smoke tests need to exercise.
         pub(crate) fn resize(&self, width: u16) {
+            let width = NonZeroU16::new(width).expect("terminal width must be nonzero");
             let mut parser = self.parser.lock().unwrap();
             let rows = parser.screen().size().0;
             parser.screen_mut().set_size(rows, width);
@@ -417,7 +424,7 @@ pub(crate) mod test_support {
             let (_rows, cols) = parser.screen().size();
             parser
                 .screen()
-                .rows(0, cols)
+                .rows(0, cols.get())
                 .map(|line| line.trim_end().to_string())
                 .collect()
         }
@@ -443,11 +450,11 @@ pub(crate) mod test_support {
 
     impl indicatif::TermLike for FakeTerminal {
         fn width(&self) -> u16 {
-            self.parser.lock().unwrap().screen().size().1
+            self.parser.lock().unwrap().screen().size().1.get()
         }
 
         fn height(&self) -> u16 {
-            self.parser.lock().unwrap().screen().size().0
+            self.parser.lock().unwrap().screen().size().0.get()
         }
 
         fn move_cursor_up(&self, n: usize) -> std::io::Result<()> {
@@ -532,6 +539,68 @@ mod tests {
     use super::test_support::FakeTerminal;
     use super::*;
     use indicatif::ProgressDrawTarget;
+
+    #[test]
+    fn fake_terminal_resize_preserves_contents_and_cursor() {
+        use indicatif::TermLike;
+
+        let term = FakeTerminal::new(12);
+        term.write_line("alpha").unwrap();
+        term.write_str("bravo").unwrap();
+        term.move_cursor_left(2).unwrap();
+
+        term.resize(8);
+        assert_eq!(term.width(), 8);
+        assert_eq!(term.height(), 1000);
+        assert_eq!(term.screen_lines().len(), 1000);
+        assert_eq!(term.lines(), ["alpha", "bravo"]);
+        term.write_str("X").unwrap();
+        assert_eq!(term.lines(), ["alpha", "braXo"]);
+
+        term.resize(12);
+        assert_eq!(term.width(), 12);
+        assert_eq!(term.height(), 1000);
+        assert_eq!(term.lines(), ["alpha", "braXo"]);
+        term.write_str("Y").unwrap();
+        assert_eq!(term.lines(), ["alpha", "braXY"]);
+    }
+
+    #[test]
+    fn fake_terminal_supports_single_column_resizes() {
+        use indicatif::TermLike;
+
+        let term = FakeTerminal::new(1);
+        term.write_str("x").unwrap();
+        for width in [8, 1, 8] {
+            term.resize(width);
+            assert_eq!(term.width(), width);
+            assert_eq!(term.height(), 1000);
+            assert_eq!(term.lines(), ["x"]);
+        }
+    }
+
+    #[test]
+    fn fake_terminal_shrink_clamps_cursor_to_last_column() {
+        use indicatif::TermLike;
+
+        let term = FakeTerminal::new(12);
+        term.write_str("abcdefghij").unwrap();
+        term.resize(8);
+        term.write_str("!").unwrap();
+        assert_eq!(term.lines(), ["abcdefg!"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "terminal width must be nonzero")]
+    fn fake_terminal_rejects_zero_initial_width() {
+        let _ = FakeTerminal::new(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "terminal width must be nonzero")]
+    fn fake_terminal_rejects_zero_resize_width() {
+        FakeTerminal::new(8).resize(0);
+    }
 
     #[test]
     fn activity_line_escapes_control_characters_instead_of_collapsing_them() {
